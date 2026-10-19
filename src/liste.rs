@@ -37,13 +37,21 @@ pub struct ListeDeLecture {
 }
 
 impl ListeDeLecture {
-    /// Ajoute des fichiers à la fin de la liste. Renvoie le numéro du premier
-    /// ajouté (pour pouvoir le lancer), ou rien si la liste n'a pas grandi.
+    /// Ajoute des fichiers à la fin de la liste. Renvoie le numéro du morceau
+    /// à lancer si rien ne joue : le premier ajouté, ou en lecture aléatoire
+    /// l'un des ajoutés au hasard. Rien si la liste n'a pas grandi.
     pub fn ajouter(&mut self, fichiers: Vec<PathBuf>) -> Option<usize> {
         let premier = self.morceaux.len();
         self.morceaux.extend(fichiers);
         self.deja_joue.resize(self.morceaux.len(), false);
-        (self.morceaux.len() > premier).then_some(premier)
+        let ajoutes = self.morceaux.len() - premier;
+        if ajoutes == 0 {
+            None
+        } else if self.aleatoire {
+            Some(premier + hasard(ajoutes))
+        } else {
+            Some(premier)
+        }
     }
 
     /// Ajoute tous les MP3 d'un dossier et de ses sous-dossiers, triés par nom.
@@ -284,6 +292,17 @@ mod tests {
         let tirages: std::collections::HashSet<_> = (0..200).map(|_| hasard(10)).collect();
         assert!(tirages.len() > 5);
         assert!(tirages.iter().all(|&t| t < 10));
+    }
+
+    #[test]
+    fn aleatoire_ajout_lance_un_morceau_au_hasard() {
+        let mut l = liste(2);
+        l.changer_aleatoire(true);
+        let tirages: std::collections::HashSet<_> = (0..50)
+            .map(|_| l.ajouter((0..10).map(|i| PathBuf::from(format!("{i}.mp3"))).collect()))
+            .map(|n| n.unwrap() % 10)
+            .collect();
+        assert!(tirages.len() > 3);
     }
 
     #[test]

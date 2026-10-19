@@ -87,8 +87,8 @@ impl LecteurApp {
         else {
             return; // l'utilisateur a annulé
         };
-        let premier = self.liste.ajouter(fichiers);
-        self.jouer_si_rien_en_cours(premier);
+        let a_lancer = self.liste.ajouter(fichiers);
+        self.jouer_si_rien_en_cours(a_lancer);
     }
 
     /// Ouvre la fenêtre Windows de choix de dossier et ajoute tous ses MP3.
@@ -97,14 +97,15 @@ impl LecteurApp {
             return; // l'utilisateur a annulé
         };
         match self.liste.ajouter_dossier(&dossier) {
-            Some(premier) => self.jouer_si_rien_en_cours(Some(premier)),
+            Some(a_lancer) => self.jouer_si_rien_en_cours(Some(a_lancer)),
             None => self.message = "Aucun fichier MP3 dans ce dossier.".to_string(),
         }
     }
 
-    /// Après un ajout : si rien ne joue, on lance le premier morceau ajouté.
-    fn jouer_si_rien_en_cours(&mut self, premier: Option<usize>) {
-        if let Some(n) = premier {
+    /// Après un ajout : si rien ne joue, on lance le morceau choisi par la
+    /// liste (le premier ajouté, ou l'un d'eux au hasard en lecture aléatoire).
+    fn jouer_si_rien_en_cours(&mut self, a_lancer: Option<usize>) {
+        if let Some(n) = a_lancer {
             if self.platine_active().is_none() {
                 self.jouer(n);
             }
