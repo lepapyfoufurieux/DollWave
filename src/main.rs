@@ -396,8 +396,14 @@ impl eframe::App for LecteurApp {
             match self.liste.afficher(ui) {
                 Some(Action::Jouer(n)) => self.jouer(n),
                 Some(Action::Retirer(n)) => {
+                    // Si c'était le morceau en cours, on joue celui qui a pris sa
+                    // place (le suivant). Au bout de la liste, on s'arrête.
                     if self.liste.retirer(n) {
-                        self.oublier_morceau();
+                        if self.liste.fichier(n).is_some() {
+                            self.jouer(n);
+                        } else {
+                            self.oublier_morceau();
+                        }
                     }
                 }
                 None => {}
