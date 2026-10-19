@@ -178,9 +178,11 @@ impl LecteurApp {
             ui.horizontal(|ui| {
                 // Le curseur prend toute la largeur, moins la place du texte des temps.
                 ui.spacing_mut().slider_width = (ui.available_width() - 90.0).max(50.0);
-                let reponse = ui.add(
-                    egui::Slider::new(&mut secondes, 0.0..=duree.as_secs_f32()).show_value(false),
-                );
+                // Sans morceau, la plage serait vide (0 à 0) et egui placerait le
+                // curseur au milieu : on garde au moins 1 seconde pour qu'il soit à gauche.
+                let fin = duree.as_secs_f32().max(1.0);
+                let reponse =
+                    ui.add(egui::Slider::new(&mut secondes, 0.0..=fin).show_value(false));
 
                 if reponse.dragged() {
                     // On glisse encore : on retient seulement la position.
