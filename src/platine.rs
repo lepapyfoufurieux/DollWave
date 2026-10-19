@@ -45,6 +45,23 @@ impl Morceau {
         })
     }
 
+    /// Un son pur (sinusoïde) mono au volume maximum, pour les tests.
+    #[cfg(test)]
+    pub fn sinus(hz: f32, frequence: u32, secondes: f32) -> Self {
+        let n = (frequence as f32 * secondes) as usize;
+        let echantillons = (0..n)
+            .map(|i| {
+                let t = i as f32 / frequence as f32;
+                ((std::f32::consts::TAU * hz * t).sin() * 32767.0) as i16
+            })
+            .collect();
+        Self {
+            echantillons,
+            canaux: 1,
+            frequence,
+        }
+    }
+
     /// Nombre de « trames » : une trame = un échantillon pour chaque canal.
     fn nb_trames(&self) -> usize {
         self.echantillons.len() / self.canaux
@@ -64,6 +81,40 @@ impl Morceau {
 
     fn derniere_trame(&self) -> f64 {
         (self.nb_trames() - 1) as f64
+    }
+
+    /// Nombre d'échantillons par seconde (par exemple 44 100).
+    pub fn frequence(&self) -> u32 {
+        self.frequence
+    }
+
+    /// `n` échantillons à partir de `secondes`, entre -1 et 1. Les canaux sont
+    /// mélangés en un seul (mono). Après la fin du morceau : du silence.
+    pub fn extrait_mono(&self, secondes: f32, n: usize) -> Vec<f32> {
+        let debut = self.trames(secondes) as usize;
+        let c = self.canaux;
+        (debut..debut + n)
+            .map(|t| match self.echantillons.get(t * c..(t + 1) * c) {
+                Some(trame) => trame.iter().map(|&e| e as f32).sum::<f32>() / (c as f32 * 32768.0),
+                None => 0.0,
+            })
+            .collect()
+    }
+
+    /// Un résumé de tout le morceau, découpé en `par_seconde` tranches par
+    /// seconde : pour chaque tranche, l'échantillon le plus bas et le plus haut
+    /// (entre -1 et 1).
+    pub fn apercu(&self, par_seconde: u32) -> Vec<(f32, f32)> {
+        let par_tranche = (self.frequence / par_seconde).max(1) as usize * self.canaux;
+        self.echantillons
+            .chunks(par_tranche)
+            .map(|tranche| {
+                let (bas, haut) = tranche
+                    .iter()
+                    .fold((0i16, 0i16), |(b, h), &e| (b.min(e), h.max(e)));
+                (bas as f32 / 32768.0, haut as f32 / 32768.0)
+            })
+            .collect()
     }
 }
 
@@ -261,6 +312,30 @@ mod tests {
         platine.next();
         let ecart = telecommande.position().abs_diff(avant);
         assert!(ecart < Duration::from_micros(100), "écart {ecart:?}");
+    }
+
+    #[test]
+    fn extrait_mono_melange_les_canaux_et_finit_par_du_silence() {
+        // Stéréo : gauche = 16384 (0,5), droite = 0, sur 3 trames.
+        let morceau = Morceau {
+            echantillons: vec![16384, 0, 16384, 0, 16384, 0],
+            canaux: 2,
+            frequence: 1000,
+        };
+        assert_eq!(
+            morceau.extrait_mono(0.0, 5),
+            vec![0.25, 0.25, 0.25, 0.0, 0.0]
+        );
+    }
+
+    #[test]
+    fn l_apercu_garde_le_plus_bas_et_le_plus_haut() {
+        let morceau = Morceau {
+            echantillons: vec![-16384, 8192, 0, 16384],
+            canaux: 1,
+            frequence: 1000,
+        };
+        assert_eq!(morceau.apercu(500), vec![(-0.5, 0.25), (0.0, 0.5)]);
     }
 
     #[test]

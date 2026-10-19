@@ -10,6 +10,8 @@ eframe = "0.29"
 rodio = "0.19"
 # Fenêtre native Windows « Ouvrir un fichier »
 rfd = "0.15"
+# Découpe le son en fréquences (graves → aigus) pour le visualiseur en barres
+rustfft = "6.4"
 
 # Les bibliothèques (décodage MP3 notamment) sont optimisées même en mode
 # développement : sinon décoder un morceau entier avec `cargo run` prendrait
