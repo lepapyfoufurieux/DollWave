@@ -1,0 +1,12 @@
+[package]
+name = "lecteur_mp3"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# Interface graphique (fenêtre, boutons)
+eframe = "0.29"
+# Lecture audio (décodage MP3 + sortie son)
+rodio = "0.19"
+# Fenêtre native Windows « Ouvrir un fichier »
+rfd = "0.15"
