@@ -1,6 +1,8 @@
 //! La liste de lecture : les morceaux à jouer les uns après les autres,
 //! et lequel est en cours.
 
+use std::collections::hash_map::RandomState;
+use std::hash::BuildHasher;
 use std::path::{Path, PathBuf};
 
 use eframe::egui;
@@ -21,6 +23,14 @@ pub struct ListeDeLecture {
     morceaux: Vec<PathBuf>,
     /// Le numéro du morceau en cours dans la liste, s'il y en a un.
     courant: Option<usize>,
+    /// Lecture aléatoire activée ?
+    aleatoire: bool,
+    /// En lecture aléatoire : pour chaque morceau, a-t-il déjà été joué ?
+    /// Chaque morceau passe une fois avant que la lecture s'arrête.
+    deja_joue: Vec<bool>,
+    /// En lecture aléatoire : les morceaux joués, dans l'ordre, pour que
+    /// « précédent » revienne vraiment au morceau d'avant.
+    historique: Vec<usize>,
 }
 
 impl ListeDeLecture {
@@ -29,6 +39,7 @@ impl ListeDeLecture {
     pub fn ajouter(&mut self, fichiers: Vec<PathBuf>) -> Option<usize> {
         let premier = self.morceaux.len();
         self.morceaux.extend(fichiers);
+        self.deja_joue.resize(self.morceaux.len(), false);
         (self.morceaux.len() > premier).then_some(premier)
     }
 
@@ -47,6 +58,14 @@ impl ListeDeLecture {
             return false;
         }
         self.morceaux.remove(n);
+        self.deja_joue.remove(n);
+        // Dans l'historique, on oublie ce morceau et on décale les suivants.
+        self.historique.retain(|&h| h != n);
+        for h in &mut self.historique {
+            if *h > n {
+                *h -= 1;
+            }
+        }
         match self.courant {
             Some(c) if c == n => {
                 self.courant = None;
@@ -62,7 +81,25 @@ impl ListeDeLecture {
 
     pub fn vider(&mut self) {
         self.morceaux.clear();
+        self.deja_joue.clear();
+        self.historique.clear();
         self.courant = None;
+    }
+
+    pub fn aleatoire(&self) -> bool {
+        self.aleatoire
+    }
+
+    /// Active ou désactive la lecture aléatoire. En l'activant, on repart
+    /// pour un nouveau tour : seul le morceau en cours compte comme déjà joué.
+    pub fn changer_aleatoire(&mut self, actif: bool) {
+        self.aleatoire = actif;
+        self.deja_joue.fill(false);
+        self.historique.clear();
+        if let Some(c) = self.courant {
+            self.deja_joue[c] = true;
+            self.historique.push(c);
+        }
     }
 
     pub fn est_vide(&self) -> bool {
@@ -80,19 +117,42 @@ impl ListeDeLecture {
 
     pub fn choisir(&mut self, n: usize) {
         self.courant = Some(n);
+        if let Some(joue) = self.deja_joue.get_mut(n) {
+            *joue = true;
+        }
+        if self.historique.last() != Some(&n) {
+            self.historique.push(n);
+        }
     }
 
-    /// Le numéro du morceau suivant, ou rien si on est au bout de la liste.
+    /// Le numéro du morceau suivant, ou rien si on est au bout de la liste
+    /// (en aléatoire : quand tous les morceaux ont été joués).
     pub fn suivant(&self) -> Option<usize> {
+        if self.aleatoire {
+            let restants: Vec<usize> = (0..self.morceaux.len())
+                .filter(|&i| !self.deja_joue[i])
+                .collect();
+            if restants.is_empty() {
+                return None;
+            }
+            return Some(restants[hasard(restants.len())]);
+        }
         let n = self.courant.map_or(0, |c| c + 1);
         (n < self.morceaux.len()).then_some(n)
     }
 
     /// Le numéro du morceau précédent. Au début de la liste, on reste sur le
-    /// premier (il sera relancé depuis le début).
-    pub fn precedent(&self) -> Option<usize> {
+    /// premier (il sera relancé depuis le début). En aléatoire, on revient au
+    /// morceau joué juste avant.
+    pub fn precedent(&mut self) -> Option<usize> {
         if self.morceaux.is_empty() {
             return None;
+        }
+        if self.aleatoire {
+            if self.historique.len() >= 2 {
+                self.historique.pop(); // on quitte le morceau en cours
+            }
+            return self.historique.last().copied().or(self.courant).or(Some(0));
         }
         Some(self.courant.map_or(0, |c| c.saturating_sub(1)))
     }
@@ -120,6 +180,13 @@ impl ListeDeLecture {
             });
         action
     }
+}
+
+/// Un nombre au hasard entre 0 et n - 1 (n doit être au moins 1).
+/// La bibliothèque standard de Rust mélange ses clés de hachage au hasard :
+/// on s'en sert comme d'un dé, sans ajouter de bibliothèque.
+fn hasard(n: usize) -> usize {
+    (RandomState::new().hash_one(0u8) % n as u64) as usize
 }
 
 /// Le nom d'un fichier sans son dossier, par exemple « chanson.mp3 ».
@@ -174,6 +241,42 @@ mod tests {
     }
 
     #[test]
+    fn aleatoire_joue_chaque_morceau_une_fois() {
+        let mut l = liste(5);
+        l.choisir(2);
+        l.changer_aleatoire(true);
+        let mut joues = vec![2];
+        while let Some(n) = l.suivant() {
+            assert!(!joues.contains(&n), "{n} joué deux fois");
+            l.choisir(n);
+            joues.push(n);
+        }
+        joues.sort();
+        assert_eq!(joues, [0, 1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn aleatoire_precedent_revient_en_arriere() {
+        let mut l = liste(5);
+        l.changer_aleatoire(true);
+        let a = l.suivant().unwrap();
+        l.choisir(a);
+        let b = l.suivant().unwrap();
+        l.choisir(b);
+        assert_eq!(l.precedent(), Some(a));
+        l.choisir(a);
+        // Au premier morceau de l'historique, on le relance.
+        assert_eq!(l.precedent(), Some(a));
+    }
+
+    #[test]
+    fn hasard_donne_des_valeurs_variees() {
+        let tirages: std::collections::HashSet<_> = (0..200).map(|_| hasard(10)).collect();
+        assert!(tirages.len() > 5);
+        assert!(tirages.iter().all(|&t| t < 10));
+    }
+
+    #[test]
     fn retirer_decale_le_morceau_en_cours() {
         let mut l = liste(4);
         l.choisir(2);
@@ -202,7 +305,9 @@ mod tests {
         }
         let mut l = ListeDeLecture::default();
         l.ajouter_dossier(&racine);
-        let noms: Vec<_> = (0..3).map(|i| nom_du_fichier(l.fichier(i).unwrap())).collect();
+        let noms: Vec<_> = (0..3)
+            .map(|i| nom_du_fichier(l.fichier(i).unwrap()))
+            .collect();
         assert_eq!(noms, ["a.MP3", "d.mp3", "c.mp3"]);
         assert!(l.fichier(3).is_none());
         std::fs::remove_dir_all(&racine).unwrap();

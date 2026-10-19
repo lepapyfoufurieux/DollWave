@@ -379,6 +379,17 @@ impl eframe::App for LecteurApp {
                     if ui.button("⏭").on_hover_text("Morceau suivant").clicked() {
                         self.suivant();
                     }
+                    let aleatoire = self.liste.aleatoire();
+                    let bouton = ui
+                        .selectable_label(aleatoire, "🔀")
+                        .on_hover_text(if aleatoire {
+                            "Lecture aléatoire : activée"
+                        } else {
+                            "Lecture aléatoire : désactivée"
+                        });
+                    if bouton.clicked() {
+                        self.liste.changer_aleatoire(!aleatoire);
+                    }
                 });
             });
 

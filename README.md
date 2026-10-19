@@ -24,4 +24,4 @@ cargo run --release
 - [x] Étape 1 : ouvrir et lire un MP3 (Lecture / Pause / Stop)
 - [x] Étape 2 : réglage du volume
 - [x] Étape 3 : barre de progression
-- [x] Étape 4 : liste de lecture (ajout de fichiers ou d'un dossier, précédent / suivant)
+- [x] Étape 4 : liste de lecture (ajout de fichiers ou d'un dossier, précédent / suivant, lecture aléatoire)
