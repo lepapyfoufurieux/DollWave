@@ -71,7 +71,7 @@ impl LecteurApp {
             liste: ListeDeLecture::default(),
             morceau: None,
             position_glissee: None,
-            volume: 0.8,
+            volume: 0.5,
             muet: false,
             visualiseur: Visualiseur::new(),
             message,
