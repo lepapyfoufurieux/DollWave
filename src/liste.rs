@@ -31,6 +31,9 @@ pub struct ListeDeLecture {
     /// En lecture aléatoire : les morceaux joués, dans l'ordre, pour que
     /// « précédent » revienne vraiment au morceau d'avant.
     historique: Vec<usize>,
+    /// Le morceau en cours lors du dernier affichage. S'il a changé depuis,
+    /// on fait défiler la liste jusqu'au nouveau.
+    courant_affiche: Option<usize>,
 }
 
 impl ListeDeLecture {
@@ -158,8 +161,12 @@ impl ListeDeLecture {
     }
 
     /// Dessine la liste. Renvoie ce que l'utilisateur a demandé, s'il a cliqué.
-    pub fn afficher(&self, ui: &mut egui::Ui) -> Option<Action> {
+    pub fn afficher(&mut self, ui: &mut egui::Ui) -> Option<Action> {
         let mut action = None;
+        // On ne défile que quand le morceau change : entre-temps, on peut
+        // faire défiler la liste à la main sans qu'elle revienne toute seule.
+        let defiler = self.courant != self.courant_affiche;
+        self.courant_affiche = self.courant;
         egui::ScrollArea::vertical()
             .max_height(HAUTEUR_MAX)
             .auto_shrink([false, true])
@@ -172,6 +179,9 @@ impl ListeDeLecture {
                         let en_cours = self.courant == Some(n);
                         let texte = format!("{}. {}", n + 1, nom_du_fichier(fichier));
                         let ligne = ui.selectable_label(en_cours, texte);
+                        if en_cours && defiler {
+                            ligne.scroll_to_me(None);
+                        }
                         if ligne.double_clicked() {
                             action = Some(Action::Jouer(n));
                         }
