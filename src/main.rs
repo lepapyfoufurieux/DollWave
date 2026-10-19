@@ -1,22 +1,24 @@
 // En version finale (release), on cache la fenêtre de console noire sous Windows.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod liste;
 mod platine;
 mod visualiseur;
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
 use eframe::egui;
 use rodio::{OutputStream, OutputStreamHandle, Sink};
 
+use liste::{Action, ListeDeLecture};
 use platine::{Morceau, Telecommande};
 use visualiseur::Visualiseur;
 
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_inner_size([520.0, 480.0]),
+        viewport: egui::ViewportBuilder::default().with_inner_size([520.0, 680.0]),
         ..Default::default()
     };
     eframe::run_native(
@@ -37,8 +39,9 @@ struct LecteurApp {
     sink: Option<Sink>,
     // La télécommande de la platine en cours (pause, position, scratch).
     telecommande: Option<Telecommande>,
-    // Le fichier actuellement chargé, et son son décodé en mémoire.
-    fichier: Option<PathBuf>,
+    // Les morceaux à jouer, et lequel est en cours.
+    liste: ListeDeLecture,
+    // Le son du morceau en cours, décodé en mémoire.
     morceau: Option<Arc<Morceau>>,
     // Pendant qu'on fait glisser la barre de progression, la position de la
     // souris (en secondes). La musique la suit, comme un scratch de vinyle.
@@ -65,7 +68,7 @@ impl LecteurApp {
             sortie_handle,
             sink: None,
             telecommande: None,
-            fichier: None,
+            liste: ListeDeLecture::default(),
             morceau: None,
             position_glissee: None,
             volume: 0.8,
@@ -75,22 +78,71 @@ impl LecteurApp {
         }
     }
 
-    /// Ouvre la fenêtre Windows de choix de fichier, puis lance la lecture.
-    fn ouvrir_fichier(&mut self) {
-        let Some(chemin) = rfd::FileDialog::new()
+    /// Ouvre la fenêtre Windows de choix de fichiers (on peut en prendre
+    /// plusieurs) et les ajoute à la liste.
+    fn ajouter_fichiers(&mut self) {
+        let Some(fichiers) = rfd::FileDialog::new()
             .add_filter("Fichiers MP3", &["mp3"])
-            .pick_file()
+            .pick_files()
         else {
             return; // l'utilisateur a annulé
         };
+        let premier = self.liste.ajouter(fichiers);
+        self.jouer_si_rien_en_cours(premier);
+    }
 
-        match self.charger(&chemin) {
-            Ok(()) => {
-                self.fichier = Some(chemin);
-                self.message.clear();
-            }
-            Err(e) => self.message = format!("Impossible de lire ce fichier : {e}"),
+    /// Ouvre la fenêtre Windows de choix de dossier et ajoute tous ses MP3.
+    fn ajouter_dossier(&mut self) {
+        let Some(dossier) = rfd::FileDialog::new().pick_folder() else {
+            return; // l'utilisateur a annulé
+        };
+        match self.liste.ajouter_dossier(&dossier) {
+            Some(premier) => self.jouer_si_rien_en_cours(Some(premier)),
+            None => self.message = "Aucun fichier MP3 dans ce dossier.".to_string(),
         }
+    }
+
+    /// Après un ajout : si rien ne joue, on lance le premier morceau ajouté.
+    fn jouer_si_rien_en_cours(&mut self, premier: Option<usize>) {
+        if let Some(n) = premier {
+            if self.platine_active().is_none() {
+                self.jouer(n);
+            }
+        }
+    }
+
+    /// Lance le morceau numéro n de la liste, depuis le début.
+    fn jouer(&mut self, n: usize) {
+        let Some(chemin) = self.liste.fichier(n).map(Path::to_path_buf) else {
+            return;
+        };
+        self.liste.choisir(n);
+        match self.charger(&chemin) {
+            Ok(()) => self.message.clear(),
+            Err(e) => {
+                self.oublier_morceau();
+                self.message = format!("Impossible de lire ce fichier : {e}");
+            }
+        }
+    }
+
+    fn suivant(&mut self) {
+        match self.liste.suivant() {
+            Some(n) => self.jouer(n),
+            None => self.stop(), // fin de la liste
+        }
+    }
+
+    fn precedent(&mut self) {
+        if let Some(n) = self.liste.precedent() {
+            self.jouer(n);
+        }
+    }
+
+    /// Arrête la lecture et décharge le morceau (retiré de la liste, ou illisible).
+    fn oublier_morceau(&mut self) {
+        self.stop();
+        self.morceau = None;
     }
 
     /// Décode tout le fichier en mémoire, puis lance la lecture depuis le début.
@@ -144,6 +196,11 @@ impl LecteurApp {
         // Le morceau est encore en cours : on reprend là où on en était.
         if let Some(telecommande) = self.platine_active() {
             telecommande.mettre_en_pause(false);
+            return;
+        }
+        // Aucun morceau chargé : on lance celui en cours dans la liste, ou le premier.
+        if self.morceau.is_none() {
+            self.jouer(self.liste.courant().unwrap_or(0));
             return;
         }
         // Le morceau a été arrêté ou est terminé : on le relance depuis le début.
@@ -278,18 +335,25 @@ impl eframe::App for LecteurApp {
     // Appelée à chaque image : on (re)dessine toute l'interface.
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         egui::CentralPanel::default().show(ctx, |ui| {
-            if ui.button("📂 Ouvrir un MP3…").clicked() {
-                self.ouvrir_fichier();
-            }
+            ui.horizontal(|ui| {
+                if ui.button("📂 Ajouter des MP3…").clicked() {
+                    self.ajouter_fichiers();
+                }
+                if ui.button("📁 Ajouter un dossier…").clicked() {
+                    self.ajouter_dossier();
+                }
+            });
 
             ui.add_space(8.0);
 
-            let nom = self
-                .fichier
-                .as_ref()
-                .and_then(|p| p.file_name())
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "Aucun fichier".to_string());
+            let nom = match (&self.morceau, self.liste.courant()) {
+                (Some(_), Some(n)) => self
+                    .liste
+                    .fichier(n)
+                    .map(liste::nom_du_fichier)
+                    .unwrap_or_default(),
+                _ => "Aucun fichier".to_string(),
+            };
             ui.label(format!("Morceau : {nom}"));
             ui.label(format!("État : {}", self.etat()));
 
@@ -297,9 +361,12 @@ impl eframe::App for LecteurApp {
             self.barre_de_progression(ui);
             ui.add_space(8.0);
 
-            // Les boutons ne sont actifs que si un fichier a été choisi.
-            ui.add_enabled_ui(self.fichier.is_some(), |ui| {
+            // Les boutons ne sont actifs que si la liste contient des morceaux.
+            ui.add_enabled_ui(!self.liste.est_vide(), |ui| {
                 ui.horizontal(|ui| {
+                    if ui.button("⏮").on_hover_text("Morceau précédent").clicked() {
+                        self.precedent();
+                    }
                     if ui.button("▶ Lecture").clicked() {
                         self.lecture();
                     }
@@ -309,11 +376,32 @@ impl eframe::App for LecteurApp {
                     if ui.button("⏹ Stop").clicked() {
                         self.stop();
                     }
+                    if ui.button("⏭").on_hover_text("Morceau suivant").clicked() {
+                        self.suivant();
+                    }
                 });
             });
 
             ui.add_space(8.0);
             self.reglage_du_volume(ui);
+
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                ui.strong("Liste de lecture");
+                if !self.liste.est_vide() && ui.small_button("Vider").clicked() {
+                    self.liste.vider();
+                    self.oublier_morceau();
+                }
+            });
+            match self.liste.afficher(ui) {
+                Some(Action::Jouer(n)) => self.jouer(n),
+                Some(Action::Retirer(n)) => {
+                    if self.liste.retirer(n) {
+                        self.oublier_morceau();
+                    }
+                }
+                None => {}
+            }
 
             ui.add_space(12.0);
             // Pendant un glissement de la barre, le visualiseur suit la souris.
@@ -329,6 +417,12 @@ impl eframe::App for LecteurApp {
                 ui.colored_label(egui::Color32::LIGHT_RED, &self.message);
             }
         });
+
+        // Le morceau en cours vient de se terminer tout seul : on passe au suivant.
+        // (Après un Stop, il n'y a plus de lecteur, donc on ne passe pas ici.)
+        if self.sink.as_ref().is_some_and(|sink| sink.empty()) {
+            self.suivant();
+        }
 
         // Pendant la lecture (ou en pause, le temps que les barres retombent),
         // on redessine à chaque image de l'écran pour que le visualiseur soit fluide.
