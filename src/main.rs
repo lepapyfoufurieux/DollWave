@@ -16,7 +16,7 @@ use visualiseur::Visualiseur;
 
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_inner_size([520.0, 440.0]),
+        viewport: egui::ViewportBuilder::default().with_inner_size([520.0, 480.0]),
         ..Default::default()
     };
     eframe::run_native(
@@ -43,6 +43,11 @@ struct LecteurApp {
     // Pendant qu'on fait glisser la barre de progression, la position de la
     // souris (en secondes). La musique la suit, comme un scratch de vinyle.
     position_glissee: Option<f32>,
+    // Le volume choisi avec le curseur, de 0.0 (rien) à 1.0 (plein volume).
+    volume: f32,
+    // Le son est-il coupé (bouton muet) ? On garde le volume choisi à côté
+    // pour le retrouver tel quel quand on remet le son.
+    muet: bool,
     // L'image qui bouge avec la musique.
     visualiseur: Visualiseur,
     // Un message affiché en bas de la fenêtre (erreurs, infos).
@@ -63,6 +68,8 @@ impl LecteurApp {
             fichier: None,
             morceau: None,
             position_glissee: None,
+            volume: 0.8,
+            muet: false,
             visualiseur: Visualiseur::new(),
             message,
         }
@@ -105,8 +112,24 @@ impl LecteurApp {
         let sink = Sink::try_new(handle)?;
         sink.append(platine);
         self.sink = Some(sink);
+        self.appliquer_volume();
         self.telecommande = Some(telecommande);
         Ok(())
+    }
+
+    /// Transmet le volume choisi (ou le silence, si muet) au lecteur rodio.
+    fn appliquer_volume(&self) {
+        if let Some(sink) = &self.sink {
+            // L'oreille n'entend pas le volume de façon « linéaire » : avec le
+            // curseur à moitié, le son paraîtrait presque aussi fort qu'au maximum.
+            // En mettant la valeur au carré, chaque cran du curseur s'entend pareil.
+            let volume = if self.muet {
+                0.0
+            } else {
+                self.volume * self.volume
+            };
+            sink.set_volume(volume);
+        }
     }
 
     /// La platine en cours, si un morceau est en lecture ou en pause.
@@ -209,6 +232,42 @@ impl LecteurApp {
     }
 }
 
+impl LecteurApp {
+    /// Le réglage du volume : un bouton pour couper le son, un curseur et le
+    /// pourcentage. Il reste utilisable même sans morceau, pour le préparer.
+    fn reglage_du_volume(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            let icone = if self.muet || self.volume == 0.0 {
+                "🔇"
+            } else {
+                "🔊"
+            };
+            let bouton = ui.button(icone).on_hover_text(if self.muet {
+                "Remettre le son"
+            } else {
+                "Couper le son"
+            });
+            let mut change = false;
+            if bouton.clicked() {
+                self.muet = !self.muet;
+                change = true;
+            }
+
+            let reponse = ui.add(egui::Slider::new(&mut self.volume, 0.0..=1.0).show_value(false));
+            if reponse.changed() {
+                // Bouger le curseur remet le son, comme sur la plupart des lecteurs.
+                self.muet = false;
+                change = true;
+            }
+            ui.label(format!("{:.0} %", self.volume * 100.0));
+
+            if change {
+                self.appliquer_volume();
+            }
+        });
+    }
+}
+
 /// Écrit une durée sous la forme « minutes:secondes », par exemple 3:07.
 fn format_temps(d: Duration) -> String {
     let s = d.as_secs();
@@ -252,6 +311,9 @@ impl eframe::App for LecteurApp {
                     }
                 });
             });
+
+            ui.add_space(8.0);
+            self.reglage_du_volume(ui);
 
             ui.add_space(12.0);
             // Pendant un glissement de la barre, le visualiseur suit la souris.
