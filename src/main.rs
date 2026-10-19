@@ -4,13 +4,14 @@
 use std::fs::File;
 use std::io::BufReader;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use eframe::egui;
-use rodio::{Decoder, OutputStream, OutputStreamHandle, Sink};
+use rodio::{Decoder, OutputStream, OutputStreamHandle, Sink, Source};
 
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_inner_size([420.0, 180.0]),
+        viewport: egui::ViewportBuilder::default().with_inner_size([420.0, 220.0]),
         ..Default::default()
     };
     eframe::run_native(
@@ -30,6 +31,11 @@ struct LecteurApp {
     sink: Option<Sink>,
     // Le fichier actuellement chargé.
     fichier: Option<PathBuf>,
+    // La durée totale du morceau (inconnue pour certains fichiers).
+    duree: Option<Duration>,
+    // Pendant qu'on fait glisser la barre de progression, la position choisie
+    // (en secondes). On ne se déplace dans le morceau qu'au relâchement.
+    position_glissee: Option<f32>,
     // Un message affiché en bas de la fenêtre (erreurs, infos).
     message: String,
 }
@@ -42,6 +48,8 @@ impl LecteurApp {
                 sortie_handle: Some(handle),
                 sink: None,
                 fichier: None,
+                duree: None,
+                position_glissee: None,
                 message: String::new(),
             },
             Err(e) => Self {
@@ -49,6 +57,8 @@ impl LecteurApp {
                 sortie_handle: None,
                 sink: None,
                 fichier: None,
+                duree: None,
+                position_glissee: None,
                 message: format!("Aucune sortie audio disponible : {e}"),
             },
         }
@@ -81,6 +91,8 @@ impl LecteurApp {
 
         let fichier = BufReader::new(File::open(chemin)?);
         let source = Decoder::new(fichier)?;
+        // On lit la durée totale avant de donner le morceau au lecteur.
+        let duree = source.total_duration();
 
         // On arrête l'ancien morceau s'il y en avait un.
         if let Some(ancien) = self.sink.take() {
@@ -90,6 +102,7 @@ impl LecteurApp {
         let sink = Sink::try_new(handle)?;
         sink.append(source);
         self.sink = Some(sink);
+        self.duree = duree;
         Ok(())
     }
 
@@ -119,6 +132,23 @@ impl LecteurApp {
         }
     }
 
+    /// Le temps écoulé depuis le début du morceau.
+    fn position(&self) -> Duration {
+        match &self.sink {
+            Some(sink) if !sink.empty() => sink.get_pos(),
+            _ => Duration::ZERO,
+        }
+    }
+
+    /// Se déplace dans le morceau, à la position donnée (en secondes).
+    fn aller_a(&mut self, secondes: f32) {
+        if let Some(sink) = &self.sink {
+            if let Err(e) = sink.try_seek(Duration::from_secs_f32(secondes)) {
+                self.message = format!("Impossible de se déplacer dans le morceau : {e}");
+            }
+        }
+    }
+
     /// Texte décrivant l'état actuel (en lecture, en pause, arrêté).
     fn etat(&self) -> &'static str {
         match &self.sink {
@@ -128,6 +158,55 @@ impl LecteurApp {
             None => "Arrêté",
         }
     }
+}
+
+impl LecteurApp {
+    /// La barre de progression : temps écoulé / durée totale, et un curseur
+    /// qu'on peut faire glisser (ou cliquer) pour se déplacer dans le morceau.
+    fn barre_de_progression(&mut self, ui: &mut egui::Ui) {
+        let duree = self.duree.unwrap_or_default();
+        // Pendant un glissement, on affiche la position choisie plutôt que la vraie.
+        let mut secondes = self
+            .position_glissee
+            .unwrap_or_else(|| self.position().as_secs_f32())
+            .min(duree.as_secs_f32());
+
+        // Le curseur n'est utilisable que si un morceau est chargé et sa durée connue.
+        let actif = self.duree.is_some() && self.sink.as_ref().is_some_and(|s| !s.empty());
+
+        ui.add_enabled_ui(actif, |ui| {
+            ui.horizontal(|ui| {
+                // Le curseur prend toute la largeur, moins la place du texte des temps.
+                ui.spacing_mut().slider_width = (ui.available_width() - 90.0).max(50.0);
+                let reponse = ui.add(
+                    egui::Slider::new(&mut secondes, 0.0..=duree.as_secs_f32()).show_value(false),
+                );
+
+                if reponse.dragged() {
+                    // On glisse encore : on retient seulement la position.
+                    self.position_glissee = Some(secondes);
+                } else if self.position_glissee.take().is_some() || reponse.changed() {
+                    // Relâchement après un glissement, ou simple clic : on s'y rend.
+                    self.aller_a(secondes);
+                }
+
+                let total = match self.duree {
+                    Some(d) => format_temps(d),
+                    None => "--:--".to_string(),
+                };
+                ui.label(format!(
+                    "{} / {total}",
+                    format_temps(Duration::from_secs_f32(secondes))
+                ));
+            });
+        });
+    }
+}
+
+/// Écrit une durée sous la forme « minutes:secondes », par exemple 3:07.
+fn format_temps(d: Duration) -> String {
+    let s = d.as_secs();
+    format!("{}:{:02}", s / 60, s % 60)
 }
 
 impl eframe::App for LecteurApp {
@@ -149,6 +228,8 @@ impl eframe::App for LecteurApp {
             ui.label(format!("Morceau : {nom}"));
             ui.label(format!("État : {}", self.etat()));
 
+            ui.add_space(8.0);
+            self.barre_de_progression(ui);
             ui.add_space(8.0);
 
             // Les boutons ne sont actifs que si un fichier a été choisi.
@@ -172,8 +253,8 @@ impl eframe::App for LecteurApp {
             }
         });
 
-        // Redessine régulièrement pour que l'état se mette à jour
-        // quand le morceau se termine tout seul.
-        ctx.request_repaint_after(std::time::Duration::from_millis(250));
+        // Redessine régulièrement pour que le temps écoulé avance et que l'état
+        // se mette à jour quand le morceau se termine tout seul.
+        ctx.request_repaint_after(Duration::from_millis(200));
     }
 }
