@@ -361,9 +361,9 @@ impl eframe::App for LecteurApp {
             self.barre_de_progression(ui);
             ui.add_space(8.0);
 
-            // Les boutons ne sont actifs que si la liste contient des morceaux.
-            ui.add_enabled_ui(!self.liste.est_vide(), |ui| {
-                ui.horizontal(|ui| {
+            ui.horizontal(|ui| {
+                // Les boutons de lecture ne sont actifs que si la liste contient des morceaux.
+                ui.add_enabled_ui(!self.liste.est_vide(), |ui| {
                     if ui.button("⏮").on_hover_text("Morceau précédent").clicked() {
                         self.precedent();
                     }
@@ -379,18 +379,19 @@ impl eframe::App for LecteurApp {
                     if ui.button("⏭").on_hover_text("Morceau suivant").clicked() {
                         self.suivant();
                     }
-                    let aleatoire = self.liste.aleatoire();
-                    let bouton = ui
-                        .selectable_label(aleatoire, "🔀")
-                        .on_hover_text(if aleatoire {
-                            "Lecture aléatoire : activée"
-                        } else {
-                            "Lecture aléatoire : désactivée"
-                        });
-                    if bouton.clicked() {
-                        self.liste.changer_aleatoire(!aleatoire);
-                    }
                 });
+                // La lecture aléatoire se règle à tout moment, même liste vide.
+                let aleatoire = self.liste.aleatoire();
+                let bouton = ui
+                    .selectable_label(aleatoire, "🔀")
+                    .on_hover_text(if aleatoire {
+                        "Lecture aléatoire : activée"
+                    } else {
+                        "Lecture aléatoire : désactivée"
+                    });
+                if bouton.clicked() {
+                    self.liste.changer_aleatoire(!aleatoire);
+                }
             });
 
             ui.add_space(8.0);
