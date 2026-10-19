@@ -10,3 +10,9 @@ eframe = "0.29"
 rodio = "0.19"
 # Fenêtre native Windows « Ouvrir un fichier »
 rfd = "0.15"
+
+# Les bibliothèques (décodage MP3 notamment) sont optimisées même en mode
+# développement : sinon décoder un morceau entier avec `cargo run` prendrait
+# plusieurs secondes. Notre propre code reste en mode développement normal.
+[profile.dev.package."*"]
+opt-level = 3
