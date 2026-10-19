@@ -2,7 +2,7 @@
 //! Trois styles au choix, dans un menu déroulant :
 //! - les barres de fréquences (graves à gauche, aigus à droite) ;
 //! - l'oscilloscope (la vibration du son, en direct) ;
-//! - la forme d'onde (le dessin de tout le morceau).
+//! - la forme d'onde (le dessin de la minute autour de l'endroit écouté).
 
 use std::sync::Arc;
 
@@ -26,8 +26,11 @@ const DB_MAX: f32 = -5.0;
 const CHUTE: f32 = 1.5;
 /// Nombre d'échantillons dessinés par l'oscilloscope (environ 1/40e de seconde).
 const TAILLE_OSCILLO: usize = 1024;
-/// Nombre de colonnes du résumé de la forme d'onde.
-const COLONNES_APERCU: usize = 1000;
+/// Finesse du résumé de la forme d'onde : nombre de tranches par seconde.
+const TRANCHES_PAR_SECONDE: u32 = 100;
+/// Durée (en secondes) montrée par la forme d'onde : la moitié avant
+/// l'endroit écouté, la moitié après. Elle défile pendant la lecture.
+const FENETRE: f32 = 60.0;
 /// Hauteur de la zone de dessin, en points.
 const HAUTEUR: f32 = 150.0;
 
@@ -117,14 +120,10 @@ impl Visualiseur {
             }
             Style::FormeOnde => {
                 if let Some(morceau) = morceau {
-                    let duree = morceau.duree().as_secs_f32();
-                    let avancement = if duree > 0.0 { position / duree } else { 0.0 };
                     let apercu = self.apercu_de(morceau);
                     let grise = ui.visuals().weak_text_color();
                     let curseur = ui.visuals().strong_text_color();
-                    dessiner_forme_onde(
-                        &peintre, zone, apercu, avancement, couleur, grise, curseur,
-                    );
+                    dessiner_forme_onde(&peintre, zone, apercu, position, couleur, grise, curseur);
                 }
             }
         }
@@ -134,7 +133,7 @@ impl Visualiseur {
     fn apercu_de(&mut self, morceau: &Arc<Morceau>) -> &[(f32, f32)] {
         let deja_calcule = matches!(&self.apercu, Some((m, _)) if Arc::ptr_eq(m, morceau));
         if !deja_calcule {
-            self.apercu = Some((morceau.clone(), morceau.apercu(COLONNES_APERCU)));
+            self.apercu = Some((morceau.clone(), morceau.apercu(TRANCHES_PAR_SECONDE)));
         }
         &self.apercu.as_ref().unwrap().1
     }
@@ -228,26 +227,41 @@ fn dessiner_oscilloscope(
     ));
 }
 
-/// Dessine tout le morceau ; la partie déjà jouée (avant `avancement`, entre
-/// 0 et 1) est en couleur, le reste en gris, avec un trait à l'endroit joué.
+/// Dessine la minute de musique autour de `position` (en secondes), qui reste
+/// au milieu : la partie déjà jouée est en couleur, le reste en gris.
 fn dessiner_forme_onde(
     peintre: &egui::Painter,
     zone: egui::Rect,
     apercu: &[(f32, f32)],
-    avancement: f32,
+    position: f32,
     couleur: egui::Color32,
     grise: egui::Color32,
     curseur: egui::Color32,
 ) {
     let milieu = zone.center().y;
     let demi_hauteur = zone.height() / 2.0;
-    let x_lecture = zone.left() + avancement.clamp(0.0, 1.0) * zone.width();
     let colonnes = zone.width().max(1.0) as usize;
+    // Durée couverte par une colonne de pixels.
+    let par_colonne = FENETRE / colonnes as f32;
+    let debut = position - FENETRE / 2.0;
     for c in 0..colonnes {
-        // Chaque colonne de pixels montre la tranche du résumé qui lui correspond.
-        let (bas, haut) = apercu[c * apercu.len() / colonnes];
+        // Les tranches du résumé qui tombent dans cette colonne de pixels.
+        let temps = debut + c as f32 * par_colonne;
+        let premiere = (temps * TRANCHES_PAR_SECONDE as f32).floor() as isize;
+        let derniere = ((temps + par_colonne) * TRANCHES_PAR_SECONDE as f32).floor() as isize;
+        let premiere = premiere.max(0) as usize;
+        let derniere = (derniere.max(0) as usize)
+            .max(premiere + 1)
+            .min(apercu.len());
+        // Avant le début ou après la fin du morceau : rien à dessiner.
+        let Some(tranches) = apercu.get(premiere..derniere).filter(|t| !t.is_empty()) else {
+            continue;
+        };
+        let bas = tranches.iter().map(|t| t.0).fold(0.0, f32::min);
+        let haut = tranches.iter().map(|t| t.1).fold(0.0, f32::max);
+
         let x = zone.left() + c as f32 + 0.5;
-        let teinte = if x < x_lecture { couleur } else { grise };
+        let teinte = if temps < position { couleur } else { grise };
         peintre.line_segment(
             [
                 egui::pos2(x, milieu - haut * demi_hauteur),
@@ -256,6 +270,7 @@ fn dessiner_forme_onde(
             egui::Stroke::new(1.0_f32, teinte),
         );
     }
+    let x_lecture = zone.center().x;
     peintre.line_segment(
         [
             egui::pos2(x_lecture, zone.top()),

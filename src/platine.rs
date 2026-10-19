@@ -101,12 +101,13 @@ impl Morceau {
             .collect()
     }
 
-    /// Un résumé de tout le morceau en `colonnes` tranches : pour chaque tranche,
-    /// l'échantillon le plus bas et le plus haut (entre -1 et 1).
-    pub fn apercu(&self, colonnes: usize) -> Vec<(f32, f32)> {
-        let par_colonne = self.echantillons.len().div_ceil(colonnes).max(1);
+    /// Un résumé de tout le morceau, découpé en `par_seconde` tranches par
+    /// seconde : pour chaque tranche, l'échantillon le plus bas et le plus haut
+    /// (entre -1 et 1).
+    pub fn apercu(&self, par_seconde: u32) -> Vec<(f32, f32)> {
+        let par_tranche = (self.frequence / par_seconde).max(1) as usize * self.canaux;
         self.echantillons
-            .chunks(par_colonne)
+            .chunks(par_tranche)
             .map(|tranche| {
                 let (bas, haut) = tranche
                     .iter()
@@ -334,7 +335,7 @@ mod tests {
             canaux: 1,
             frequence: 1000,
         };
-        assert_eq!(morceau.apercu(2), vec![(-0.5, 0.25), (0.0, 0.5)]);
+        assert_eq!(morceau.apercu(500), vec![(-0.5, 0.25), (0.0, 0.5)]);
     }
 
     #[test]
