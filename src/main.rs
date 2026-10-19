@@ -2,6 +2,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod platine;
+mod visualiseur;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -11,10 +12,11 @@ use eframe::egui;
 use rodio::{OutputStream, OutputStreamHandle, Sink};
 
 use platine::{Morceau, Telecommande};
+use visualiseur::Visualiseur;
 
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_inner_size([420.0, 220.0]),
+        viewport: egui::ViewportBuilder::default().with_inner_size([520.0, 440.0]),
         ..Default::default()
     };
     eframe::run_native(
@@ -41,6 +43,8 @@ struct LecteurApp {
     // Pendant qu'on fait glisser la barre de progression, la position de la
     // souris (en secondes). La musique la suit, comme un scratch de vinyle.
     position_glissee: Option<f32>,
+    // L'image qui bouge avec la musique.
+    visualiseur: Visualiseur,
     // Un message affiché en bas de la fenêtre (erreurs, infos).
     message: String,
 }
@@ -59,6 +63,7 @@ impl LecteurApp {
             fichier: None,
             morceau: None,
             position_glissee: None,
+            visualiseur: Visualiseur::new(),
             message,
         }
     }
@@ -248,14 +253,28 @@ impl eframe::App for LecteurApp {
                 });
             });
 
+            ui.add_space(12.0);
+            // Pendant un glissement de la barre, le visualiseur suit la souris.
+            let position = self
+                .position_glissee
+                .unwrap_or_else(|| self.position().as_secs_f32());
+            let en_lecture = self.etat() == "En lecture";
+            self.visualiseur
+                .afficher(ui, self.morceau.as_ref(), position, en_lecture);
+
             if !self.message.is_empty() {
                 ui.add_space(8.0);
                 ui.colored_label(egui::Color32::LIGHT_RED, &self.message);
             }
         });
 
-        // Redessine régulièrement pour que le temps écoulé avance et que l'état
-        // se mette à jour quand le morceau se termine tout seul.
-        ctx.request_repaint_after(Duration::from_millis(200));
+        // Pendant la lecture (ou en pause, le temps que les barres retombent),
+        // on redessine à chaque image de l'écran pour que le visualiseur soit fluide.
+        // Sinon, de temps en temps suffit pour voir l'état changer.
+        if self.platine_active().is_some() {
+            ctx.request_repaint();
+        } else {
+            ctx.request_repaint_after(Duration::from_millis(200));
+        }
     }
 }
