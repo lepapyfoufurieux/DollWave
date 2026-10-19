@@ -1,13 +1,16 @@
 // En version finale (release), on cache la fenêtre de console noire sous Windows.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use std::fs::File;
-use std::io::BufReader;
-use std::path::PathBuf;
+mod platine;
+
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use eframe::egui;
-use rodio::{Decoder, OutputStream, OutputStreamHandle, Sink, Source};
+use rodio::{OutputStream, OutputStreamHandle, Sink};
+
+use platine::{Morceau, Telecommande};
 
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
@@ -27,14 +30,16 @@ struct LecteurApp {
     // sinon le son s'arrête. On ne s'en sert pas directement, d'où le « _ ».
     _sortie: Option<OutputStream>,
     sortie_handle: Option<OutputStreamHandle>,
-    // Le « lecteur » de rodio : on lui donne un morceau, il le joue.
+    // Le « lecteur » de rodio : on lui donne la platine, il envoie son son
+    // vers les haut-parleurs.
     sink: Option<Sink>,
-    // Le fichier actuellement chargé.
+    // La télécommande de la platine en cours (pause, position, scratch).
+    telecommande: Option<Telecommande>,
+    // Le fichier actuellement chargé, et son son décodé en mémoire.
     fichier: Option<PathBuf>,
-    // La durée totale du morceau (inconnue pour certains fichiers).
-    duree: Option<Duration>,
-    // Pendant qu'on fait glisser la barre de progression, la position choisie
-    // (en secondes). On ne se déplace dans le morceau qu'au relâchement.
+    morceau: Option<Arc<Morceau>>,
+    // Pendant qu'on fait glisser la barre de progression, la position de la
+    // souris (en secondes). La musique la suit, comme un scratch de vinyle.
     position_glissee: Option<f32>,
     // Un message affiché en bas de la fenêtre (erreurs, infos).
     message: String,
@@ -42,25 +47,19 @@ struct LecteurApp {
 
 impl LecteurApp {
     fn new() -> Self {
-        match OutputStream::try_default() {
-            Ok((sortie, handle)) => Self {
-                _sortie: Some(sortie),
-                sortie_handle: Some(handle),
-                sink: None,
-                fichier: None,
-                duree: None,
-                position_glissee: None,
-                message: String::new(),
-            },
-            Err(e) => Self {
-                _sortie: None,
-                sortie_handle: None,
-                sink: None,
-                fichier: None,
-                duree: None,
-                position_glissee: None,
-                message: format!("Aucune sortie audio disponible : {e}"),
-            },
+        let (sortie, sortie_handle, message) = match OutputStream::try_default() {
+            Ok((sortie, handle)) => (Some(sortie), Some(handle), String::new()),
+            Err(e) => (None, None, format!("Aucune sortie audio disponible : {e}")),
+        };
+        Self {
+            _sortie: sortie,
+            sortie_handle,
+            sink: None,
+            telecommande: None,
+            fichier: None,
+            morceau: None,
+            position_glissee: None,
+            message,
         }
     }
 
@@ -82,47 +81,52 @@ impl LecteurApp {
         }
     }
 
-    /// Décode le fichier et le donne à un nouveau lecteur.
-    fn charger(&mut self, chemin: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
-        let handle = self
-            .sortie_handle
-            .as_ref()
-            .ok_or("pas de sortie audio")?;
+    /// Décode tout le fichier en mémoire, puis lance la lecture depuis le début.
+    fn charger(&mut self, chemin: &Path) -> Result<(), Box<dyn std::error::Error>> {
+        let morceau = Arc::new(Morceau::charger(chemin)?);
+        self.morceau = Some(morceau);
+        self.demarrer()
+    }
 
-        let fichier = BufReader::new(File::open(chemin)?);
-        let source = Decoder::new(fichier)?;
-        // On lit la durée totale avant de donner le morceau au lecteur.
-        let duree = source.total_duration();
-
+    /// Pose le morceau déjà décodé sur une nouvelle platine et la lance.
+    fn demarrer(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         // On arrête l'ancien morceau s'il y en avait un.
-        if let Some(ancien) = self.sink.take() {
-            ancien.stop();
-        }
+        self.stop();
 
+        let handle = self.sortie_handle.as_ref().ok_or("pas de sortie audio")?;
+        let morceau = self.morceau.clone().ok_or("aucun morceau chargé")?;
+
+        let (telecommande, platine) = Telecommande::nouvelle(morceau);
         let sink = Sink::try_new(handle)?;
-        sink.append(source);
+        sink.append(platine);
         self.sink = Some(sink);
-        self.duree = duree;
+        self.telecommande = Some(telecommande);
         Ok(())
     }
 
+    /// La platine en cours, si un morceau est en lecture ou en pause.
+    fn platine_active(&self) -> Option<&Telecommande> {
+        match &self.sink {
+            Some(sink) if !sink.empty() => self.telecommande.as_ref(),
+            _ => None,
+        }
+    }
+
     fn lecture(&mut self) {
-        // Le morceau est encore chargé : on reprend là où on en était.
-        if let Some(sink) = self.sink.as_ref().filter(|s| !s.empty()) {
-            sink.play();
+        // Le morceau est encore en cours : on reprend là où on en était.
+        if let Some(telecommande) = self.platine_active() {
+            telecommande.mettre_en_pause(false);
             return;
         }
-        // Le morceau a été arrêté ou est terminé : on le recharge depuis le début.
-        if let Some(chemin) = self.fichier.clone() {
-            if let Err(e) = self.charger(&chemin) {
-                self.message = format!("Impossible de lire ce fichier : {e}");
-            }
+        // Le morceau a été arrêté ou est terminé : on le relance depuis le début.
+        if let Err(e) = self.demarrer() {
+            self.message = format!("Impossible de lire ce fichier : {e}");
         }
     }
 
     fn pause(&self) {
-        if let Some(sink) = &self.sink {
-            sink.pause();
+        if let Some(telecommande) = &self.telecommande {
+            telecommande.mettre_en_pause(true);
         }
     }
 
@@ -130,69 +134,64 @@ impl LecteurApp {
         if let Some(sink) = self.sink.take() {
             sink.stop();
         }
+        self.telecommande = None;
     }
 
     /// Le temps écoulé depuis le début du morceau.
     fn position(&self) -> Duration {
-        match &self.sink {
-            Some(sink) if !sink.empty() => sink.get_pos(),
-            _ => Duration::ZERO,
-        }
-    }
-
-    /// Se déplace dans le morceau, à la position donnée (en secondes).
-    fn aller_a(&mut self, secondes: f32) {
-        if let Some(sink) = &self.sink {
-            if let Err(e) = sink.try_seek(Duration::from_secs_f32(secondes)) {
-                self.message = format!("Impossible de se déplacer dans le morceau : {e}");
-            }
-        }
+        self.platine_active()
+            .map(|t| t.position())
+            .unwrap_or_default()
     }
 
     /// Texte décrivant l'état actuel (en lecture, en pause, arrêté).
     fn etat(&self) -> &'static str {
-        match &self.sink {
-            Some(sink) if sink.empty() => "Arrêté",
-            Some(sink) if sink.is_paused() => "En pause",
-            Some(_) => "En lecture",
+        match self.platine_active() {
             None => "Arrêté",
+            Some(t) if t.en_pause() => "En pause",
+            Some(_) => "En lecture",
         }
     }
 }
 
 impl LecteurApp {
     /// La barre de progression : temps écoulé / durée totale, et un curseur
-    /// qu'on peut faire glisser (ou cliquer) pour se déplacer dans le morceau.
+    /// qu'on peut faire glisser (avec un bruit de scratch) ou cliquer pour
+    /// se déplacer dans le morceau.
     fn barre_de_progression(&mut self, ui: &mut egui::Ui) {
-        let duree = self.duree.unwrap_or_default();
-        // Pendant un glissement, on affiche la position choisie plutôt que la vraie.
+        let duree = self.morceau.as_ref().map(|m| m.duree());
+        let duree_s = duree.unwrap_or_default().as_secs_f32();
+        // Pendant un glissement, on affiche la position de la souris plutôt que la vraie.
         let mut secondes = self
             .position_glissee
             .unwrap_or_else(|| self.position().as_secs_f32())
-            .min(duree.as_secs_f32());
+            .min(duree_s);
 
-        // Le curseur n'est utilisable que si un morceau est chargé et sa durée connue.
-        let actif = self.duree.is_some() && self.sink.as_ref().is_some_and(|s| !s.empty());
+        // Le curseur n'est utilisable que si un morceau est en lecture ou en pause.
+        let telecommande = self.platine_active().cloned();
 
-        ui.add_enabled_ui(actif, |ui| {
+        ui.add_enabled_ui(telecommande.is_some(), |ui| {
             ui.horizontal(|ui| {
                 // Le curseur prend toute la largeur, moins la place du texte des temps.
                 ui.spacing_mut().slider_width = (ui.available_width() - 90.0).max(50.0);
                 // Sans morceau, la plage serait vide (0 à 0) et egui placerait le
                 // curseur au milieu : on garde au moins 1 seconde pour qu'il soit à gauche.
-                let fin = duree.as_secs_f32().max(1.0);
-                let reponse =
-                    ui.add(egui::Slider::new(&mut secondes, 0.0..=fin).show_value(false));
+                let fin = duree_s.max(1.0);
+                let reponse = ui.add(egui::Slider::new(&mut secondes, 0.0..=fin).show_value(false));
 
-                if reponse.dragged() {
-                    // On glisse encore : on retient seulement la position.
-                    self.position_glissee = Some(secondes);
-                } else if self.position_glissee.take().is_some() || reponse.changed() {
-                    // Relâchement après un glissement, ou simple clic : on s'y rend.
-                    self.aller_a(secondes);
+                if let Some(telecommande) = &telecommande {
+                    if reponse.dragged() {
+                        // On glisse : la musique suit la souris (scratch).
+                        self.position_glissee = Some(secondes);
+                        telecommande.scratcher(secondes);
+                    } else if self.position_glissee.take().is_some() || reponse.changed() {
+                        // Relâchement après un glissement, ou simple clic : on s'y rend
+                        // et la lecture reprend normalement.
+                        telecommande.aller_a(secondes);
+                    }
                 }
 
-                let total = match self.duree {
+                let total = match duree {
                     Some(d) => format_temps(d),
                     None => "--:--".to_string(),
                 };
