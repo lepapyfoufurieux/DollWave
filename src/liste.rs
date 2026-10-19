@@ -1,0 +1,344 @@
+//! La liste de lecture : les morceaux à jouer les uns après les autres,
+//! et lequel est en cours.
+
+use std::collections::hash_map::RandomState;
+use std::hash::BuildHasher;
+use std::path::{Path, PathBuf};
+
+use eframe::egui;
+
+/// Hauteur maximale de la liste à l'écran ; au-delà, on fait défiler.
+const HAUTEUR_MAX: f32 = 160.0;
+
+/// Ce que l'utilisateur a demandé en cliquant dans la liste.
+pub enum Action {
+    /// Jouer le morceau numéro n (double-clic sur sa ligne).
+    Jouer(usize),
+    /// Retirer le morceau numéro n de la liste (bouton ✖).
+    Retirer(usize),
+}
+
+#[derive(Default)]
+pub struct ListeDeLecture {
+    morceaux: Vec<PathBuf>,
+    /// Le numéro du morceau en cours dans la liste, s'il y en a un.
+    courant: Option<usize>,
+    /// Lecture aléatoire activée ?
+    aleatoire: bool,
+    /// En lecture aléatoire : pour chaque morceau, a-t-il déjà été joué ?
+    /// Chaque morceau passe une fois avant que la lecture s'arrête.
+    deja_joue: Vec<bool>,
+    /// En lecture aléatoire : les morceaux joués, dans l'ordre, pour que
+    /// « précédent » revienne vraiment au morceau d'avant.
+    historique: Vec<usize>,
+    /// Le morceau en cours lors du dernier affichage. S'il a changé depuis,
+    /// on fait défiler la liste jusqu'au nouveau.
+    courant_affiche: Option<usize>,
+}
+
+impl ListeDeLecture {
+    /// Ajoute des fichiers à la fin de la liste. Renvoie le numéro du morceau
+    /// à lancer si rien ne joue : le premier ajouté, ou en lecture aléatoire
+    /// l'un des ajoutés au hasard. Rien si la liste n'a pas grandi.
+    pub fn ajouter(&mut self, fichiers: Vec<PathBuf>) -> Option<usize> {
+        let premier = self.morceaux.len();
+        self.morceaux.extend(fichiers);
+        self.deja_joue.resize(self.morceaux.len(), false);
+        let ajoutes = self.morceaux.len() - premier;
+        if ajoutes == 0 {
+            None
+        } else if self.aleatoire {
+            Some(premier + hasard(ajoutes))
+        } else {
+            Some(premier)
+        }
+    }
+
+    /// Ajoute tous les MP3 d'un dossier et de ses sous-dossiers, triés par nom.
+    pub fn ajouter_dossier(&mut self, dossier: &Path) -> Option<usize> {
+        let mut fichiers = Vec::new();
+        chercher_mp3(dossier, &mut fichiers);
+        fichiers.sort_by_key(|f| f.to_string_lossy().to_lowercase());
+        self.ajouter(fichiers)
+    }
+
+    /// Retire un morceau. Le numéro du morceau en cours est décalé si besoin.
+    /// Renvoie `true` si c'est le morceau en cours qui a été retiré.
+    pub fn retirer(&mut self, n: usize) -> bool {
+        if n >= self.morceaux.len() {
+            return false;
+        }
+        self.morceaux.remove(n);
+        self.deja_joue.remove(n);
+        // Dans l'historique, on oublie ce morceau et on décale les suivants.
+        self.historique.retain(|&h| h != n);
+        for h in &mut self.historique {
+            if *h > n {
+                *h -= 1;
+            }
+        }
+        match self.courant {
+            Some(c) if c == n => {
+                self.courant = None;
+                true
+            }
+            Some(c) if c > n => {
+                self.courant = Some(c - 1);
+                false
+            }
+            _ => false,
+        }
+    }
+
+    pub fn vider(&mut self) {
+        self.morceaux.clear();
+        self.deja_joue.clear();
+        self.historique.clear();
+        self.courant = None;
+    }
+
+    pub fn aleatoire(&self) -> bool {
+        self.aleatoire
+    }
+
+    /// Active ou désactive la lecture aléatoire. En l'activant, on repart
+    /// pour un nouveau tour : seul le morceau en cours compte comme déjà joué.
+    pub fn changer_aleatoire(&mut self, actif: bool) {
+        self.aleatoire = actif;
+        self.deja_joue.fill(false);
+        self.historique.clear();
+        if let Some(c) = self.courant {
+            self.deja_joue[c] = true;
+            self.historique.push(c);
+        }
+    }
+
+    pub fn est_vide(&self) -> bool {
+        self.morceaux.is_empty()
+    }
+
+    /// Le fichier du morceau numéro n.
+    pub fn fichier(&self, n: usize) -> Option<&Path> {
+        self.morceaux.get(n).map(PathBuf::as_path)
+    }
+
+    pub fn courant(&self) -> Option<usize> {
+        self.courant
+    }
+
+    pub fn choisir(&mut self, n: usize) {
+        self.courant = Some(n);
+        if let Some(joue) = self.deja_joue.get_mut(n) {
+            *joue = true;
+        }
+        if self.historique.last() != Some(&n) {
+            self.historique.push(n);
+        }
+    }
+
+    /// Le numéro du morceau suivant, ou rien si on est au bout de la liste
+    /// (en aléatoire : quand tous les morceaux ont été joués).
+    pub fn suivant(&self) -> Option<usize> {
+        if self.aleatoire {
+            let restants: Vec<usize> = (0..self.morceaux.len())
+                .filter(|&i| !self.deja_joue[i])
+                .collect();
+            if restants.is_empty() {
+                return None;
+            }
+            return Some(restants[hasard(restants.len())]);
+        }
+        let n = self.courant.map_or(0, |c| c + 1);
+        (n < self.morceaux.len()).then_some(n)
+    }
+
+    /// Le numéro du morceau précédent. Au début de la liste, on reste sur le
+    /// premier (il sera relancé depuis le début). En aléatoire, on revient au
+    /// morceau joué juste avant.
+    pub fn precedent(&mut self) -> Option<usize> {
+        if self.morceaux.is_empty() {
+            return None;
+        }
+        if self.aleatoire {
+            if self.historique.len() >= 2 {
+                self.historique.pop(); // on quitte le morceau en cours
+            }
+            return self.historique.last().copied().or(self.courant).or(Some(0));
+        }
+        Some(self.courant.map_or(0, |c| c.saturating_sub(1)))
+    }
+
+    /// Dessine la liste. Renvoie ce que l'utilisateur a demandé, s'il a cliqué.
+    pub fn afficher(&mut self, ui: &mut egui::Ui) -> Option<Action> {
+        let mut action = None;
+        // On ne défile que quand le morceau change : entre-temps, on peut
+        // faire défiler la liste à la main sans qu'elle revienne toute seule.
+        let defiler = self.courant != self.courant_affiche;
+        self.courant_affiche = self.courant;
+        egui::ScrollArea::vertical()
+            .max_height(HAUTEUR_MAX)
+            .auto_shrink([false, true])
+            .show(ui, |ui| {
+                for (n, fichier) in self.morceaux.iter().enumerate() {
+                    ui.horizontal(|ui| {
+                        if ui.small_button("✖").on_hover_text("Retirer").clicked() {
+                            action = Some(Action::Retirer(n));
+                        }
+                        let en_cours = self.courant == Some(n);
+                        let texte = format!("{}. {}", n + 1, nom_du_fichier(fichier));
+                        let ligne = ui.selectable_label(en_cours, texte);
+                        if en_cours && defiler {
+                            ligne.scroll_to_me(None);
+                        }
+                        if ligne.double_clicked() {
+                            action = Some(Action::Jouer(n));
+                        }
+                    });
+                }
+            });
+        action
+    }
+}
+
+/// Un nombre au hasard entre 0 et n - 1 (n doit être au moins 1).
+/// La bibliothèque standard de Rust mélange ses clés de hachage au hasard :
+/// on s'en sert comme d'un dé, sans ajouter de bibliothèque.
+fn hasard(n: usize) -> usize {
+    (RandomState::new().hash_one(0u8) % n as u64) as usize
+}
+
+/// Le nom d'un fichier sans son dossier, par exemple « chanson.mp3 ».
+pub fn nom_du_fichier(chemin: &Path) -> String {
+    chemin
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
+/// Parcourt un dossier (et ses sous-dossiers) et note tous les fichiers .mp3.
+/// Les dossiers illisibles sont simplement ignorés.
+fn chercher_mp3(dossier: &Path, trouves: &mut Vec<PathBuf>) {
+    let Ok(contenu) = std::fs::read_dir(dossier) else {
+        return;
+    };
+    for entree in contenu.flatten() {
+        let chemin = entree.path();
+        if chemin.is_dir() {
+            chercher_mp3(&chemin, trouves);
+        } else if chemin
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("mp3"))
+        {
+            trouves.push(chemin);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn liste(n: usize) -> ListeDeLecture {
+        let mut l = ListeDeLecture::default();
+        l.ajouter((0..n).map(|i| PathBuf::from(format!("{i}.mp3"))).collect());
+        l
+    }
+
+    #[test]
+    fn suivant_et_precedent() {
+        let mut l = liste(3);
+        assert_eq!(l.suivant(), Some(0));
+        l.choisir(1);
+        assert_eq!(l.suivant(), Some(2));
+        assert_eq!(l.precedent(), Some(0));
+        l.choisir(2);
+        assert_eq!(l.suivant(), None);
+        l.choisir(0);
+        assert_eq!(l.precedent(), Some(0));
+        assert_eq!(liste(0).precedent(), None);
+    }
+
+    #[test]
+    fn aleatoire_joue_chaque_morceau_une_fois() {
+        let mut l = liste(5);
+        l.choisir(2);
+        l.changer_aleatoire(true);
+        let mut joues = vec![2];
+        while let Some(n) = l.suivant() {
+            assert!(!joues.contains(&n), "{n} joué deux fois");
+            l.choisir(n);
+            joues.push(n);
+        }
+        joues.sort();
+        assert_eq!(joues, [0, 1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn aleatoire_precedent_revient_en_arriere() {
+        let mut l = liste(5);
+        l.changer_aleatoire(true);
+        let a = l.suivant().unwrap();
+        l.choisir(a);
+        let b = l.suivant().unwrap();
+        l.choisir(b);
+        assert_eq!(l.precedent(), Some(a));
+        l.choisir(a);
+        // Au premier morceau de l'historique, on le relance.
+        assert_eq!(l.precedent(), Some(a));
+    }
+
+    #[test]
+    fn hasard_donne_des_valeurs_variees() {
+        let tirages: std::collections::HashSet<_> = (0..200).map(|_| hasard(10)).collect();
+        assert!(tirages.len() > 5);
+        assert!(tirages.iter().all(|&t| t < 10));
+    }
+
+    #[test]
+    fn aleatoire_ajout_lance_un_morceau_au_hasard() {
+        let mut l = liste(2);
+        l.changer_aleatoire(true);
+        let tirages: std::collections::HashSet<_> = (0..50)
+            .map(|_| l.ajouter((0..10).map(|i| PathBuf::from(format!("{i}.mp3"))).collect()))
+            .map(|n| n.unwrap() % 10)
+            .collect();
+        assert!(tirages.len() > 3);
+    }
+
+    #[test]
+    fn retirer_decale_le_morceau_en_cours() {
+        let mut l = liste(4);
+        l.choisir(2);
+        assert!(!l.retirer(0));
+        assert_eq!(l.courant(), Some(1));
+        assert!(!l.retirer(3));
+        assert_eq!(l.courant(), Some(1));
+        assert!(l.retirer(1));
+        assert_eq!(l.courant(), None);
+    }
+
+    #[test]
+    fn ajouter_renvoie_le_premier_ajoute() {
+        let mut l = liste(2);
+        assert_eq!(l.ajouter(vec![PathBuf::from("x.mp3")]), Some(2));
+        assert_eq!(l.ajouter(vec![]), None);
+    }
+
+    #[test]
+    fn dossier_trie_et_sous_dossiers() {
+        let racine = std::env::temp_dir().join("lecteur_mp3_test_dossier");
+        let _ = std::fs::remove_dir_all(&racine);
+        std::fs::create_dir_all(racine.join("b")).unwrap();
+        for f in ["c.mp3", "a.MP3", "notes.txt", "b/d.mp3"] {
+            std::fs::write(racine.join(f), b"").unwrap();
+        }
+        let mut l = ListeDeLecture::default();
+        l.ajouter_dossier(&racine);
+        let noms: Vec<_> = (0..3)
+            .map(|i| nom_du_fichier(l.fichier(i).unwrap()))
+            .collect();
+        assert_eq!(noms, ["a.MP3", "d.mp3", "c.mp3"]);
+        assert!(l.fichier(3).is_none());
+        std::fs::remove_dir_all(&racine).unwrap();
+    }
+}
