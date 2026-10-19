@@ -2,7 +2,7 @@
 //! Trois styles au choix, dans un menu déroulant :
 //! - les barres de fréquences (graves à gauche, aigus à droite) ;
 //! - l'oscilloscope (la vibration du son, en direct) ;
-//! - la forme d'onde (le dessin de la minute autour de l'endroit écouté).
+//! - la forme d'onde (le dessin des 30 secondes autour de l'endroit écouté).
 
 use std::sync::Arc;
 
@@ -30,7 +30,7 @@ const TAILLE_OSCILLO: usize = 1024;
 const TRANCHES_PAR_SECONDE: u32 = 100;
 /// Durée (en secondes) montrée par la forme d'onde : la moitié avant
 /// l'endroit écouté, la moitié après. Elle défile pendant la lecture.
-const FENETRE: f32 = 60.0;
+const FENETRE: f32 = 30.0;
 /// Hauteur de la zone de dessin, en points.
 const HAUTEUR: f32 = 150.0;
 
@@ -227,7 +227,7 @@ fn dessiner_oscilloscope(
     ));
 }
 
-/// Dessine la minute de musique autour de `position` (en secondes), qui reste
+/// Dessine les 30 secondes de musique autour de `position` (en secondes), qui reste
 /// au milieu : la partie déjà jouée est en couleur, le reste en gris.
 fn dessiner_forme_onde(
     peintre: &egui::Painter,
