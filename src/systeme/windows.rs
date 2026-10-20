@@ -11,16 +11,17 @@
 //! « fenêtre d'outil » (comme les petites palettes), le temps qu'elle reste
 //! rangée.
 //!
-//! Les clics sur l'icône et dans son menu arrivent par Windows, parfois au
-//! beau milieu du travail de la fenêtre : on se contente alors de les mettre
-//! de côté, sans toucher à egui (sinon le lecteur se fige), et la fenêtre
-//! les traite à sa prochaine image. Tant qu'elle est rangée, un petit fil la
-//! réveille régulièrement pour cela (et pour passer au morceau suivant).
+//! L'icône vit dans son propre fil, avec sa propre boucle de messages
+//! Windows. Le menu du clic droit bloque la boucle qui l'affiche le temps
+//! qu'il est ouvert : dans la boucle de la fenêtre, il l'empêchait ensuite
+//! de se redessiner, et le lecteur ne traitait plus aucun clic. Les clics
+//! sont mis de côté par ce fil, qui réveille la fenêtre régulièrement tant
+//! qu'elle est rangée pour qu'elle les traite (et passe au morceau suivant).
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, Receiver};
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle;
 
 use eframe::egui;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -28,8 +29,10 @@ use tray_icon::menu::{Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem};
 use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 use windows_sys::Win32::Foundation::HWND;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    GetWindowLongPtrW, SetForegroundWindow, SetWindowLongPtrW, ShowWindow, GWL_EXSTYLE, SW_HIDE,
-    SW_RESTORE, SW_SHOWMINNOACTIVE, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW,
+    DispatchMessageW, GetWindowLongPtrW, MsgWaitForMultipleObjects, PeekMessageW,
+    SetForegroundWindow, SetWindowLongPtrW, ShowWindow, TranslateMessage, GWL_EXSTYLE, MSG,
+    PM_REMOVE, QS_ALLINPUT, SW_HIDE, SW_RESTORE, SW_SHOWMINNOACTIVE, WS_EX_APPWINDOW,
+    WS_EX_TOOLWINDOW,
 };
 
 use super::{icone_vinyle, texte_d_infobulle, TAILLE_ICONE};
@@ -46,8 +49,9 @@ macro_rules! trace {
     };
 }
 
-/// Tous les combien on réveille la fenêtre quand elle est rangée.
-const REVEIL: Duration = Duration::from_millis(250);
+/// Tous les combien (en millisecondes) le fil de l'icône regarde s'il a
+/// quelque chose à faire, et réveille la fenêtre quand elle est rangée.
+const REVEIL_MS: u32 = 250;
 
 /// Un clic sur l'icône (ou dans son menu).
 enum Clic {
@@ -55,65 +59,58 @@ enum Clic {
     Menu(MenuId),
 }
 
-/// Les entrées du menu du clic droit.
+/// Les identifiants des entrées du menu du clic droit.
 struct Entrees {
-    afficher: MenuItem,
-    lecture: MenuItem,
-    precedent: MenuItem,
-    suivant: MenuItem,
-    quitter: MenuItem,
+    afficher: MenuId,
+    lecture: MenuId,
+    precedent: MenuId,
+    suivant: MenuId,
+    quitter: MenuId,
+}
+
+/// Ce que la fenêtre et le fil de l'icône partagent.
+#[derive(Default)]
+struct Partage {
+    /// Vrai tant que la fenêtre est rangée : le fil la réveille.
+    endormie: AtomicBool,
+    /// Vrai quand le lecteur se ferme : le fil retire l'icône et s'arrête.
+    fin: AtomicBool,
+    /// La nouvelle infobulle à afficher, s'il y en a une.
+    infobulle: Mutex<Option<String>>,
 }
 
 /// L'icône près de l'horloge, et l'état de la fenêtre (rangée ou non).
 pub struct ZoneDeNotification {
     /// Rien si Windows a refusé de créer l'icône : on réduit alors la
     /// fenêtre normalement, dans la barre des tâches.
-    icone: Option<(TrayIcon, Entrees)>,
+    entrees: Option<Entrees>,
     /// Le style de la fenêtre avant qu'on la range, pour le lui rendre.
     rangee: Option<isize>,
-    /// Vrai tant que la fenêtre est rangée : le fil de réveil travaille.
-    endormie: Arc<AtomicBool>,
+    partage: Arc<Partage>,
     clics: Receiver<Clic>,
+    fil: Option<JoinHandle<()>>,
     infobulle: String,
 }
 
 impl ZoneDeNotification {
     pub fn new(ctx: &egui::Context) -> Self {
         let (envoi, clics) = mpsc::channel();
-        // Les clics sont seulement mis de côté (voir en haut du fichier).
-        let envoi_menu = envoi.clone();
-        MenuEvent::set_event_handler(Some(move |evenement: MenuEvent| {
-            trace!("menu cliqué : {:?}", evenement.id);
-            let _ = envoi_menu.send(Clic::Menu(evenement.id));
-        }));
-        TrayIconEvent::set_event_handler(Some(move |evenement| {
-            if !matches!(evenement, TrayIconEvent::Move { .. }) {
-                trace!("icône : {evenement:?}");
-            }
-            if let TrayIconEvent::Click {
-                button: MouseButton::Left,
-                button_state: MouseButtonState::Up,
-                ..
-            } = evenement
-            {
-                let _ = envoi.send(Clic::Icone);
-            }
-        }));
-
-        let endormie = Arc::new(AtomicBool::new(false));
-        let (reveil, ctx_reveil) = (endormie.clone(), ctx.clone());
-        std::thread::spawn(move || loop {
-            std::thread::sleep(REVEIL);
-            if reveil.load(Ordering::Relaxed) {
-                ctx_reveil.request_repaint();
-            }
-        });
-
+        let partage = Arc::new(Partage::default());
+        let (envoi_entrees, entrees) = mpsc::channel();
+        let fil = {
+            let (partage, ctx) = (partage.clone(), ctx.clone());
+            std::thread::Builder::new()
+                .name("icône près de l'horloge".into())
+                .spawn(move || fil_de_l_icone(envoi, envoi_entrees, partage, ctx))
+                .ok()
+        };
         Self {
-            icone: creer_l_icone(),
+            // Le fil dit tout de suite si l'icône a pu être créée.
+            entrees: entrees.recv().ok().flatten(),
             rangee: None,
-            endormie,
+            partage,
             clics,
+            fil,
             infobulle: String::new(),
         }
     }
@@ -123,7 +120,7 @@ impl ZoneDeNotification {
     /// et rend les commandes choisies dans le menu.
     pub fn surveiller(&mut self, ctx: &egui::Context, frame: &eframe::Frame) -> Vec<Commande> {
         let mut commandes = Vec::new();
-        let Some((_, entrees)) = &self.icone else {
+        let Some(entrees) = &self.entrees else {
             return commandes;
         };
         let Some(fenetre) = fenetre(frame) else {
@@ -136,28 +133,24 @@ impl ZoneDeNotification {
             trace!("image pendant que la fenêtre est rangée");
         }
         while let Ok(clic) = self.clics.try_recv() {
-            trace!(
-                "clic traité : {}",
-                matches!(clic, Clic::Icone)
-                    .then_some("icône")
-                    .unwrap_or("menu")
-            );
             let id = match clic {
                 Clic::Icone => {
+                    trace!("clic traité : icône");
                     afficher = true;
                     continue;
                 }
                 Clic::Menu(id) => id,
             };
-            if id == *entrees.afficher.id() {
+            trace!("clic traité : menu {id:?}");
+            if id == entrees.afficher {
                 afficher = true;
-            } else if id == *entrees.lecture.id() {
+            } else if id == entrees.lecture {
                 commandes.push(Commande::LecturePause);
-            } else if id == *entrees.precedent.id() {
+            } else if id == entrees.precedent {
                 commandes.push(Commande::Precedent);
-            } else if id == *entrees.suivant.id() {
+            } else if id == entrees.suivant {
                 commandes.push(Commande::Suivant);
-            } else if id == *entrees.quitter.id() {
+            } else if id == entrees.quitter {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
         }
@@ -179,7 +172,8 @@ impl ZoneDeNotification {
             None if reduite => self.rangee = Some(ranger(fenetre)),
             _ => {}
         }
-        self.endormie
+        self.partage
+            .endormie
             .store(self.rangee.is_some(), Ordering::Relaxed);
         commandes
     }
@@ -188,30 +182,95 @@ impl ZoneDeNotification {
     pub fn infobulle(&mut self, morceau: Option<&str>) {
         let texte = texte_d_infobulle(morceau);
         if texte != self.infobulle {
-            if let Some((icone, _)) = &self.icone {
-                let _ = icone.set_tooltip(Some(&texte));
+            if let Ok(mut infobulle) = self.partage.infobulle.lock() {
+                *infobulle = Some(texte.clone());
             }
             self.infobulle = texte;
         }
     }
 }
 
-fn creer_l_icone() -> Option<(TrayIcon, Entrees)> {
-    let entrees = Entrees {
-        afficher: MenuItem::new("Afficher le lecteur", true, None),
-        lecture: MenuItem::new("Lecture / pause", true, None),
-        precedent: MenuItem::new("Morceau précédent", true, None),
-        suivant: MenuItem::new("Morceau suivant", true, None),
-        quitter: MenuItem::new("Quitter", true, None),
+impl Drop for ZoneDeNotification {
+    /// À la fermeture du lecteur, on attend que le fil ait retiré l'icône :
+    /// sinon elle resterait près de l'horloge jusqu'au passage de la souris.
+    fn drop(&mut self) {
+        self.partage.fin.store(true, Ordering::Relaxed);
+        if let Some(fil) = self.fil.take() {
+            let _ = fil.join();
+        }
+    }
+}
+
+/// Le fil de l'icône : la crée, puis fait tourner sa boucle de messages
+/// Windows (affichage du menu, clics…) jusqu'à la fermeture du lecteur.
+fn fil_de_l_icone(
+    envoi: Sender<Clic>,
+    envoi_entrees: Sender<Option<Entrees>>,
+    partage: Arc<Partage>,
+    ctx: egui::Context,
+) {
+    let envoi_menu = envoi.clone();
+    MenuEvent::set_event_handler(Some(move |evenement: MenuEvent| {
+        trace!("menu cliqué : {:?}", evenement.id);
+        let _ = envoi_menu.send(Clic::Menu(evenement.id));
+    }));
+    TrayIconEvent::set_event_handler(Some(move |evenement| {
+        if !matches!(evenement, TrayIconEvent::Move { .. }) {
+            trace!("icône : {evenement:?}");
+        }
+        if let TrayIconEvent::Click {
+            button: MouseButton::Left,
+            button_state: MouseButtonState::Up,
+            ..
+        } = evenement
+        {
+            let _ = envoi.send(Clic::Icone);
+        }
+    }));
+
+    let Some((icone, entrees)) = creer_l_icone() else {
+        let _ = envoi_entrees.send(None);
+        return;
     };
+    let _ = envoi_entrees.send(Some(entrees));
+
+    while !partage.fin.load(Ordering::Relaxed) {
+        // SAFETY : appels Windows classiques d'une boucle de messages, sur
+        // ce fil-ci, avec un MSG à nous.
+        unsafe {
+            MsgWaitForMultipleObjects(0, std::ptr::null(), 0, REVEIL_MS, QS_ALLINPUT);
+            let mut message: MSG = std::mem::zeroed();
+            while PeekMessageW(&mut message, std::ptr::null_mut(), 0, 0, PM_REMOVE) != 0 {
+                TranslateMessage(&message);
+                DispatchMessageW(&message);
+            }
+        }
+        let nouvelle = partage.infobulle.lock().ok().and_then(|mut i| i.take());
+        if let Some(texte) = nouvelle {
+            let _ = icone.set_tooltip(Some(texte));
+        }
+        if partage.endormie.load(Ordering::Relaxed) {
+            ctx.request_repaint();
+        }
+    }
+    // L'icône est retirée de la zone de notification ici, en la lâchant.
+    drop(icone);
+}
+
+fn creer_l_icone() -> Option<(TrayIcon, Entrees)> {
+    let afficher = MenuItem::new("Afficher le lecteur", true, None);
+    let lecture = MenuItem::new("Lecture / pause", true, None);
+    let precedent = MenuItem::new("Morceau précédent", true, None);
+    let suivant = MenuItem::new("Morceau suivant", true, None);
+    let quitter = MenuItem::new("Quitter", true, None);
     let menu = Menu::with_items(&[
-        &entrees.afficher,
+        &afficher,
         &PredefinedMenuItem::separator(),
-        &entrees.lecture,
-        &entrees.precedent,
-        &entrees.suivant,
+        &lecture,
+        &precedent,
+        &suivant,
         &PredefinedMenuItem::separator(),
-        &entrees.quitter,
+        &quitter,
     ])
     .ok()?;
     let image = Icon::from_rgba(icone_vinyle(TAILLE_ICONE), TAILLE_ICONE, TAILLE_ICONE).ok()?;
@@ -223,6 +282,13 @@ fn creer_l_icone() -> Option<(TrayIcon, Entrees)> {
         .with_menu_on_left_click(false)
         .build()
         .ok()?;
+    let entrees = Entrees {
+        afficher: afficher.id().clone(),
+        lecture: lecture.id().clone(),
+        precedent: precedent.id().clone(),
+        suivant: suivant.id().clone(),
+        quitter: quitter.id().clone(),
+    };
     Some((icone, entrees))
 }
 
