@@ -10,6 +10,7 @@ use eframe::egui;
 
 use crate::bibliotheque::{clic_simple, fichier_de_reglage};
 use crate::liste::nom_du_fichier;
+use crate::tags::TagsConnus;
 
 /// Les caractères que Windows refuse dans un nom de fichier.
 const INTERDITS: &[char] = &['\\', '/', ':', '*', '?', '"', '<', '>', '|'];
@@ -187,8 +188,9 @@ impl Playlists {
         self.actualiser();
     }
 
-    /// Dessine les playlists.
-    pub fn afficher(&mut self, ui: &mut egui::Ui) -> Option<Demande> {
+    /// Dessine les playlists. `tags` sert à nommer les morceaux d'une
+    /// playlist dépliée, comme dans la bibliothèque (« Artiste – Titre »).
+    pub fn afficher(&mut self, ui: &mut egui::Ui, tags: &TagsConnus) -> Option<Demande> {
         let mut demande = None;
 
         ui.horizontal(|ui| {
@@ -219,7 +221,7 @@ impl Playlists {
             .max_height((ui.available_height() - 24.0).max(40.0))
             .show(ui, |ui| {
                 for n in 0..self.toutes.len() {
-                    if let Some(d) = self.ligne(ui, n) {
+                    if let Some(d) = self.ligne(ui, n, tags) {
                         demande = Some(d);
                     }
                 }
@@ -232,7 +234,7 @@ impl Playlists {
     }
 
     /// Une ligne de playlist : son nom (un clic la charge), et ses boutons.
-    fn ligne(&mut self, ui: &mut egui::Ui, n: usize) -> Option<Demande> {
+    fn ligne(&mut self, ui: &mut egui::Ui, n: usize, tags: &TagsConnus) -> Option<Demande> {
         let nom = self.toutes[n].nom.clone();
 
         // En train de la renommer : le champ prend la place de la ligne.
@@ -304,8 +306,8 @@ impl Playlists {
                 }
                 for (i, morceau) in morceaux.iter().enumerate() {
                     ui.horizontal(|ui| {
-                        ui.label(nom_du_fichier(morceau))
-                            .on_hover_text(morceau.display().to_string());
+                        ui.label(tags.libelle(morceau))
+                            .on_hover_text(tags.infobulle(morceau));
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if ui
                                 .small_button("✖")
