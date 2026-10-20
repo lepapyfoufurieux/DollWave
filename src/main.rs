@@ -74,6 +74,15 @@ const FACTEUR_INCONNU: f32 = 0.5;
 /// Volume égalisé : en plus du morceau en cours, on mesure à l'avance ce
 /// nombre de morceaux qui le suivent dans la liste.
 const A_MESURER_A_L_AVANCE: usize = 5;
+/// Durée du fondu enchaîné : la fin d'un morceau se mélange au début du
+/// suivant pendant ce temps (moins si l'un des deux est très court).
+const DUREE_ENCHAINEMENT: Duration = Duration::from_secs(3);
+/// Combien de temps avant la fin d'un morceau on ouvre le suivant, pour
+/// qu'il soit prêt au moment du fondu enchaîné.
+const AVANCE_OUVERTURE: Duration = Duration::from_secs(20);
+/// Le petit fichier où l'on mémorise si le fondu enchaîné est activé
+/// (« oui » ou « non »).
+const REGLAGE_ENCHAINEMENT: &str = "fondu_enchaine.txt";
 
 /// L'état de l'application.
 struct LecteurApp {
@@ -117,6 +126,13 @@ struct LecteurApp {
     // Le morceau en cours et la taille de la liste lors de la dernière
     // demande de volumes : on ne redemande que quand ça change.
     volumes_demandes: Option<(Option<usize>, usize)>,
+    // À la fin d'un morceau, se mélange-t-il au début du suivant (fondu enchaîné) ?
+    enchainement: bool,
+    // Pendant un fondu enchaîné : le morceau qui finit, en train de s'éteindre.
+    // (Le morceau qui commence est dans `sink` et `telecommande`.)
+    sortant: Option<(Sink, Telecommande)>,
+    // Le morceau suivant, ouvert à l'avance pour le fondu enchaîné.
+    a_suivre: Option<Ouverture>,
     // L'image qui bouge avec la musique.
     visualiseur: Visualiseur,
     // Les tags (titre, artiste, album, durée) des morceaux, lus en arrière-plan.
@@ -154,6 +170,54 @@ struct Chargement {
     /// Le morceau a été lancé par le bouton Lecture : il démarrera en
     /// accélérant (si le freinage est activé).
     en_douceur: bool,
+}
+
+/// Le morceau suivant, ouvert en arrière-plan avant la fin du morceau en
+/// cours, pour pouvoir les mélanger (fondu enchaîné).
+struct Ouverture {
+    chemin: PathBuf,
+    reception: Receiver<Result<Arc<Morceau>, String>>,
+    /// Le morceau, une fois ouvert (ou rien s'il est illisible : on le
+    /// laissera alors à l'enchaînement normal, qui passe au suivant).
+    pret: Option<Option<Arc<Morceau>>>,
+    abandonne: Arc<AtomicBool>,
+}
+
+impl Ouverture {
+    fn lancer(chemin: PathBuf, ctx: egui::Context) -> Self {
+        let (envoi, reception) = mpsc::channel();
+        let abandonne = Arc::new(AtomicBool::new(false));
+        let (fichier, drapeau) = (chemin.clone(), abandonne.clone());
+        std::thread::spawn(move || {
+            let resultat = Morceau::charger(&fichier, &drapeau).map_err(|e| e.to_string());
+            let _ = envoi.send(resultat);
+            ctx.request_repaint();
+        });
+        Self {
+            chemin,
+            reception,
+            pret: None,
+            abandonne,
+        }
+    }
+
+    /// Le morceau, s'il est ouvert.
+    fn morceau(&mut self) -> Option<Arc<Morceau>> {
+        if self.pret.is_none() {
+            match self.reception.try_recv() {
+                Ok(resultat) => self.pret = Some(resultat.ok()),
+                Err(TryRecvError::Empty) => {}
+                Err(TryRecvError::Disconnected) => self.pret = Some(None),
+            }
+        }
+        self.pret.clone().flatten()
+    }
+}
+
+impl Drop for Ouverture {
+    fn drop(&mut self) {
+        self.abandonne.store(true, Ordering::Relaxed);
+    }
 }
 
 impl Drop for Chargement {
@@ -208,6 +272,9 @@ impl LecteurApp {
             egalisation: option_memorisee(REGLAGE_EGALISATION),
             volumes: VolumesConnus::new(ctx),
             volumes_demandes: None,
+            enchainement: option_memorisee(REGLAGE_ENCHAINEMENT),
+            sortant: None,
+            a_suivre: None,
             visualiseur: Visualiseur::new(),
             tags: TagsConnus::new(ctx),
             zone: ZoneDeNotification::new(ctx),
@@ -449,6 +516,10 @@ impl LecteurApp {
             sink.stop();
         }
         self.telecommande = None;
+        // Un morceau en train de s'éteindre (fondu enchaîné) : on le coupe.
+        if let Some((sink, _)) = self.sortant.take() {
+            sink.stop();
+        }
         // Le son est revenu : on efface le message de panne, s'il y en avait un.
         if self.message.starts_with(SORTIE_INDISPONIBLE) {
             self.message.clear();
@@ -474,6 +545,9 @@ impl LecteurApp {
                 self.volume * self.volume
             };
             sink.set_volume(volume);
+            if let Some((sortant, _)) = &self.sortant {
+                sortant.set_volume(volume);
+            }
         }
     }
 
@@ -496,9 +570,13 @@ impl LecteurApp {
         // (S'il s'arrête après un Stop, il est arrêté : on le relance plus bas.)
         let effet = self.effet();
         if let Some(telecommande) = self.platine_active().filter(|t| !t.freine()) {
+            // (Pendant un fondu enchaîné, le morceau qui s'éteint repart aussi.)
             // (Déjà en lecture, ou en train de repartir : rien à faire.)
-            if telecommande.en_pause() {
-                telecommande.demarrer_en_douceur(effet.0, effet.1);
+            let sortant = self.sortant.as_ref().map(|(_, t)| t);
+            for t in std::iter::once(telecommande).chain(sortant) {
+                if t.en_pause() {
+                    t.demarrer_en_douceur(effet.0, effet.1);
+                }
             }
             return;
         }
@@ -520,7 +598,9 @@ impl LecteurApp {
         if let Some(chargement) = &mut self.chargement {
             chargement.en_pause = true; // il démarrera en pause
         }
-        if let Some(telecommande) = &self.telecommande {
+        // (Pendant un fondu enchaîné, le morceau qui s'éteint se met aussi en pause.)
+        let sortant = self.sortant.as_ref().map(|(_, t)| t);
+        for telecommande in self.telecommande.iter().chain(sortant) {
             // (Déjà en train de s'arrêter après un Stop : on le laisse finir.)
             if !telecommande.freine() {
                 // Le disque ralentit (ou le volume baisse), puis se fige au
@@ -537,7 +617,13 @@ impl LecteurApp {
     fn arreter(&mut self) {
         let (effet, duree) = self.effet();
         match self.platine_active() {
-            Some(t) if !t.en_pause() && !t.freine() => t.freiner(effet, duree),
+            Some(t) if !t.en_pause() && !t.freine() => {
+                t.freiner(effet, duree);
+                // Pendant un fondu enchaîné, le morceau qui s'éteint s'arrête aussi.
+                if let Some((_, sortant)) = &self.sortant {
+                    sortant.freiner(effet, duree);
+                }
+            }
             _ => self.stop(),
         }
     }
@@ -598,6 +684,19 @@ impl LecteurApp {
             memoriser_option(REGLAGE_EGALISATION, self.egalisation);
             self.volumes_demandes = None;
         }
+        if ui
+            .checkbox(&mut self.enchainement, "Fondu enchaîné")
+            .on_hover_text(
+                "À la fin d'un morceau, il se mélange au début du suivant pendant \
+                 quelques secondes, comme à la radio",
+            )
+            .changed()
+        {
+            memoriser_option(REGLAGE_ENCHAINEMENT, self.enchainement);
+            if !self.enchainement {
+                self.a_suivre = None;
+            }
+        }
     }
 
     /// Le facteur du volume égalisé pour le morceau en cours : 1 si
@@ -616,14 +715,19 @@ impl LecteurApp {
     /// Demande le volume du morceau en cours (en urgence) et des suivants,
     /// et l'applique à la platine dès qu'il est connu.
     fn suivre_l_egalisation(&mut self) {
-        let morceaux = self.liste.morceaux();
-        let demande = (self.liste.courant(), morceaux.len());
+        let demande = (self.liste.courant(), self.liste.morceaux().len());
         if self.egalisation && self.volumes_demandes != Some(demande) {
             self.volumes_demandes = Some(demande);
             if let Some(courant) = demande.0 {
-                let suivants = (0..=A_MESURER_A_L_AVANCE.min(morceaux.len().saturating_sub(1)))
-                    .map(|ecart| morceaux[(courant + ecart) % morceaux.len()].as_path());
-                self.volumes.demander(suivants);
+                // Le vrai morceau suivant d'abord (en aléatoire, celui déjà
+                // tiré au sort), puis ceux qui suivent dans la liste.
+                let a_suivre = self.liste.a_suivre();
+                let morceaux = self.liste.morceaux();
+                let ensuite = (1..=A_MESURER_A_L_AVANCE.min(morceaux.len().saturating_sub(1)))
+                    .map(|ecart| (courant + ecart) % morceaux.len());
+                let numeros = std::iter::once(courant).chain(a_suivre).chain(ensuite);
+                self.volumes
+                    .demander(numeros.map(|n| morceaux[n].as_path()));
             }
         }
         if let Some(telecommande) = &self.telecommande {
@@ -638,6 +742,86 @@ impl LecteurApp {
             sink.stop();
         }
         self.telecommande = None;
+        // Le morceau qui s'éteignait (fondu enchaîné) s'arrête net aussi :
+        // ⏭, ⏮ ou un clic sur un titre changent de morceau tout de suite.
+        if let Some((sink, _)) = self.sortant.take() {
+            sink.stop();
+        }
+        self.a_suivre = None;
+    }
+
+    /// Le fondu enchaîné : un peu avant la fin du morceau, on ouvre le
+    /// suivant en arrière-plan ; quelques secondes avant la fin, on le lance
+    /// en montant le son, pendant que celui qui finit s'éteint. La barre, le
+    /// titre et la liste passent tout de suite au nouveau morceau.
+    fn preparer_l_enchainement(&mut self) {
+        // Le morceau qui s'éteignait a fini de s'éteindre.
+        if self.sortant.as_ref().is_some_and(|(sink, _)| sink.empty()) {
+            self.sortant = None;
+        }
+        let restant = match (self.platine_active(), &self.morceau) {
+            (Some(t), Some(morceau)) if self.enchainement && self.chargement.is_none() => {
+                Some(morceau.duree().saturating_sub(t.position()))
+            }
+            _ => None,
+        };
+        let Some(restant) = restant.filter(|&r| r <= AVANCE_OUVERTURE) else {
+            // Pas de fondu en vue (ou on est revenu en arrière dans le morceau).
+            self.a_suivre = None;
+            return;
+        };
+        // Le morceau suivant peut changer d'ici la fin (liste modifiée,
+        // « Lire ensuite »…) : on vérifie à chaque fois que c'est le bon.
+        let Some(n) = self.liste.a_suivre() else {
+            self.a_suivre = None; // fin de la liste : la musique s'arrêtera
+            return;
+        };
+        let Some(chemin) = self.liste.fichier(n).map(Path::to_path_buf) else {
+            return;
+        };
+        if self.a_suivre.as_ref().is_none_or(|o| o.chemin != chemin) {
+            self.a_suivre = Some(Ouverture::lancer(chemin, self.ctx.clone()));
+        }
+        // On ne commence pas le fondu pendant une pause, un Stop ou un scratch.
+        let Some(t) = self.platine_active() else {
+            return;
+        };
+        if t.en_pause() || t.freine() || self.position_glissee.is_some() {
+            return;
+        }
+        let Some(suivant) = self.a_suivre.as_mut().and_then(Ouverture::morceau) else {
+            return;
+        };
+        let duree = duree_de_l_enchainement(
+            self.morceau.as_ref().map_or(Duration::ZERO, |m| m.duree()),
+            suivant.duree(),
+        );
+        if restant <= duree && !duree.is_zero() {
+            self.enchainer(n, suivant, duree.min(restant));
+        }
+    }
+
+    /// Lance le morceau numéro n (déjà ouvert) en fondu enchaîné : il monte
+    /// pendant `duree`, et celui en cours s'éteint pendant le même temps.
+    fn enchainer(&mut self, n: usize, morceau: Arc<Morceau>, duree: Duration) {
+        self.a_suivre = None;
+        if let Some((sink, _)) = self.sortant.take() {
+            sink.stop(); // (un fondu précédent, déjà presque fini)
+        }
+        if let (Some(sink), Some(telecommande)) = (self.sink.take(), self.telecommande.take()) {
+            telecommande.fondre_en_sortie(duree);
+            self.sortant = Some((sink, telecommande));
+        }
+        self.liste.suivant();
+        self.liste.choisir(n);
+        self.morceau = Some(morceau.clone());
+        let (telecommande, platine) = Telecommande::nouvelle(morceau);
+        telecommande.fondre_en_entree(duree);
+        if let Err(e) = self.lancer(telecommande, platine) {
+            self.message = format!("Impossible de lancer la lecture : {e}");
+        }
+        // (Le morceau qui s'éteint garde le même volume que le nouveau.)
+        self.appliquer_volume();
     }
 
     /// Le temps écoulé depuis le début du morceau.
@@ -961,6 +1145,12 @@ fn memoriser_option(fichier: &str, activee: bool) {
     memoriser(fichier, if activee { "oui" } else { "non" });
 }
 
+/// Durée du fondu enchaîné entre un morceau et le suivant : `DUREE_ENCHAINEMENT`,
+/// sauf si l'un des deux est très court (au plus la moitié de chacun).
+fn duree_de_l_enchainement(finit: Duration, commence: Duration) -> Duration {
+    DUREE_ENCHAINEMENT.min(finit / 2).min(commence / 2)
+}
+
 /// Écrit une durée sous la forme « minutes:secondes », par exemple 3:07.
 fn format_temps(d: Duration) -> String {
     let s = d.as_secs();
@@ -982,6 +1172,7 @@ impl eframe::App for LecteurApp {
         self.recevoir_depot(ctx);
         self.suivre_le_chargement();
         self.suivre_l_egalisation();
+        self.preparer_l_enchainement();
 
         // À gauche, la bibliothèque. Un clic sur un morceau (ou sur « ➕ tout »)
         // l'ajoute à la liste de lecture. En bas, les playlists.
@@ -1618,5 +1809,149 @@ mod tests {
         }
         let position = telecommande.position().as_secs_f64();
         assert!((position - 2.0).abs() < 0.01, "position {position}");
+    }
+
+    #[test]
+    fn le_fondu_dure_3_secondes_sauf_pour_les_morceaux_courts() {
+        let s = Duration::from_secs;
+        assert_eq!(duree_de_l_enchainement(s(200), s(180)), s(3));
+        assert_eq!(duree_de_l_enchainement(s(4), s(180)), s(2));
+        assert_eq!(duree_de_l_enchainement(s(200), s(2)), s(1));
+    }
+
+    /// Volume égalisé et fondu enchaîné : pendant le fondu, chaque morceau
+    /// garde son propre volume égalisé (celui qui s'éteint n'est pas
+    /// réglé au volume du nouveau). (Seulement sur un PC qui a du son.)
+    #[test]
+    fn le_volume_egalise_suit_chaque_morceau_pendant_le_fondu() {
+        let ctx = egui::Context::default();
+        let _tour = mon_tour();
+        let mut app = LecteurApp::new(&ctx);
+        if app.sortie.is_none() {
+            return; // pas de son sur ce PC (machine de test)
+        }
+        let fort = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/glissando.mp3");
+        let dossier = std::env::temp_dir().join("lecteur_mp3_test_egalisation_fondu");
+        std::fs::create_dir_all(&dossier).unwrap();
+        let calme = dossier.join("calme.mp3");
+        std::fs::copy(&fort, &calme).unwrap();
+        let mesure = |gain_db| egalisation::Mesure {
+            gain_db,
+            crete: 0.1,
+        };
+        app.volumes.fixer(&fort, mesure(-6.0));
+        app.volumes.fixer(&calme, mesure(3.0));
+        let (gain_fort, gain_calme) = (mesure(-6.0).gain(), mesure(3.0).gain());
+
+        app.liste.ajouter(vec![fort.clone(), calme.clone()]);
+        app.liste.choisir(0);
+        app.morceau = Some(Morceau::charger(&fort, &AtomicBool::new(false)).unwrap());
+        app.egalisation = true;
+        app.enchainement = true;
+        app.demarrer(false).unwrap();
+        let premier = app.telecommande.clone().unwrap();
+        assert_eq!(premier.egalisation(), Some(gain_fort));
+
+        let debut = Instant::now();
+        while app.sortant.is_none() {
+            assert!(debut.elapsed() < Duration::from_secs(5), "pas de fondu");
+            std::thread::sleep(Duration::from_millis(5));
+            app.preparer_l_enchainement();
+            app.suivre_l_egalisation();
+            app.suivre_la_fin();
+        }
+        app.suivre_l_egalisation();
+        let second = app.telecommande.clone().unwrap();
+        assert_eq!(second.egalisation(), Some(gain_calme));
+        assert_eq!(premier.egalisation(), Some(gain_fort));
+
+        // Option décochée : le morceau en cours revient au volume d'origine.
+        app.egalisation = false;
+        app.suivre_l_egalisation();
+        assert_eq!(second.egalisation(), Some(1.0));
+        app.stop();
+    }
+
+    /// Avec le fondu enchaîné, un peu avant la fin, le morceau suivant est
+    /// lancé pendant que l'autre s'éteint ; la liste passe tout de suite au
+    /// suivant. ⏭ pendant le fondu coupe net. (Seulement sur un PC qui a du son.)
+    #[test]
+    fn le_fondu_enchaine_lance_le_suivant_avant_la_fin() {
+        let ctx = egui::Context::default();
+        let _tour = mon_tour();
+        let mut app = LecteurApp::new(&ctx);
+        if app.sortie.is_none() {
+            return; // pas de son sur ce PC (machine de test)
+        }
+        let chemin = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/glissando.mp3");
+        app.liste
+            .ajouter(vec![chemin.clone(), chemin.clone(), chemin.clone()]);
+        app.liste.choisir(0);
+        app.morceau = Some(Morceau::charger(&chemin, &AtomicBool::new(false)).unwrap());
+        app.enchainement = true;
+        app.demarrer(false).unwrap();
+        let premier = app.telecommande.clone().unwrap();
+
+        // On attend que le suivant soit ouvert et que le fondu commence.
+        let debut = Instant::now();
+        while app.sortant.is_none() {
+            assert!(debut.elapsed() < Duration::from_secs(5), "pas de fondu");
+            std::thread::sleep(Duration::from_millis(5));
+            app.preparer_l_enchainement();
+            app.suivre_la_fin();
+        }
+        assert!(premier.s_eteint());
+        assert_eq!(app.liste.courant(), Some(1));
+        assert!(app.etat() == Etat::Lecture);
+        // Le premier n'était pas fini : le fondu a commencé avant la fin.
+        let duree = app.morceau.as_ref().unwrap().duree();
+        assert!(premier.position() < duree);
+        let second = app.telecommande.clone().unwrap();
+        assert!(second.position() < duree / 2);
+
+        // Pause pendant le fondu : les deux morceaux s'arrêtent, et repartent.
+        app.pause();
+        assert!(premier.en_pause() && second.en_pause());
+        app.lecture();
+        assert!(!premier.en_pause() && !second.en_pause());
+
+        // Le premier finit de s'éteindre, tout seul. (La sortie son des
+        // tests joue plus vite que la musique : le second peut déjà
+        // s'enchaîner au troisième entre-temps.)
+        while app.sortant.is_some() && app.liste.courant() == Some(1) {
+            assert!(debut.elapsed() < Duration::from_secs(10), "ne s'éteint pas");
+            std::thread::sleep(Duration::from_millis(5));
+            app.preparer_l_enchainement();
+            app.suivre_la_fin();
+        }
+
+        // ⏭ pendant un fondu coupe tout de suite le morceau qui s'éteint.
+        app.stop();
+        app.liste.choisir(0);
+        app.demarrer(false).unwrap();
+        while app.sortant.is_none() {
+            assert!(debut.elapsed() < Duration::from_secs(15), "pas de fondu");
+            std::thread::sleep(Duration::from_millis(5));
+            app.preparer_l_enchainement();
+            app.suivre_la_fin();
+        }
+        assert_eq!(app.liste.courant(), Some(1));
+        app.suivant();
+        assert!(app.sortant.is_none());
+        assert!(app.platine_active().is_none()); // le suivant s'ouvre
+
+        // Sans fondu enchaîné, rien n'est lancé avant la fin.
+        app.stop();
+        app.liste.choisir(0);
+        app.enchainement = false;
+        app.morceau = Some(Morceau::charger(&chemin, &AtomicBool::new(false)).unwrap());
+        app.demarrer(false).unwrap();
+        app.telecommande.as_ref().unwrap().aller_a(2.5);
+        for _ in 0..50 {
+            app.preparer_l_enchainement();
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert!(app.sortant.is_none() && app.a_suivre.is_none());
+        assert_eq!(app.liste.courant(), Some(0));
     }
 }

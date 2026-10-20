@@ -313,6 +313,16 @@ impl VolumesConnus {
     }
 }
 
+#[cfg(test)]
+impl VolumesConnus {
+    /// Pour les tests : fait comme si ce morceau avait déjà été mesuré.
+    pub fn fixer(&self, chemin: &Path, mesure: Mesure) {
+        self.etat()
+            .connues
+            .insert(chemin.to_path_buf(), Some(mesure));
+    }
+}
+
 /// La boucle du fil de mesure : prend le prochain morceau, le mesure (sans
 /// tenir le verrou) et range le résultat.
 fn mesurer_en_arriere_plan(partage: &Partage, fichier: Option<&Path>, prevenir: &dyn Fn()) {

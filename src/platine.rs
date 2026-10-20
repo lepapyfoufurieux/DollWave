@@ -48,6 +48,28 @@ enum Rampe {
     Demarrage(f64, Effet),
 }
 
+/// Un fondu de volume pendant un fondu enchaîné : le morceau qui finit
+/// s'éteint pendant que le suivant s'allume.
+#[derive(Clone, Copy, PartialEq)]
+struct Enchainement {
+    /// Où en est le fondu, de 0 (début) à 1 (fini).
+    progres: f64,
+    /// De combien `progres` avance à chaque trame.
+    pas: f64,
+    /// Vrai pour le morceau qui s'éteint, faux pour celui qui s'allume.
+    sortant: bool,
+}
+
+impl Enchainement {
+    /// Le volume à ce point du fondu. Courbes en quart de sinus : la somme
+    /// des puissances des deux morceaux reste constante, donc le son ne
+    /// creuse pas au milieu du fondu (ce que ferait une simple droite).
+    fn volume(progres: f64, sortant: bool) -> f32 {
+        let angle = progres * std::f64::consts::FRAC_PI_2;
+        (if sortant { angle.cos() } else { angle.sin() }) as f32
+    }
+}
+
 /// Ce que l'interface et la platine partagent : l'interface écrit les ordres,
 /// la platine (qui tourne dans le fil audio) les lit et met à jour la position.
 #[derive(Default)]
@@ -62,6 +84,8 @@ struct Etat {
     rampe: Option<Rampe>,
     /// Le facteur du volume égalisé voulu pour ce morceau (rien : 1).
     egalisation: Option<f32>,
+    /// Pendant un fondu enchaîné.
+    enchainement: Option<Enchainement>,
 }
 
 /// La télécommande de la platine, gardée par l'interface.
@@ -101,6 +125,7 @@ impl Telecommande {
             nouveau.egalisation = ancien.egalisation;
             // (Un freinage vers la pause en cours compte comme une pause.)
             nouveau.en_pause = ancien.en_pause || matches!(ancien.rampe, Some(Rampe::Pause(..)));
+            nouveau.enchainement = ancien.enchainement;
         }
         (telecommande, platine)
     }
@@ -197,6 +222,42 @@ impl Telecommande {
         self.etat.lock().unwrap().egalisation = Some(facteur);
     }
 
+    /// Le facteur du volume égalisé demandé (rien : pas encore demandé).
+    #[cfg(test)]
+    pub fn egalisation(&self) -> Option<f32> {
+        self.etat.lock().unwrap().egalisation
+    }
+
+    /// Fondu enchaîné, pour le morceau qui commence : le son monte de rien
+    /// au volume normal en `duree` de musique jouée.
+    pub fn fondre_en_entree(&self, duree: Duration) {
+        self.fondre(duree, false);
+    }
+
+    /// Fondu enchaîné, pour le morceau qui finit : le son descend jusqu'à
+    /// rien en `duree` de musique jouée, puis la platine s'arrête.
+    pub fn fondre_en_sortie(&self, duree: Duration) {
+        self.fondre(duree, true);
+    }
+
+    fn fondre(&self, duree: Duration, sortant: bool) {
+        self.etat.lock().unwrap().enchainement = Some(Enchainement {
+            progres: 0.0,
+            pas: self.pente(duree),
+            sortant,
+        });
+    }
+
+    /// La platine est-elle en train de s'éteindre (fin d'un fondu enchaîné) ?
+    #[cfg(test)]
+    pub fn s_eteint(&self) -> bool {
+        self.etat
+            .lock()
+            .unwrap()
+            .enchainement
+            .is_some_and(|f| f.sortant)
+    }
+
     /// Pendant un glissement : indique où se trouve la souris. La musique la suit.
     pub fn scratcher(&self, secondes: f32) {
         self.etat.lock().unwrap().cible_scratch = Some(self.morceau.trames(secondes));
@@ -260,7 +321,7 @@ impl Platine {
         // On copie les ordres sans garder le verrou : lire la trame peut
         // demander de décoder un bloc (juste après un saut), et pendant ce
         // temps l'interface doit pouvoir lire la position sans attendre.
-        let (position, en_pause, cible_scratch, rampe, egalisation) = {
+        let (position, en_pause, cible_scratch, rampe, egalisation, enchainement) = {
             let etat = self.etat.lock().unwrap();
             let egalisation = etat.egalisation.unwrap_or(1.0) as f64;
             (
@@ -269,6 +330,7 @@ impl Platine {
                 etat.cible_scratch,
                 etat.rampe,
                 egalisation,
+                etat.enchainement,
             )
         };
         let frequence = self.morceau.frequence as f64;
@@ -356,6 +418,23 @@ impl Platine {
             }
         }
 
+        // Fondu enchaîné : il avance avec la musique jouée (pas pendant la pause).
+        // (Arrondi à 1 tout près de la fin : additionner des petits pas
+        // n'y arrive jamais tout à fait.)
+        let enchainement_suivant = enchainement.map(|f| Enchainement {
+            progres: match f.progres + f.pas {
+                p if p > 1.0 - 1e-9 => 1.0,
+                p => p,
+            },
+            ..f
+        });
+        if let Some(f) = enchainement_suivant {
+            if f.sortant && f.progres >= 1.0 {
+                return false; // le morceau s'est éteint
+            }
+            gain *= Enchainement::volume(f.progres, f.sortant);
+        }
+
         // La position tombe souvent entre deux trames : on mélange les deux
         // (interpolation), sinon le son serait granuleux pendant le scratch.
         let avant = position.floor() as usize;
@@ -381,6 +460,10 @@ impl Platine {
         let mut etat = self.etat.lock().unwrap();
         if etat.position == position {
             etat.position = (position + self.vitesse).clamp(0.0, fin);
+        }
+        // (Sauf si l'interface a relancé un autre fondu entre-temps.)
+        if etat.enchainement == enchainement {
+            etat.enchainement = enchainement_suivant.filter(|f| f.sortant || f.progres < 1.0);
         }
         true
     }
@@ -816,5 +899,90 @@ mod tests {
         }
         let ensuite = facteur(platine.next().unwrap(), 7002.0);
         assert!((ensuite - 0.25).abs() < 0.01, "{ensuite}");
+    }
+
+    /// Un faux morceau mono à 1000 Hz dont tous les échantillons valent la
+    /// moitié du maximum : on lit directement le volume appliqué.
+    fn morceau_constant(secondes: usize) -> Arc<Morceau> {
+        Arc::new(Morceau::brut(vec![16384; secondes * 1000], 1, 1000))
+    }
+
+    /// Le volume d'un échantillon de `morceau_constant` (1 = volume normal).
+    fn volume(echantillon: Option<f32>) -> f32 {
+        echantillon.unwrap() * 2.0
+    }
+
+    #[test]
+    fn le_fondu_en_entree_monte_du_silence_au_volume_normal() {
+        let (telecommande, mut platine) = Telecommande::nouvelle(morceau_constant(10));
+        telecommande.fondre_en_entree(Duration::from_secs(2));
+        assert!(volume(platine.next()) < 0.01);
+        let mut precedent = 0.0;
+        for _ in 0..1998 {
+            let v = volume(platine.next());
+            assert!(v >= precedent, "le son ne fait que monter");
+            precedent = v;
+        }
+        // À la moitié du fondu, on est déjà à 71 % (quart de sinus).
+        assert!(precedent > 0.99);
+        assert!((0..100).all(|_| volume(platine.next()) == 1.0));
+        // La musique a avancé normalement pendant le fondu.
+        assert_eq!(telecommande.position(), Duration::from_millis(2099));
+    }
+
+    #[test]
+    fn le_fondu_en_sortie_s_eteint_puis_s_arrete() {
+        let (telecommande, mut platine) = Telecommande::nouvelle(morceau_constant(10));
+        telecommande.aller_a(3.0);
+        telecommande.fondre_en_sortie(Duration::from_secs(2));
+        assert!(telecommande.s_eteint());
+        let echantillons: Vec<f32> = platine.by_ref().map(|e| e * 2.0).collect();
+        // Il s'arrête au bout de 2 secondes, bien avant la fin du morceau.
+        assert_eq!(echantillons.len(), 1999);
+        assert!(echantillons[0] > 0.99);
+        assert!((echantillons[999] - 0.707).abs() < 0.01);
+        assert!(*echantillons.last().unwrap() < 0.01);
+        assert!(echantillons.windows(2).all(|p| p[1] <= p[0]));
+        assert_eq!(platine.next(), None);
+    }
+
+    /// Au milieu d'un fondu enchaîné, les deux morceaux ensemble gardent la
+    /// même puissance qu'un seul : pas de creux, pas de bosse.
+    #[test]
+    fn le_fondu_enchaine_garde_la_meme_puissance() {
+        for progres in [0.0, 0.25, 0.5, 0.75, 1.0] {
+            let entrant = Enchainement::volume(progres, false);
+            let sortant = Enchainement::volume(progres, true);
+            let puissance = entrant * entrant + sortant * sortant;
+            assert!((puissance - 1.0).abs() < 1e-6, "{progres} : {puissance}");
+        }
+    }
+
+    /// En pause, le fondu attend : il reprend où il en était à la Lecture.
+    #[test]
+    fn le_fondu_attend_pendant_la_pause() {
+        let (telecommande, mut platine) = Telecommande::nouvelle(morceau_constant(10));
+        telecommande.fondre_en_sortie(Duration::from_secs(2));
+        for _ in 0..1000 {
+            platine.next();
+        }
+        telecommande.mettre_en_pause(true);
+        assert!((0..5000).all(|_| platine.next() == Some(0.0)));
+        telecommande.mettre_en_pause(false);
+        assert!((volume(platine.next()) - 0.707).abs() < 0.01);
+        assert_eq!(platine.count(), 998);
+    }
+
+    /// Changer de sortie son pendant un fondu : la nouvelle platine continue
+    /// le fondu au même point.
+    #[test]
+    fn la_reprise_garde_le_fondu() {
+        let (telecommande, mut platine) = Telecommande::nouvelle(morceau_constant(10));
+        telecommande.fondre_en_entree(Duration::from_secs(2));
+        for _ in 0..1000 {
+            platine.next();
+        }
+        let (_, mut reprise) = telecommande.reprise();
+        assert!((volume(reprise.next()) - 0.707).abs() < 0.01);
     }
 }
