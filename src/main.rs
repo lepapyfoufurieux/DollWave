@@ -9,6 +9,7 @@ mod platine;
 mod playlists;
 mod police;
 mod raccourcis;
+mod regroupement;
 mod sortie;
 mod tags;
 mod visualiseur;

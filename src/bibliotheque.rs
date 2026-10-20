@@ -1,5 +1,6 @@
 //! La bibliothèque : tous les MP3 du dossier de musique, rangés par
-//! sous-dossier, qu'on ajoute à la liste de lecture d'un clic.
+//! sous-dossier, par artiste ou par album, qu'on ajoute à la liste de
+//! lecture d'un clic.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -9,6 +10,7 @@ use eframe::egui;
 
 use crate::liste::{nom_du_fichier, rangee};
 use crate::playlists::{menu_ajouter_a_une_playlist, MorceauxGlisses};
+use crate::regroupement::{regrouper, Album, Regroupement};
 use crate::tags::TagsConnus;
 
 /// Au-delà de ce nombre de résultats de recherche, on n'affiche que les
@@ -171,6 +173,51 @@ fn chercher<'t>(tous: &[Entree], recherche: &str, tags: impl Fn(&Path) -> &'t st
         .collect()
 }
 
+/// Comment la bibliothèque est rangée.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Vue {
+    Dossiers,
+    Artistes,
+    Albums,
+}
+
+impl Vue {
+    const TOUTES: [Vue; 3] = [Vue::Dossiers, Vue::Artistes, Vue::Albums];
+
+    fn libelle(self) -> &'static str {
+        match self {
+            Vue::Dossiers => "📁 Dossiers",
+            Vue::Artistes => "🎤 Artistes",
+            Vue::Albums => "💿 Albums",
+        }
+    }
+
+    fn aide(self) -> &'static str {
+        match self {
+            Vue::Dossiers => "Ranger la musique par dossier",
+            Vue::Artistes => "Ranger la musique par artiste, puis par album (d'après les tags)",
+            Vue::Albums => "Ranger la musique par album (d'après les tags)",
+        }
+    }
+
+    /// Le mot écrit dans le fichier de réglage.
+    fn code(self) -> &'static str {
+        match self {
+            Vue::Dossiers => "dossiers",
+            Vue::Artistes => "artistes",
+            Vue::Albums => "albums",
+        }
+    }
+
+    /// La vue mémorisée ; par dossier si le fichier est absent ou abîmé.
+    fn depuis_le_code(code: &str) -> Vue {
+        Vue::TOUTES
+            .into_iter()
+            .find(|v| v.code() == code.trim())
+            .unwrap_or(Vue::Dossiers)
+    }
+}
+
 pub struct Bibliotheque {
     /// Le dossier de musique.
     dossier: PathBuf,
@@ -192,6 +239,14 @@ pub struct Bibliotheque {
     /// La hauteur d'une ligne de morceau à l'écran, pour réserver la place
     /// de celles qu'on ne dessine pas (hors de l'écran).
     hauteur_ligne: Option<f32>,
+    /// Pareil pour une ligne de dossier, d'artiste ou d'album repliée.
+    hauteur_entete: Option<f32>,
+    /// Rangée par dossier, par artiste ou par album.
+    vue: Vue,
+    /// La musique rangée par artiste et par album, et la version des tags
+    /// connus à ce moment-là : on ne range à nouveau que si de nouveaux
+    /// tags sont arrivés.
+    regroupement: Option<(Regroupement, u64)>,
 }
 
 impl Bibliotheque {
@@ -204,6 +259,9 @@ impl Bibliotheque {
         let favoris = fichier_de_reglage(REGLAGE_FAVORIS)
             .map(|f| lire_favoris(&f))
             .unwrap_or_default();
+        let vue = fichier_de_reglage(REGLAGE_VUE)
+            .and_then(|f| std::fs::read_to_string(f).ok())
+            .map_or(Vue::Dossiers, |code| Vue::depuis_le_code(&code));
         let mut bibliotheque = Self {
             dossier,
             favoris,
@@ -213,6 +271,9 @@ impl Bibliotheque {
             resultats: Vec::new(),
             recherche_faite: None,
             hauteur_ligne: None,
+            hauteur_entete: None,
+            vue,
+            regroupement: None,
         };
         bibliotheque.actualiser(ctx);
         bibliotheque
@@ -272,6 +333,7 @@ impl Bibliotheque {
                     self.contenu = Some(contenu);
                     self.en_cours = None;
                     self.recherche_faite = None; // la recherche est à refaire
+                    self.regroupement = None; // et le rangement aussi
                 }
                 Err(TryRecvError::Empty) => {}
                 Err(TryRecvError::Disconnected) => self.en_cours = None,
@@ -326,6 +388,19 @@ impl Bibliotheque {
                     .desired_width(ui.available_width()),
             );
         });
+        ui.horizontal(|ui| {
+            for vue in Vue::TOUTES {
+                if ui
+                    .selectable_label(self.vue == vue, vue.libelle())
+                    .on_hover_text(vue.aide())
+                    .clicked()
+                    && self.vue != vue
+                {
+                    self.vue = vue;
+                    memoriser(REGLAGE_VUE, vue.code());
+                }
+            }
+        });
         ui.separator();
 
         // On met les favoris de côté le temps de dessiner les lignes, qui
@@ -340,6 +415,7 @@ impl Bibliotheque {
             etoile: None,
             vers_playlist: None,
             hauteur: self.hauteur_ligne,
+            hauteur_entete: self.hauteur_entete,
         };
         self.afficher_contenu(ui, &mut lignes);
         let Lignes {
@@ -347,9 +423,11 @@ impl Bibliotheque {
             etoile,
             vers_playlist,
             hauteur,
+            hauteur_entete,
             ..
         } = lignes;
         self.hauteur_ligne = hauteur;
+        self.hauteur_entete = hauteur_entete;
         self.favoris = favoris;
 
         // Un clic sur une étoile : on ajoute ou retire le favori, et on le
@@ -366,8 +444,8 @@ impl Bibliotheque {
         }
     }
 
-    /// Dessine les morceaux : l'arbre des dossiers, ou les résultats de la
-    /// recherche.
+    /// Dessine les morceaux : l'arbre des dossiers, les artistes, les
+    /// albums, ou les résultats de la recherche.
     fn afficher_contenu(&mut self, ui: &mut egui::Ui, lignes: &mut Lignes) {
         if self.en_cours.is_some() {
             ui.horizontal(|ui| {
@@ -389,6 +467,21 @@ impl Bibliotheque {
         }
 
         let recherche = self.recherche.trim();
+        if recherche.is_empty() && self.vue != Vue::Dossiers {
+            // On range à nouveau quand de nouveaux tags sont arrivés.
+            let version = lignes.tags.version();
+            if self.regroupement.as_ref().map(|(_, v)| *v) != Some(version) {
+                let textes = lignes.tags.pour_chercher();
+                let regroupement =
+                    regrouper(contenu.tous.iter().map(|e| &e.chemin), |c| textes.tags(c));
+                self.regroupement = Some((regroupement, version));
+            }
+            let Some((regroupement, _)) = &self.regroupement else {
+                return;
+            };
+            afficher_regroupement(ui, self.vue, regroupement, contenu.tous.len(), lignes);
+            return;
+        }
         if recherche.is_empty() {
             ui.horizontal(|ui| {
                 ui.label(format!("{} morceaux", contenu.tous.len()));
@@ -487,6 +580,8 @@ struct Lignes<'a> {
     vers_playlist: Option<(String, Vec<PathBuf>)>,
     /// La hauteur d'une ligne de morceau (voir `liste::rangee`).
     hauteur: Option<f32>,
+    /// La hauteur d'une ligne de dossier, d'artiste ou d'album repliée.
+    hauteur_entete: Option<f32>,
 }
 
 /// Quand on commence à faire glisser un dossier ou un morceau, on emporte
@@ -528,44 +623,178 @@ fn favoris_d_abord<'a, T>(
 fn afficher_dossier(ui: &mut egui::Ui, dossier: &Dossier, lignes: &mut Lignes) {
     for sous_dossier in favoris_d_abord(&dossier.sous_dossiers, |d| &d.chemin, lignes.favoris) {
         let id = ui.make_persistent_id(&sous_dossier.chemin);
-        let mut basculer = false;
-        let mut entete =
-            egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, false)
-                .show_header(ui, |ui| {
-                    etoile(ui, &sous_dossier.chemin, lignes);
-                    // Un clic sur le nom du dossier le déplie ou le replie, comme la flèche.
-                    let nom = format!("📁 {} ({})", sous_dossier.nom, sous_dossier.total);
-                    let etiquette = ui.add(
-                        egui::Label::new(nom)
-                            .selectable(false)
-                            .sense(egui::Sense::click_and_drag()),
-                    );
-                    if clic_simple(ui, &etiquette) {
-                        basculer = true;
-                    }
-                    glisser(&etiquette, || sous_dossier.liste());
-                    menu_playlist(&etiquette, lignes, || sous_dossier.liste());
-                    let bouton = ui
-                        .small_button("➕ tout")
-                        .on_hover_text("Ajouter tout ce dossier à la liste de lecture");
-                    if clic_simple(ui, &bouton) {
-                        // Dans l'ordre alphabétique, sans faire passer les
-                        // favoris devant.
-                        sous_dossier.tous_les_morceaux(&mut lignes.a_ajouter);
-                    }
-                });
-        if basculer {
-            entete.toggle();
-        }
-        entete.body(|ui| afficher_dossier(ui, sous_dossier, lignes));
+        entete_depliable(
+            ui,
+            lignes,
+            id,
+            Some(&sous_dossier.chemin),
+            format!("📁 {} ({})", sous_dossier.nom, sous_dossier.total),
+            "Ajouter tout ce dossier à la liste de lecture",
+            || sous_dossier.liste(),
+            |ui, lignes| afficher_dossier(ui, sous_dossier, lignes),
+        );
     }
+    afficher_morceaux(ui, &dossier.morceaux, lignes);
+}
+
+/// Des morceaux, un par ligne, les favoris en tête. Seuls ceux à l'écran
+/// sont dessinés.
+fn afficher_morceaux(ui: &mut egui::Ui, morceaux: &[PathBuf], lignes: &mut Lignes) {
     let mut hauteur = lignes.hauteur;
-    for morceau in favoris_d_abord(&dossier.morceaux, PathBuf::as_path, lignes.favoris) {
+    for morceau in favoris_d_abord(morceaux, PathBuf::as_path, lignes.favoris) {
         rangee(ui, &mut hauteur, morceau, |ui| {
             ligne_morceau(ui, morceau, lignes)
         });
     }
     lignes.hauteur = hauteur;
+}
+
+/// La ligne d'un dossier, d'un artiste ou d'un album, qu'on peut déplier
+/// (fermée au départ) : son étoile (s'il peut être mis en favori), son nom
+/// (un clic le déplie ; on peut le glisser sur une playlist, ou faire un
+/// clic droit), et « ➕ tout ». Une fois déplié, `contenu` dessine ce qu'il
+/// contient. `morceaux` donne tous ses morceaux, dans l'ordre affiché.
+#[allow(clippy::too_many_arguments)]
+fn entete_depliable(
+    ui: &mut egui::Ui,
+    lignes: &mut Lignes,
+    id: egui::Id,
+    favori: Option<&Path>,
+    nom: String,
+    aide_tout: &str,
+    morceaux: impl Fn() -> Vec<PathBuf>,
+    contenu: impl FnOnce(&mut egui::Ui, &mut Lignes),
+) {
+    let etat =
+        egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, false);
+    // Replié et hors de l'écran : on réserve juste sa place, sans le dessiner
+    // (une grosse bibliothèque peut avoir des milliers d'albums).
+    let replie = etat.openness(ui.ctx()) == 0.0;
+    if replie {
+        if let Some(h) = lignes.hauteur_entete {
+            let taille = egui::vec2(ui.available_width(), h);
+            if !ui.is_rect_visible(egui::Rect::from_min_size(ui.cursor().min, taille)) {
+                ui.allocate_exact_size(taille, egui::Sense::hover());
+                return;
+            }
+        }
+    }
+    let mut basculer = false;
+    let mut entete = etat.show_header(ui, |ui| {
+        if let Some(favori) = favori {
+            etoile(ui, favori, lignes);
+        }
+        // Un clic sur le nom le déplie ou le replie, comme la flèche.
+        let etiquette = ui.add(
+            egui::Label::new(nom)
+                .selectable(false)
+                .sense(egui::Sense::click_and_drag()),
+        );
+        if clic_simple(ui, &etiquette) {
+            basculer = true;
+        }
+        glisser(&etiquette, &morceaux);
+        menu_playlist(&etiquette, lignes, &morceaux);
+        let bouton = ui.small_button("➕ tout").on_hover_text(aide_tout);
+        if clic_simple(ui, &bouton) {
+            // Dans l'ordre affiché, sans faire passer les favoris devant.
+            lignes.a_ajouter.extend(morceaux());
+        }
+    });
+    if basculer {
+        entete.toggle();
+    }
+    let (_, ligne, _) = entete.body(|ui| contenu(ui, lignes));
+    if replie {
+        lignes.hauteur_entete = Some(ligne.response.rect.height());
+    }
+}
+
+/// La vue Artistes ou Albums.
+fn afficher_regroupement(
+    ui: &mut egui::Ui,
+    vue: Vue,
+    regroupement: &Regroupement,
+    nombre: usize,
+    lignes: &mut Lignes,
+) {
+    let a_lire = regroupement.pas_encore_lus.len();
+    ui.horizontal(|ui| {
+        ui.label(format!("{nombre} morceaux"));
+        let bouton = ui
+            .small_button("➕ Tout ajouter")
+            .on_hover_text("Ajouter toute la bibliothèque à la liste de lecture");
+        if clic_simple(ui, &bouton) {
+            match vue {
+                Vue::Artistes => {
+                    for artiste in &regroupement.artistes {
+                        lignes.a_ajouter.extend(artiste.morceaux());
+                    }
+                }
+                _ => {
+                    for album in &regroupement.albums {
+                        lignes.a_ajouter.extend(album.morceaux.iter().cloned());
+                    }
+                }
+            }
+            lignes
+                .a_ajouter
+                .extend(regroupement.pas_encore_lus.iter().cloned());
+        }
+    });
+    if a_lire > 0 {
+        ui.horizontal(|ui| {
+            ui.spinner();
+            ui.label(format!("Lecture des tags… {} / {nombre}", nombre - a_lire));
+        });
+    }
+    egui::ScrollArea::vertical()
+        .auto_shrink([false, false])
+        .show(ui, |ui| match vue {
+            Vue::Artistes => {
+                let artistes = favoris_d_abord(&regroupement.artistes, |a| &a.cle, lignes.favoris);
+                for artiste in artistes {
+                    let id = ui.make_persistent_id(("artiste", &artiste.cle));
+                    entete_depliable(
+                        ui,
+                        lignes,
+                        id,
+                        artiste.nom.is_some().then_some(artiste.cle.as_path()),
+                        format!("🎤 {} ({})", artiste.nom(), artiste.total),
+                        "Ajouter tous les morceaux de cet artiste à la liste de lecture",
+                        || artiste.morceaux(),
+                        |ui, lignes| {
+                            afficher_albums(ui, &artiste.albums, false, lignes);
+                        },
+                    );
+                }
+            }
+            _ => afficher_albums(ui, &regroupement.albums, true, lignes),
+        });
+}
+
+/// Des albums, chacun dépliable sur ses morceaux. `avec_artiste` : écrire
+/// l'artiste à côté du nom (dans la vue Albums ; pas sous un artiste).
+fn afficher_albums(ui: &mut egui::Ui, albums: &[Album], avec_artiste: bool, lignes: &mut Lignes) {
+    for album in favoris_d_abord(albums, |a| &a.cle, lignes.favoris) {
+        let id = ui.make_persistent_id(("album", &album.cle));
+        let nom = match (&album.artiste, avec_artiste) {
+            (Some(artiste), true) => {
+                format!("💿 {} — {artiste} ({})", album.nom(), album.morceaux.len())
+            }
+            _ => format!("💿 {} ({})", album.nom(), album.morceaux.len()),
+        };
+        entete_depliable(
+            ui,
+            lignes,
+            id,
+            album.nom.is_some().then_some(album.cle.as_path()),
+            nom,
+            "Ajouter tout cet album à la liste de lecture",
+            || album.morceaux.clone(),
+            |ui, lignes| afficher_morceaux(ui, &album.morceaux, lignes),
+        );
+    }
 }
 
 /// L'étoile devant un dossier ou un morceau : ★ s'il est en favori, ☆ sinon.
@@ -580,7 +809,7 @@ fn etoile(ui: &mut egui::Ui, chemin: &Path, lignes: &mut Lignes) {
     } else {
         (
             egui::RichText::new("☆").weak(),
-            "Mettre en favori (remonte en tête de son dossier)",
+            "Mettre en favori (remonte en tête)",
         )
     };
     let bouton = ui
@@ -693,6 +922,7 @@ fn dossier_par_defaut() -> PathBuf {
 /// Les petits fichiers où l'on mémorise nos réglages.
 const REGLAGE_DOSSIER: &str = "dossier_musique.txt";
 const REGLAGE_FAVORIS: &str = "favoris.txt";
+const REGLAGE_VUE: &str = "vue_bibliotheque.txt";
 
 /// Un petit fichier de réglage, par exemple
 /// %APPDATA%\lecteur_mp3\dossier_musique.txt.
@@ -993,6 +1223,9 @@ mod tests {
             recherche_faite: None,
             favoris: HashSet::new(),
             hauteur_ligne: None,
+            hauteur_entete: None,
+            vue: Vue::Dossiers,
+            regroupement: None,
         };
         let dans_la_liste = HashSet::new();
         let mut image = |temps: f64, events: Vec<egui::Event>| {
@@ -1056,6 +1289,147 @@ mod tests {
             .unwrap();
         assert!(numero > 50, "morceau {numero} : la liste n'a pas défilé");
         std::fs::remove_dir_all(&racine).unwrap();
+    }
+
+    /// Vue Albums d'une grosse bibliothèque (2000 albums d'un morceau) :
+    /// une fois les tags lus, tout est rangé ; seuls les albums à l'écran
+    /// sont dessinés, et après avoir fait défiler loin, on déplie bien
+    /// l'album qu'on voit, puis un clic sur son morceau l'ajoute.
+    #[test]
+    fn vue_albums_d_une_grosse_bibliotheque() {
+        use crate::tags::tests::ecrire_mp3_avec;
+        let racine = dossier_de_test("grosse_albums");
+        for i in 0..2000 {
+            let nom = format!("{i:04}.mp3");
+            let fichier = ecrire_mp3_avec(
+                &format!("album_{nom}"),
+                &[
+                    ("TIT2", &nom),
+                    ("TPE1", "Moi"),
+                    ("TALB", &format!("Album {i:04}")),
+                ],
+                false,
+                1,
+            );
+            std::fs::rename(fichier, racine.join(nom)).unwrap();
+        }
+        let ctx = egui::Context::default();
+        let tags = TagsConnus::new(&ctx);
+        let contenu = Contenu::lire(&racine);
+        tags.demander(contenu.tous.iter().map(|e| e.chemin.as_path()));
+        let mut bibliotheque = Bibliotheque {
+            dossier: racine.clone(),
+            contenu: Some(contenu),
+            en_cours: None,
+            recherche: String::new(),
+            resultats: Vec::new(),
+            recherche_faite: None,
+            favoris: HashSet::new(),
+            hauteur_ligne: None,
+            hauteur_entete: None,
+            vue: Vue::Albums,
+            regroupement: None,
+        };
+        let dans_la_liste = HashSet::new();
+        let mut image = |temps: f64, events: Vec<egui::Event>| {
+            let entree = egui::RawInput {
+                time: Some(temps),
+                events,
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(400.0, 300.0),
+                )),
+                ..Default::default()
+            };
+            let mut ajoutes = Vec::new();
+            let _ = ctx.run(entree, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    ajoutes = bibliotheque
+                        .afficher(ui, &dans_la_liste, &tags, &[])
+                        .a_ajouter;
+                });
+            });
+            let rangement = bibliotheque
+                .regroupement
+                .as_ref()
+                .map(|(r, _)| (r.albums.len(), r.pas_encore_lus.len()));
+            (ajoutes, rangement, bibliotheque.hauteur_entete)
+        };
+        // On attend que tous les tags soient lus.
+        let mut t = 0.0;
+        let debut = std::time::Instant::now();
+        loop {
+            t += 0.05;
+            if image(t, vec![]).1 == Some((2000, 0)) {
+                break;
+            }
+            assert!(debut.elapsed().as_secs() < 60, "tags jamais tous lus");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let souris = egui::pos2(100.0, 150.0);
+        for _ in 0..10 {
+            t += 0.05;
+            image(
+                t,
+                vec![
+                    egui::Event::PointerMoved(souris),
+                    egui::Event::MouseWheel {
+                        unit: egui::MouseWheelUnit::Page,
+                        delta: egui::vec2(0.0, -1.0),
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+            );
+        }
+        for _ in 0..40 {
+            t += 0.05;
+            image(t, vec![]);
+        }
+        let clic = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        // Un clic sur le nom de l'album le déplie (sans rien ajouter)…
+        t += 1.0;
+        image(
+            t,
+            vec![egui::Event::PointerMoved(souris), clic(souris, true)],
+        );
+        let (ajoutes, _, hauteur_entete) = image(t + 0.05, vec![clic(souris, false)]);
+        assert!(ajoutes.is_empty());
+        for _ in 0..20 {
+            t += 0.05;
+            image(t, vec![]);
+        }
+        // … et son morceau apparaît juste dessous.
+        let dessous = souris + egui::vec2(0.0, hauteur_entete.unwrap());
+        t += 1.0;
+        image(
+            t,
+            vec![egui::Event::PointerMoved(dessous), clic(dessous, true)],
+        );
+        let (ajoutes, _, _) = image(t + 0.05, vec![clic(dessous, false)]);
+        assert_eq!(ajoutes.len(), 1, "aucun morceau sous l'album déplié");
+        let numero: usize = ajoutes[0]
+            .file_stem()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!(numero > 50, "morceau {numero} : la liste n'a pas défilé");
+        std::fs::remove_dir_all(&racine).unwrap();
+    }
+
+    #[test]
+    fn retrouve_la_vue_memorisee() {
+        for vue in Vue::TOUTES {
+            assert_eq!(Vue::depuis_le_code(vue.code()), vue);
+        }
+        assert_eq!(Vue::depuis_le_code("albums\n"), Vue::Albums);
+        assert_eq!(Vue::depuis_le_code("n'importe quoi"), Vue::Dossiers);
     }
 
     #[test]
