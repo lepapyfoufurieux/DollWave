@@ -1345,15 +1345,37 @@ mod tests {
     use super::*;
 
     /// Les tests qui créent un lecteur entier (avec sa sortie son) passent
-    /// un par un : ouvrir et fermer des sorties son dans plusieurs fils à
-    /// la fois fait planter la CI Windows.
+    /// un par un.
     static UN_LECTEUR_A_LA_FOIS: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     /// À garder tant que le lecteur du test existe.
     fn mon_tour() -> std::sync::MutexGuard<'static, ()> {
+        garder_le_son_de_windows_en_vie();
         UN_LECTEUR_A_LA_FOIS
             .lock()
             .unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Sous Windows, cpal (la bibliothèque du son) crée une seule fois un
+    /// objet Windows qui liste les sorties son, dans le fil qui s'en sert en
+    /// premier. Quand ce fil se termine, l'objet meurt avec lui, et le fil
+    /// suivant qui ouvre une sortie plante (STATUS_ACCESS_VIOLATION). Dans
+    /// l'appli, c'est toujours le fil de la fenêtre, qui vit jusqu'au bout ;
+    /// mais chaque test a son propre fil. On crée donc l'objet une fois pour
+    /// toutes dans un fil qui ne se termine jamais.
+    fn garder_le_son_de_windows_en_vie() {
+        static UNE_FOIS: std::sync::Once = std::sync::Once::new();
+        UNE_FOIS.call_once(|| {
+            let (pret, attendre) = mpsc::channel();
+            std::thread::spawn(move || {
+                let _ = sortie::nom_par_defaut();
+                let _ = pret.send(());
+                loop {
+                    std::thread::park();
+                }
+            });
+            let _ = attendre.recv();
+        });
     }
 
     /// Une liste de 4 morceaux ; ouvrir réussit seulement pour ceux de `lisibles`.
