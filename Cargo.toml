@@ -18,6 +18,9 @@ symphonia = { version = "0.5.5", default-features = false, features = ["mp3"] }
 # Décodage des pochettes d'album (JPEG, PNG). Déjà utilisé par eframe pour
 # les icônes ; on lui ajoute juste la lecture des JPEG.
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+# Trouve les dossiers du système (Musique, réglages) sous Windows comme
+# sous Linux.
+dirs = "6"
 
 # Les bibliothèques (décodage MP3 notamment) sont optimisées même en mode
 # développement : sinon le décodage serait très lent avec `cargo run`.

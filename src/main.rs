@@ -11,6 +11,7 @@ mod police;
 mod raccourcis;
 mod regroupement;
 mod sortie;
+mod systeme;
 mod tags;
 mod visualiseur;
 

@@ -8,8 +8,9 @@ use std::path::{Path, PathBuf};
 
 use eframe::egui;
 
-use crate::bibliotheque::{clic_simple, ecrire_sans_risque, fichier_de_reglage};
+use crate::bibliotheque::{clic_simple, ecrire_sans_risque};
 use crate::liste::{nom_du_fichier, place_sous_la_souris, MorceauGlisse};
+use crate::systeme::fichier_de_reglage;
 use crate::tags::TagsConnus;
 
 /// Les caractères que Windows refuse dans un nom de fichier.
