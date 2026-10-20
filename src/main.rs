@@ -70,6 +70,9 @@ const REGLAGE_FREINAGE: &str = "freinage.txt";
 const REGLAGE_SCRATCH: &str = "scratch.txt";
 /// Le petit fichier où l'on mémorise si le volume égalisé est activé (« oui » ou « non »).
 const REGLAGE_EGALISATION: &str = "volume_egalise.txt";
+/// Le petit fichier où l'on mémorise si le volume mesuré est écrit dans les
+/// MP3 (« oui » ou « non » ; désactivé tant qu'on ne l'a pas coché).
+const REGLAGE_ECRITURE_VOLUME: &str = "ecrire_volume.txt";
 /// Volume égalisé : facteur appliqué tant que le volume du morceau n'est pas
 /// encore connu (mesure en cours). La plupart des morceaux récents sont
 /// mixés fort : on les baisse déjà à moitié en attendant.
@@ -126,6 +129,8 @@ struct LecteurApp {
     egalisation: bool,
     // Le volume de chaque morceau, lu dans ses tags ou mesuré en arrière-plan.
     volumes: VolumesConnus,
+    // Le volume mesuré est-il aussi écrit dans les MP3 (tags ReplayGain) ?
+    ecrire_volume: bool,
     // Le morceau en cours et la taille de la liste lors de la dernière
     // demande de volumes : on ne redemande que quand ça change.
     volumes_demandes: Option<(Option<usize>, usize)>,
@@ -259,6 +264,10 @@ impl LecteurApp {
             Err(e) => (None, format!("Aucune sortie audio disponible : {e}")),
         };
         let maintenant = Instant::now();
+        let volumes = VolumesConnus::new(ctx);
+        // (Pendant les tests, jamais : ils jouent des fichiers du projet.)
+        let ecrire_volume = !cfg!(test) && option_cochee(REGLAGE_ECRITURE_VOLUME);
+        volumes.ecrire_dans_les_fichiers(ecrire_volume);
         Self {
             sortie,
             veilleur: Veilleur::new(maintenant),
@@ -275,7 +284,8 @@ impl LecteurApp {
             freinage: option_memorisee(REGLAGE_FREINAGE),
             scratch: option_memorisee(REGLAGE_SCRATCH),
             egalisation: option_memorisee(REGLAGE_EGALISATION),
-            volumes: VolumesConnus::new(ctx),
+            volumes,
+            ecrire_volume,
             volumes_demandes: None,
             enchainement: option_memorisee(REGLAGE_ENCHAINEMENT),
             sortant: None,
@@ -690,6 +700,25 @@ impl LecteurApp {
             memoriser_option(REGLAGE_EGALISATION, self.egalisation);
             self.volumes_demandes = None;
         }
+        ui.indent("ecrire_volume", |ui| {
+            ui.add_enabled_ui(self.egalisation, |ui| {
+                if ui
+                    .checkbox(&mut self.ecrire_volume, "Écrire le volume dans les MP3")
+                    .on_hover_text(
+                        "Le volume mesuré par le lecteur est aussi écrit dans le fichier \
+                         (tags ReplayGain), pour que d'autres lecteurs (téléphone, \
+                         foobar2000, MusicBee…) en profitent. Seuls les morceaux \
+                         écoutés (et les suivants de la liste) sont concernés ; les \
+                         tags ReplayGain déjà présents ne sont jamais changés.",
+                    )
+                    .changed()
+                {
+                    memoriser_option(REGLAGE_ECRITURE_VOLUME, self.ecrire_volume);
+                    self.volumes.ecrire_dans_les_fichiers(self.ecrire_volume);
+                    self.volumes_demandes = None;
+                }
+            });
+        });
         if ui
             .checkbox(&mut self.enchainement, "Fondu enchaîné")
             .on_hover_text(
@@ -1165,6 +1194,17 @@ impl LecteurApp {
 fn option_memorisee(fichier: &str) -> bool {
     let texte = fichier_de_reglage(fichier).and_then(|f| std::fs::read_to_string(f).ok());
     option_depuis(texte.as_deref())
+}
+
+/// Une option désactivée par défaut est-elle cochée ? Seulement si on l'a cochée.
+fn option_cochee(fichier: &str) -> bool {
+    let texte = fichier_de_reglage(fichier).and_then(|f| std::fs::read_to_string(f).ok());
+    option_cochee_depuis(texte.as_deref())
+}
+
+/// Lit le fichier d'une option désactivée par défaut.
+fn option_cochee_depuis(texte: Option<&str>) -> bool {
+    texte.is_some_and(|t| t.trim() == "oui")
 }
 
 /// Lit le fichier d'une option : activée par défaut (pas de fichier, ou
@@ -1664,6 +1704,13 @@ mod tests {
         assert!(option_depuis(None));
         assert!(option_depuis(Some("oui\n")));
         assert!(!option_depuis(Some("non\n")));
+    }
+
+    #[test]
+    fn une_option_desactivee_par_defaut_attend_qu_on_la_coche() {
+        assert!(!option_cochee_depuis(None));
+        assert!(option_cochee_depuis(Some("oui\n")));
+        assert!(!option_cochee_depuis(Some("non\n")));
     }
 
     /// Stop avec le freinage : le morceau est tout de suite « Arrêté », le

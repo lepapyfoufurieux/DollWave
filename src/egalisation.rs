@@ -18,6 +18,10 @@ use std::sync::{Arc, Condvar, Mutex};
 
 use eframe::egui;
 
+use id3::frame::ExtendedText;
+use id3::TagLike;
+
+use crate::ecriture_tags;
 use crate::morceau::Morceau;
 use crate::systeme::fichier_de_reglage;
 use crate::tags;
@@ -233,6 +237,8 @@ struct Partage {
     /// Mis à vrai quand un morceau urgent (celui qu'on va écouter) est
     /// demandé : la mesure en cours d'un autre morceau s'interrompt.
     urgence: AtomicBool,
+    /// Faut-il aussi écrire le volume dans les MP3 (tags ReplayGain) ?
+    ecrire: AtomicBool,
 }
 
 #[derive(Default)]
@@ -246,6 +252,9 @@ struct Etat {
     /// les demander deux fois.
     a_mesurer: VecDeque<PathBuf>,
     en_attente: HashSet<PathBuf>,
+    /// Les fichiers déjà passés au fil pendant que l'écriture dans les MP3
+    /// était activée : leur volume y est écrit (ou y était déjà).
+    ecrits: HashSet<PathBuf>,
 }
 
 impl VolumesConnus {
@@ -269,6 +278,7 @@ impl VolumesConnus {
             }),
             signal: Condvar::new(),
             urgence: AtomicBool::new(false),
+            ecrire: AtomicBool::new(false),
         });
         let pour_le_fil = Arc::clone(&partage);
         let ctx = ctx.clone();
@@ -286,8 +296,10 @@ impl VolumesConnus {
     /// celui qu'on écoute) : il passe devant tous les autres.
     pub fn demander<'a>(&self, chemins: impl IntoIterator<Item = &'a Path>) {
         let mut etat = self.etat();
+        let ecrire = self.partage.ecrire.load(Ordering::Relaxed);
         for (n, chemin) in chemins.into_iter().enumerate() {
-            if etat.connues.contains_key(chemin) {
+            // Déjà connu (et déjà écrit dans le fichier, si on doit l'y écrire).
+            if etat.connues.contains_key(chemin) && (!ecrire || etat.ecrits.contains(chemin)) {
                 continue;
             }
             if n == 0 {
@@ -302,6 +314,12 @@ impl VolumesConnus {
             }
         }
         self.partage.signal.notify_one();
+    }
+
+    /// Active ou non l'écriture du volume dans les MP3 (tags ReplayGain) des
+    /// morceaux demandés ensuite, déjà mesurés ou non.
+    pub fn ecrire_dans_les_fichiers(&self, ecrire: bool) {
+        self.partage.ecrire.store(ecrire, Ordering::Relaxed);
     }
 
     /// Le facteur de volume de ce morceau, s'il est déjà connu. 1.0 pour un
@@ -324,23 +342,27 @@ impl VolumesConnus {
 }
 
 /// La boucle du fil de mesure : prend le prochain morceau, le mesure (sans
-/// tenir le verrou) et range le résultat.
+/// tenir le verrou), écrit le volume dans le fichier si c'est demandé, et
+/// range le résultat.
 fn mesurer_en_arriere_plan(partage: &Partage, fichier: Option<&Path>, prevenir: &dyn Fn()) {
     loop {
-        let (chemin, notee) = {
+        let (chemin, connue, notee) = {
             let mut etat = partage.etat.lock().unwrap_or_else(|e| e.into_inner());
             while etat.a_mesurer.is_empty() {
                 etat = partage.signal.wait(etat).unwrap_or_else(|e| e.into_inner());
             }
             let chemin = etat.a_mesurer.pop_front().unwrap();
             partage.urgence.store(false, Ordering::Relaxed);
+            let connue = etat.connues.get(&chemin).copied();
             let notee = etat.notees.get(&chemin).copied();
-            (chemin, notee)
+            (chemin, connue, notee)
         };
-        let taille = std::fs::metadata(&chemin).map_or(0, |m| m.len());
-        let resultat = match notee {
+        let mut taille = std::fs::metadata(&chemin).map_or(0, |m| m.len());
+        let resultat = match (connue, notee) {
+            // Déjà mesuré pendant cette séance (on vient juste l'écrire).
+            (Some(mesure), _) => Some(mesure),
             // Déjà mesuré, et le fichier n'a pas changé.
-            Some(notee) if notee.taille == taille => Some(notee.mesure),
+            (None, Some(notee)) if notee.taille == taille => Some(notee.mesure),
             _ => {
                 let continuer = || !partage.urgence.load(Ordering::Relaxed);
                 match tags::lire_replaygain(&chemin) {
@@ -359,16 +381,61 @@ fn mesurer_en_arriere_plan(partage: &Partage, fichier: Option<&Path>, prevenir: 
                 })
             }
         };
+        // Écriture dans le MP3, s'il n'a pas déjà ses tags ReplayGain. Un
+        // échec (lecture seule, fichier ouvert ailleurs) n'empêche pas
+        // l'égalisation : on réessaiera la prochaine fois.
+        let ecrire = partage.ecrire.load(Ordering::Relaxed);
+        let mut ecrit = false;
+        if let (true, Some(Some(mesure))) = (ecrire, resultat) {
+            ecrit = tags::lire_replaygain(&chemin).is_some()
+                || ecrire_replaygain(&chemin, mesure).is_ok_and(|()| {
+                    // Le fichier a grandi : on note sa nouvelle taille.
+                    taille = std::fs::metadata(&chemin).map_or(0, |m| m.len());
+                    if let Some(fichier) = fichier {
+                        noter(
+                            fichier,
+                            &chemin,
+                            Notee {
+                                mesure: Some(mesure),
+                                taille,
+                            },
+                        );
+                    }
+                    true
+                });
+        }
         let mut etat = partage.etat.lock().unwrap_or_else(|e| e.into_inner());
         match resultat {
             Some(mesure) => {
                 etat.en_attente.remove(&chemin);
+                if ecrit {
+                    etat.ecrits.insert(chemin.clone());
+                }
+                if ecrit && taille != 0 {
+                    etat.notees.insert(chemin.clone(), Notee { mesure, taille });
+                }
                 etat.connues.insert(chemin, mesure);
                 prevenir();
             }
             None => etat.a_mesurer.push_back(chemin),
         }
     }
+}
+
+/// Écrit le volume mesuré dans les tags ReplayGain du fichier (« par
+/// morceau »), comme le font foobar2000 ou MusicBee. Les autres tags ne
+/// changent pas, et la musique est vérifiée avant de remplacer le fichier.
+pub fn ecrire_replaygain(chemin: &Path, mesure: Mesure) -> Result<(), ecriture_tags::Erreur> {
+    ecriture_tags::modifier(chemin, |tag| {
+        tag.add_frame(ExtendedText {
+            description: "REPLAYGAIN_TRACK_GAIN".to_string(),
+            value: format!("{:+.2} dB", mesure.gain_db),
+        });
+        tag.add_frame(ExtendedText {
+            description: "REPLAYGAIN_TRACK_PEAK".to_string(),
+            value: format!("{:.6}", mesure.crete),
+        });
+    })
 }
 
 /// Lit le fichier des mesures : une ligne par morceau,
@@ -587,11 +654,10 @@ mod tests {
         assert_eq!(notes[a], nouvelle);
     }
 
-    /// Le fil de mesure : le fichier est mesuré, noté, puis retrouvé dans
-    /// les notes sans être mesuré à nouveau.
-    #[test]
-    fn les_volumes_sont_mesures_puis_notes() {
-        let dossier = std::env::temp_dir().join("lecteur_mp3_test_volumes");
+    /// Un dossier de test vide avec une copie du vrai MP3 de test (sans
+    /// tags ReplayGain), et le chemin du fichier des mesures.
+    fn dossier_de_test(nom: &str) -> (PathBuf, PathBuf) {
+        let dossier = std::env::temp_dir().join(format!("lecteur_mp3_test_{nom}"));
         let _ = std::fs::remove_dir_all(&dossier);
         std::fs::create_dir_all(&dossier).unwrap();
         let morceau = dossier.join("glissando.mp3");
@@ -600,45 +666,154 @@ mod tests {
             &morceau,
         )
         .unwrap();
-        let notes = dossier.join("volumes.txt");
+        (morceau, dossier.join("volumes.txt"))
+    }
 
-        let lancer = |notees| {
-            let partage = Arc::new(Partage {
-                etat: Mutex::new(Etat {
-                    notees,
-                    ..Default::default()
-                }),
-                signal: Condvar::new(),
-                urgence: AtomicBool::new(false),
-            });
-            let (pour_le_fil, notes) = (Arc::clone(&partage), notes.clone());
-            let (envoi, reception) = std::sync::mpsc::channel();
-            std::thread::spawn(move || {
-                mesurer_en_arriere_plan(&pour_le_fil, Some(&notes), &|| {
-                    let _ = envoi.send(());
-                })
-            });
-            (VolumesConnus { partage }, reception)
-        };
+    /// Lance un fil de mesure qui note dans `notes`. Le récepteur reçoit un
+    /// signal à chaque morceau traité.
+    fn lancer(
+        notees: HashMap<PathBuf, Notee>,
+        notes: &Path,
+        ecrire: bool,
+    ) -> (VolumesConnus, std::sync::mpsc::Receiver<()>) {
+        let partage = Arc::new(Partage {
+            etat: Mutex::new(Etat {
+                notees,
+                ..Default::default()
+            }),
+            signal: Condvar::new(),
+            urgence: AtomicBool::new(false),
+            ecrire: AtomicBool::new(ecrire),
+        });
+        let (pour_le_fil, notes) = (Arc::clone(&partage), notes.to_path_buf());
+        let (envoi, reception) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            mesurer_en_arriere_plan(&pour_le_fil, Some(&notes), &|| {
+                let _ = envoi.send(());
+            })
+        });
+        (VolumesConnus { partage }, reception)
+    }
 
-        let (volumes, fini) = lancer(HashMap::new());
+    fn attendre(fini: &std::sync::mpsc::Receiver<()>) {
+        fini.recv_timeout(std::time::Duration::from_secs(30))
+            .expect("le fil de mesure ne répond pas");
+    }
+
+    fn relire_notes(notes: &Path) -> HashMap<PathBuf, Notee> {
+        lire_notes(&std::fs::read_to_string(notes).unwrap_or_default())
+    }
+
+    /// Le fil de mesure : le fichier est mesuré, noté, puis retrouvé dans
+    /// les notes sans être mesuré à nouveau. Sans l'option, le MP3 n'est
+    /// pas touché.
+    #[test]
+    fn les_volumes_sont_mesures_puis_notes() {
+        let (morceau, notes) = dossier_de_test("volumes");
+        let original = std::fs::read(&morceau).unwrap();
+
+        let (volumes, fini) = lancer(HashMap::new(), &notes, false);
         assert_eq!(volumes.gain(&morceau), None);
         volumes.demander([morceau.as_path()]);
-        fini.recv_timeout(std::time::Duration::from_secs(30))
-            .unwrap();
+        attendre(&fini);
         let gain = volumes.gain(&morceau).expect("mesuré");
-        let notees = lire_notes(&std::fs::read_to_string(&notes).unwrap());
+        let notees = relire_notes(&notes);
         assert_eq!(notees.len(), 1);
+        assert_eq!(std::fs::read(&morceau).unwrap(), original);
 
         // Au lancement suivant, la note suffit : le fichier de notes ne grandit pas.
-        let (volumes, fini) = lancer(notees);
+        let (volumes, fini) = lancer(notees, &notes, false);
         volumes.demander([morceau.as_path()]);
-        fini.recv_timeout(std::time::Duration::from_secs(30))
-            .unwrap();
+        attendre(&fini);
         assert_eq!(volumes.gain(&morceau), Some(gain));
+        assert_eq!(std::fs::read_to_string(&notes).unwrap().lines().count(), 1);
+    }
+
+    /// Les tags écrits se relisent, la musique ne change pas, et écrire
+    /// deux fois ne crée pas de tags en double.
+    #[test]
+    fn le_volume_s_ecrit_dans_le_mp3() {
+        let (morceau, _) = dossier_de_test("ecrire_replaygain");
+        let musique = |chemin: &Path| {
+            let mut sans_tags = Vec::new();
+            Morceau::ouvrir_pour_parcourir(chemin, || true)
+                .unwrap()
+                .parcourir(|e| {
+                    sans_tags.extend_from_slice(e);
+                    true
+                });
+            sans_tags
+        };
+        let avant = musique(&morceau);
+        let mesure = Mesure {
+            gain_db: -6.537,
+            crete: 0.65078735,
+        };
+        ecrire_replaygain(&morceau, mesure).unwrap();
+        ecrire_replaygain(&morceau, mesure).unwrap();
         assert_eq!(
-            lire_notes(&std::fs::read_to_string(&notes).unwrap()).len(),
-            1
+            tags::lire_replaygain(&morceau),
+            Some(Mesure {
+                gain_db: -6.54,
+                crete: 0.650787
+            })
         );
+        assert_eq!(musique(&morceau), avant);
+        let tag = id3::Tag::read_from_path(&morceau).unwrap();
+        assert_eq!(tag.extended_texts().count(), 2);
+        let gain = tag
+            .extended_texts()
+            .find(|t| t.description == "REPLAYGAIN_TRACK_GAIN");
+        assert_eq!(gain.unwrap().value, "-6.54 dB");
+    }
+
+    /// Avec l'option : le volume mesuré est écrit dans le MP3, et la note
+    /// suit la nouvelle taille du fichier (pas de nouvelle mesure ensuite).
+    #[test]
+    fn avec_l_option_le_volume_mesure_est_ecrit() {
+        let (morceau, notes) = dossier_de_test("volumes_ecrits");
+        let (volumes, fini) = lancer(HashMap::new(), &notes, true);
+        volumes.demander([morceau.as_path()]);
+        attendre(&fini);
+        let gain = volumes.gain(&morceau).expect("mesuré");
+        let ecrit = tags::lire_replaygain(&morceau).expect("tags écrits");
+        assert!((ecrit.gain() - gain).abs() < 0.01);
+        let taille = std::fs::metadata(&morceau).unwrap().len();
+        assert_eq!(relire_notes(&notes)[&morceau].taille, taille);
+
+        // Au lancement suivant : rien à mesurer ni à écrire.
+        let (volumes, fini) = lancer(relire_notes(&notes), &notes, true);
+        volumes.demander([morceau.as_path()]);
+        attendre(&fini);
+        assert_eq!(volumes.gain(&morceau), Some(gain));
+        assert_eq!(std::fs::metadata(&morceau).unwrap().len(), taille);
+    }
+
+    /// Cocher l'option après coup : un morceau déjà connu est écrit à sa
+    /// prochaine demande. Des tags ReplayGain déjà là ne sont jamais changés.
+    #[test]
+    fn l_option_cochee_apres_coup_et_tags_existants() {
+        let (morceau, notes) = dossier_de_test("volumes_apres_coup");
+        let (volumes, fini) = lancer(HashMap::new(), &notes, false);
+        volumes.demander([morceau.as_path()]);
+        attendre(&fini);
+        assert_eq!(tags::lire_replaygain(&morceau), None);
+        volumes.ecrire_dans_les_fichiers(true);
+        volumes.demander([morceau.as_path()]);
+        attendre(&fini);
+        assert!(tags::lire_replaygain(&morceau).is_some());
+
+        // Un autre fichier qui a déjà ses propres tags ReplayGain.
+        let (autre, notes) = dossier_de_test("volumes_tags_existants");
+        let siens = Mesure {
+            gain_db: -1.0,
+            crete: 0.5,
+        };
+        ecrire_replaygain(&autre, siens).unwrap();
+        let (volumes, fini) = lancer(HashMap::new(), &notes, true);
+        volumes.demander([autre.as_path()]);
+        attendre(&fini);
+        assert_eq!(tags::lire_replaygain(&autre), Some(siens));
+        assert_eq!(volumes.gain(&autre), Some(siens.gain()));
     }
 }
