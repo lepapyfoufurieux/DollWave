@@ -25,14 +25,14 @@ use std::time::{Duration, Instant};
 use eframe::egui;
 use rodio::Sink;
 
-use bibliotheque::{fichier_de_reglage, memoriser, Bibliotheque};
+use bibliotheque::{memoriser, Bibliotheque};
 use liste::{Action, ListeDeLecture};
 use morceau::Morceau;
 use platine::{Platine, Telecommande};
 use playlists::{Demande, Playlists};
 use raccourcis::Commande;
 use sortie::{Sortie, Veilleur};
-use systeme::ZoneDeNotification;
+use systeme::{fichier_de_reglage, ZoneDeNotification};
 use tags::TagsConnus;
 use visualiseur::Visualiseur;
 
@@ -56,7 +56,7 @@ const DUREE_FREINAGE: Duration = Duration::from_secs(1);
 /// Durée du démarrage en douceur à la Lecture (la vitesse monte de 0 à 1).
 const DUREE_DEMARRAGE: Duration = Duration::from_secs(1);
 /// Le petit fichier où l'on mémorise si le freinage (et le démarrage) est activé
-/// (%APPDATA%\lecteur_mp3\freinage.txt : « oui » ou « non »).
+/// (freinage.txt dans le dossier de réglages, voir `systeme` : « oui » ou « non »).
 const REGLAGE_FREINAGE: &str = "freinage.txt";
 
 /// L'état de l'application.
