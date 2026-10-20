@@ -435,7 +435,7 @@ impl ListeDeLecture {
 
 /// La place où insérer un morceau lâché à la hauteur `y` : avant la
 /// première ligne dont le milieu est plus bas que la souris, ou tout en bas.
-fn place_sous_la_souris(lignes: &[egui::Rect], y: f32) -> usize {
+pub(crate) fn place_sous_la_souris(lignes: &[egui::Rect], y: f32) -> usize {
     lignes
         .iter()
         .position(|r| y < r.center().y)

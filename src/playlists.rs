@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use eframe::egui;
 
 use crate::bibliotheque::{clic_simple, ecrire_sans_risque, fichier_de_reglage};
-use crate::liste::{nom_du_fichier, MorceauGlisse};
+use crate::liste::{nom_du_fichier, place_sous_la_souris, MorceauGlisse};
 use crate::tags::TagsConnus;
 
 /// Les caractères que Windows refuse dans un nom de fichier.
@@ -598,11 +598,9 @@ fn deposer_un_titre(ui: &egui::Ui, nom: &str, lignes: &[egui::Rect]) -> Option<(
     if !zone.expand2(egui::vec2(0.0, 6.0)).contains(souris) {
         return None;
     }
-    // On l'insère avant la première ligne dont le milieu est sous la souris.
-    let vers = lignes
-        .iter()
-        .position(|r| souris.y < r.center().y)
-        .unwrap_or(lignes.len());
+    // Comme dans la liste de lecture : avant la première ligne dont le
+    // milieu est sous la souris.
+    let vers = place_sous_la_souris(lignes, souris.y);
     let y = match lignes.get(vers) {
         Some(r) => r.top() - ui.spacing().item_spacing.y / 2.0,
         None => zone.bottom() + ui.spacing().item_spacing.y / 2.0,

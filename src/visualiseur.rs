@@ -86,8 +86,13 @@ impl Style {
 
 pub struct Visualiseur {
     style: Style,
-    /// L'outil qui découpe le son en fréquences (préparé une seule fois).
+    /// L'outil qui découpe le son en fréquences (préparé une seule fois),
+    /// avec sa fenêtre de Hann et ses tableaux de travail, réutilisés à
+    /// chaque image au lieu d'être refaits.
     fft: Arc<dyn Fft<f32>>,
+    fenetre: Vec<f32>,
+    spectre: Vec<Complex<f32>>,
+    brouillon: Vec<Complex<f32>>,
     /// Hauteur actuelle de chaque barre (entre 0 et 1).
     barres: [f32; NB_BARRES],
     /// Le résumé de la forme d'onde, calculé en arrière-plan une fois par
@@ -101,6 +106,11 @@ impl Visualiseur {
         Self {
             style: Style::memorise(),
             fft: FftPlanner::new().plan_fft_forward(TAILLE_FFT),
+            fenetre: (0..TAILLE_FFT)
+                .map(|i| 0.5 - 0.5 * (std::f32::consts::TAU * i as f32 / TAILLE_FFT as f32).cos())
+                .collect(),
+            spectre: Vec::with_capacity(TAILLE_FFT),
+            brouillon: Vec::new(),
             barres: [0.0; NB_BARRES],
             apercu: None,
         }
@@ -195,21 +205,23 @@ impl Visualiseur {
 
     /// Analyse le son à partir de `position` et renvoie la hauteur de chaque
     /// barre (entre 0 et 1), des graves aux aigus.
-    fn hauteurs_des_barres(&self, morceau: &Morceau, position: f32) -> [f32; NB_BARRES] {
+    fn hauteurs_des_barres(&mut self, morceau: &Morceau, position: f32) -> [f32; NB_BARRES] {
         let echantillons = morceau.extrait_mono(position, TAILLE_FFT);
 
         // On adoucit les deux bouts de l'extrait (fenêtre de Hann) : sinon la
         // coupure brutale ajouterait des fréquences qui n'existent pas.
-        let mut spectre: Vec<Complex<f32>> = echantillons
-            .iter()
-            .enumerate()
-            .map(|(i, &e)| {
-                let fenetre =
-                    0.5 - 0.5 * (std::f32::consts::TAU * i as f32 / TAILLE_FFT as f32).cos();
-                Complex::new(e * fenetre, 0.0)
-            })
-            .collect();
-        self.fft.process(&mut spectre);
+        self.spectre.clear();
+        self.spectre.extend(
+            echantillons
+                .iter()
+                .zip(&self.fenetre)
+                .map(|(&e, &f)| Complex::new(e * f, 0.0)),
+        );
+        self.brouillon
+            .resize(self.fft.get_inplace_scratch_len(), Complex::default());
+        self.fft
+            .process_with_scratch(&mut self.spectre, &mut self.brouillon);
+        let spectre = &self.spectre;
 
         // Chaque case du spectre couvre une petite plage de fréquences.
         let largeur_case = morceau.frequence() as f32 / TAILLE_FFT as f32;
@@ -352,7 +364,7 @@ mod tests {
     fn un_son_a_1000_hz_allume_la_bonne_barre() {
         // Un son pur à 1000 Hz, au volume maximum, pendant 1 seconde.
         let morceau = Morceau::sinus(1000.0, 44_100, 1.0);
-        let visualiseur = Visualiseur::new();
+        let mut visualiseur = Visualiseur::new();
         let hauteurs = visualiseur.hauteurs_des_barres(&morceau, 0.0);
 
         // La barre qui contient 1000 Hz est pleine…

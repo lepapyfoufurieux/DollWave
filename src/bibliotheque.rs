@@ -77,6 +77,13 @@ impl Dossier {
         }
         resultat.extend(self.morceaux.iter().cloned());
     }
+
+    /// Comme `tous_les_morceaux`, dans une nouvelle liste.
+    fn liste(&self) -> Vec<PathBuf> {
+        let mut morceaux = Vec::new();
+        self.tous_les_morceaux(&mut morceaux);
+        morceaux
+    }
 }
 
 /// Tous les MP3 d'un dossier et de ses sous-dossiers, dans l'ordre où la
@@ -536,16 +543,8 @@ fn afficher_dossier(ui: &mut egui::Ui, dossier: &Dossier, lignes: &mut Lignes) {
                     if clic_simple(ui, &etiquette) {
                         basculer = true;
                     }
-                    glisser(&etiquette, || {
-                        let mut morceaux = Vec::new();
-                        sous_dossier.tous_les_morceaux(&mut morceaux);
-                        morceaux
-                    });
-                    menu_playlist(&etiquette, lignes, || {
-                        let mut morceaux = Vec::new();
-                        sous_dossier.tous_les_morceaux(&mut morceaux);
-                        morceaux
-                    });
+                    glisser(&etiquette, || sous_dossier.liste());
+                    menu_playlist(&etiquette, lignes, || sous_dossier.liste());
                     let bouton = ui
                         .small_button("➕ tout")
                         .on_hover_text("Ajouter tout ce dossier à la liste de lecture");
