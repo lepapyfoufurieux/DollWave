@@ -56,14 +56,6 @@ impl ListeDeLecture {
         }
     }
 
-    /// Ajoute tous les MP3 d'un dossier et de ses sous-dossiers, triés par nom.
-    pub fn ajouter_dossier(&mut self, dossier: &Path) -> Option<usize> {
-        let mut fichiers = Vec::new();
-        chercher_mp3(dossier, &mut fichiers);
-        fichiers.sort_by_key(|f| f.to_string_lossy().to_lowercase());
-        self.ajouter(fichiers)
-    }
-
     /// Retire un morceau. Le numéro du morceau en cours est décalé si besoin.
     /// Renvoie `true` si c'est le morceau en cours qui a été retiré.
     pub fn retirer(&mut self, n: usize) -> bool {
@@ -121,6 +113,11 @@ impl ListeDeLecture {
 
     pub fn changer_repetition(&mut self, actif: bool) {
         self.repetition = actif;
+    }
+
+    /// Tous les morceaux de la liste, dans l'ordre.
+    pub fn morceaux(&self) -> &[PathBuf] {
+        &self.morceaux
     }
 
     pub fn est_vide(&self) -> bool {
@@ -240,25 +237,6 @@ pub fn nom_du_fichier(chemin: &Path) -> String {
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default()
-}
-
-/// Parcourt un dossier (et ses sous-dossiers) et note tous les fichiers .mp3.
-/// Les dossiers illisibles sont simplement ignorés.
-fn chercher_mp3(dossier: &Path, trouves: &mut Vec<PathBuf>) {
-    let Ok(contenu) = std::fs::read_dir(dossier) else {
-        return;
-    };
-    for entree in contenu.flatten() {
-        let chemin = entree.path();
-        if chemin.is_dir() {
-            chercher_mp3(&chemin, trouves);
-        } else if chemin
-            .extension()
-            .is_some_and(|e| e.eq_ignore_ascii_case("mp3"))
-        {
-            trouves.push(chemin);
-        }
-    }
 }
 
 #[cfg(test)]
@@ -392,23 +370,5 @@ mod tests {
         let mut l = liste(2);
         assert_eq!(l.ajouter(vec![PathBuf::from("x.mp3")]), Some(2));
         assert_eq!(l.ajouter(vec![]), None);
-    }
-
-    #[test]
-    fn dossier_trie_et_sous_dossiers() {
-        let racine = std::env::temp_dir().join("lecteur_mp3_test_dossier");
-        let _ = std::fs::remove_dir_all(&racine);
-        std::fs::create_dir_all(racine.join("b")).unwrap();
-        for f in ["c.mp3", "a.MP3", "notes.txt", "b/d.mp3"] {
-            std::fs::write(racine.join(f), b"").unwrap();
-        }
-        let mut l = ListeDeLecture::default();
-        l.ajouter_dossier(&racine);
-        let noms: Vec<_> = (0..3)
-            .map(|i| nom_du_fichier(l.fichier(i).unwrap()))
-            .collect();
-        assert_eq!(noms, ["a.MP3", "d.mp3", "c.mp3"]);
-        assert!(l.fichier(3).is_none());
-        std::fs::remove_dir_all(&racine).unwrap();
     }
 }
