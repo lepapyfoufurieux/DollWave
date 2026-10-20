@@ -94,25 +94,31 @@ impl Platine {
     /// Calcule la prochaine trame et avance dans le morceau.
     /// Renvoie `false` quand le morceau est terminé.
     fn preparer_trame(&mut self) -> bool {
-        let mut etat = self.etat.lock().unwrap();
+        // On copie les ordres sans garder le verrou : lire la trame peut
+        // demander de décoder un bloc (juste après un saut), et pendant ce
+        // temps l'interface doit pouvoir lire la position sans attendre.
+        let (position, en_pause, cible_scratch) = {
+            let etat = self.etat.lock().unwrap();
+            (etat.position, etat.en_pause, etat.cible_scratch)
+        };
         let frequence = self.morceau.frequence as f64;
         let fin = self.morceau.derniere_trame();
 
-        match etat.cible_scratch {
+        match cible_scratch {
             Some(cible) => {
                 // On vise la vitesse qui ramène la musique sous la souris,
                 // et on s'en approche en douceur (inertie du disque).
-                let voulue = ((cible - etat.position) / (frequence * RATTRAPAGE))
+                let voulue = ((cible - position) / (frequence * RATTRAPAGE))
                     .clamp(-VITESSE_MAX, VITESSE_MAX);
                 self.vitesse += (voulue - self.vitesse) / (frequence * INERTIE);
             }
-            None if etat.en_pause => {
+            None if en_pause => {
                 // En pause : du silence, sans avancer.
                 self.trame.fill(0.0);
                 return true;
             }
             None => {
-                if etat.position >= fin {
+                if position >= fin {
                     return false; // morceau terminé
                 }
                 self.vitesse = 1.0;
@@ -121,9 +127,9 @@ impl Platine {
 
         // La position tombe souvent entre deux trames : on mélange les deux
         // (interpolation), sinon le son serait granuleux pendant le scratch.
-        let avant = etat.position.floor() as usize;
+        let avant = position.floor() as usize;
         let apres = (avant + 1).min(fin as usize);
-        let melange = (etat.position - avant as f64) as f32;
+        let melange = (position - avant as f64) as f32;
         let morceau = &*self.morceau;
         self.trame.fill(0.0);
         if let Some(trame) = self.lecture.trame_jouee(morceau, avant) {
@@ -140,7 +146,11 @@ impl Platine {
             *sortie /= 32768.0;
         }
 
-        etat.position = (etat.position + self.vitesse).clamp(0.0, fin);
+        // Si l'interface a sauté ailleurs pendant ce temps, son saut l'emporte.
+        let mut etat = self.etat.lock().unwrap();
+        if etat.position == position {
+            etat.position = (position + self.vitesse).clamp(0.0, fin);
+        }
         true
     }
 }
@@ -235,5 +245,22 @@ mod tests {
         }
         // En 1 seconde, impossible d'avancer de plus de 8 secondes.
         assert!(telecommande.position().as_secs_f64() <= VITESSE_MAX);
+    }
+
+    /// Pendant que la platine prépare une trame (sans tenir le verrou),
+    /// l'interface peut lire la position ; et un saut demandé pendant ce
+    /// temps n'est pas écrasé.
+    #[test]
+    fn la_platine_ne_bloque_pas_l_interface_et_respecte_les_sauts() {
+        let (telecommande, mut platine) = Telecommande::nouvelle(morceau_test(10));
+        telecommande.aller_a(2.0);
+        for _ in 0..100 {
+            platine.next();
+        }
+        assert_eq!(telecommande.position(), Duration::from_millis(2100));
+        telecommande.aller_a(7.0);
+        platine.next();
+        assert_eq!(telecommande.position(), Duration::from_millis(7001));
+        assert_eq!(platine.next(), Some(7001.0 / 32768.0));
     }
 }
