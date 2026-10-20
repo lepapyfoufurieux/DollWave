@@ -12,6 +12,7 @@ pub enum Commande {
     Deplacer(f32),
     Muet,
     Aleatoire,
+    Repetition,
 }
 
 /// De combien Q et D font reculer ou avancer dans le morceau.
@@ -19,7 +20,7 @@ const SAUT: f32 = 5.0;
 
 /// Les touches et leur commande. On compare la lettre écrite sur la touche,
 /// donc Q et D sont bien les touches marquées Q et D sur un clavier AZERTY.
-const TOUCHES: [(Key, Commande); 8] = [
+const TOUCHES: [(Key, Commande); 9] = [
     (Key::Space, Commande::LecturePause),
     (Key::S, Commande::Stop),
     (Key::ArrowLeft, Commande::Precedent),
@@ -28,6 +29,7 @@ const TOUCHES: [(Key, Commande); 8] = [
     (Key::D, Commande::Deplacer(SAUT)),
     (Key::M, Commande::Muet),
     (Key::A, Commande::Aleatoire),
+    (Key::R, Commande::Repetition),
 ];
 
 /// La liste affichée dans l'aide « ⌨ Raccourcis ».
@@ -37,6 +39,7 @@ pub const AIDE: &str = "Espace : lecture / pause\n\
     Q / D : reculer / avancer de 5 secondes\n\
     M : couper / remettre le son\n\
     A : lecture aléatoire\n\
+    R : lecture en boucle\n\
     Molette : volume";
 
 /// Les commandes demandées au clavier depuis l'image précédente.
@@ -116,6 +119,10 @@ mod tests {
         assert!(matches!(
             appuyer(&ctx, Key::A, rien)[..],
             [Commande::Aleatoire]
+        ));
+        assert!(matches!(
+            appuyer(&ctx, Key::R, rien)[..],
+            [Commande::Repetition]
         ));
         assert!(appuyer(&ctx, Key::Z, rien).is_empty());
     }

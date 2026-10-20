@@ -286,6 +286,10 @@ impl LecteurApp {
                 let aleatoire = self.liste.aleatoire();
                 self.liste.changer_aleatoire(!aleatoire);
             }
+            Commande::Repetition => {
+                let repetition = self.liste.repetition();
+                self.liste.changer_repetition(!repetition);
+            }
         }
     }
 
