@@ -28,7 +28,7 @@ use visualiseur::Visualiseur;
 
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_inner_size([920.0, 680.0]),
+        viewport: egui::ViewportBuilder::default().with_inner_size([920.0, 840.0]),
         ..Default::default()
     };
     eframe::run_native(
@@ -401,8 +401,8 @@ impl LecteurApp {
 
 /// Côté de la pochette affichée sous le visualiseur, en points : la plus
 /// grande possible dans la place qui reste, entre ces deux tailles.
-const POCHETTE_MIN: f32 = 120.0;
-const POCHETTE_MAX: f32 = 320.0;
+const POCHETTE_MIN: f32 = 200.0;
+const POCHETTE_MAX: f32 = 600.0;
 
 impl LecteurApp {
     /// Lit la pochette du morceau en cours quand il change (rien à faire sinon).
@@ -426,7 +426,9 @@ impl LecteurApp {
         };
         ui.add_space(8.0);
         // On garde de la place pour le message et l'aide des raccourcis en dessous.
-        let cote = (ui.available_height() - 60.0).clamp(POCHETTE_MIN, POCHETTE_MAX);
+        let cote = (ui.available_height() - 40.0)
+            .min(ui.available_width())
+            .clamp(POCHETTE_MIN, POCHETTE_MAX);
         ui.vertical_centered(|ui| {
             ui.add(egui::Image::new(pochette).fit_to_exact_size(egui::vec2(cote, cote)));
         });

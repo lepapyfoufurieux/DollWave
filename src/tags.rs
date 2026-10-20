@@ -18,7 +18,7 @@ use crate::liste::nom_du_fichier;
 
 /// Côté le plus long de la pochette une fois réduite : assez pour qu'elle
 /// reste nette à l'écran, sans garder une image de 3000 × 3000 en mémoire.
-const TAILLE_POCHETTE: u32 = 512;
+const TAILLE_POCHETTE: u32 = 640;
 
 /// Pendant la lecture des tags en arrière-plan, on redessine la fenêtre
 /// au plus toutes les 200 ms (et pas après chaque fichier).
