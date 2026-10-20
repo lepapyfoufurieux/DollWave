@@ -29,10 +29,10 @@ use tray_icon::menu::{Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem};
 use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 use windows_sys::Win32::Foundation::HWND;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    DispatchMessageW, GetWindowLongPtrW, MsgWaitForMultipleObjects, PeekMessageW,
-    SetForegroundWindow, SetWindowLongPtrW, ShowWindow, TranslateMessage, GWL_EXSTYLE, MSG,
-    PM_REMOVE, QS_ALLINPUT, SW_HIDE, SW_RESTORE, SW_SHOWMINNOACTIVE, WS_EX_APPWINDOW,
-    WS_EX_TOOLWINDOW,
+    AllowSetForegroundWindow, DispatchMessageW, GetWindowLongPtrW, MsgWaitForMultipleObjects,
+    PeekMessageW, SetForegroundWindow, SetWindowLongPtrW, ShowWindow, TranslateMessage, ASFW_ANY,
+    GWL_EXSTYLE, MSG, PM_REMOVE, QS_ALLINPUT, SW_HIDE, SW_RESTORE, SW_SHOWMINNOACTIVE,
+    WS_EX_APPWINDOW, WS_EX_TOOLWINDOW,
 };
 
 use super::{icone_vinyle, texte_d_infobulle, TAILLE_ICONE};
@@ -79,6 +79,9 @@ pub struct ZoneDeNotification {
     clics: Receiver<Clic>,
     fil: Option<JoinHandle<()>>,
     infobulle: String,
+    /// Le lecteur a demandé à revenir au premier plan (MP3 ouvert depuis
+    /// l'explorateur), comme un clic sur l'icône.
+    a_afficher: bool,
 }
 
 impl ZoneDeNotification {
@@ -97,6 +100,7 @@ impl ZoneDeNotification {
                 clics,
                 fil: None,
                 infobulle: String::new(),
+                a_afficher: false,
             };
         }
         let (envoi_entrees, entrees) = mpsc::channel();
@@ -115,6 +119,22 @@ impl ZoneDeNotification {
             clics,
             fil,
             infobulle: String::new(),
+            a_afficher: false,
+        }
+    }
+
+    /// Ramène la fenêtre au premier plan, même rangée près de l'horloge.
+    pub fn afficher(&mut self, ctx: &egui::Context) {
+        if self.entrees.is_some() {
+            // Comme un clic sur l'icône, traité par `surveiller`.
+            self.a_afficher = true;
+            ctx.request_repaint();
+        } else {
+            // Pas d'icône : la fenêtre se réduit normalement.
+            if ctx.input(|i| i.viewport().minimized == Some(true)) {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+            }
+            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
         }
     }
 
@@ -130,7 +150,7 @@ impl ZoneDeNotification {
             return commandes;
         };
 
-        let mut afficher = false;
+        let mut afficher = std::mem::take(&mut self.a_afficher);
         while let Ok(clic) = self.clics.try_recv() {
             let id = match clic {
                 Clic::Icone => {
@@ -283,6 +303,17 @@ fn creer_l_icone() -> Option<(TrayIcon, Entrees)> {
         quitter: quitter.id().clone(),
     };
     Some((icone, entrees))
+}
+
+/// Appelé par un deuxième lancement du lecteur, juste avant de passer ses
+/// fichiers au lecteur déjà ouvert : Windows ne laisse passer une fenêtre au
+/// premier plan que si le programme qui a la main (ici, celui que
+/// l'explorateur vient de lancer) le permet.
+pub fn autoriser_le_premier_plan() {
+    // SAFETY : simple autorisation, sans pointeur.
+    unsafe {
+        AllowSetForegroundWindow(ASFW_ANY);
+    }
 }
 
 /// La fenêtre du lecteur, telle que Windows la connaît.

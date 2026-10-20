@@ -37,11 +37,24 @@ use platine::{Effet, Platine, Telecommande};
 use playlists::{Demande, Playlists};
 use raccourcis::Commande;
 use sortie::{Sortie, Veilleur};
-use systeme::{fichier_de_reglage, ZoneDeNotification};
+use systeme::{fichier_de_reglage, Boite, Demarrage, ZoneDeNotification};
 use tags::TagsConnus;
 use visualiseur::Visualiseur;
 
 fn main() -> eframe::Result {
+    // Les fichiers donnés au lancement : celui sur lequel on a double-cliqué
+    // dans l'explorateur (ou plusieurs). Si un lecteur est déjà ouvert, il
+    // les reçoit, et on s'arrête là. Les chemins sont rendus complets : le
+    // lecteur déjà ouvert ne tourne pas forcément dans le même dossier.
+    let fichiers = std::env::args_os()
+        .skip(1)
+        .map(PathBuf::from)
+        .map(|f| std::path::absolute(&f).unwrap_or(f))
+        .collect();
+    let boite = match systeme::demarrer(fichiers) {
+        Demarrage::Premier(boite) => boite,
+        Demarrage::DejaOuvert => return Ok(()),
+    };
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default().with_inner_size([920.0, 840.0]),
         ..Default::default()
@@ -49,8 +62,24 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "Lecteur MP3",
         options,
-        Box::new(|cc| Ok(Box::new(LecteurApp::new(&cc.egui_ctx)))),
+        Box::new(|cc| {
+            let mut lecteur = LecteurApp::new(&cc.egui_ctx);
+            boite.brancher(&cc.egui_ctx);
+            lecteur.boite = boite;
+            Ok(Box::new(lecteur))
+        }),
     )
+}
+
+/// Plusieurs MP3 ouverts d'un coup dans l'explorateur arrivent chacun par son
+/// propre lancement, à quelques millisecondes d'écart : ceux qui arrivent
+/// dans ce délai sont ajoutés sans couper le premier.
+const MEME_SELECTION: Duration = Duration::from_secs(1);
+
+/// Vrai si des fichiers ouverts maintenant font partie de la même sélection
+/// que les précédents (voir `MEME_SELECTION`).
+fn meme_selection(precedente: Option<Instant>, maintenant: Instant) -> bool {
+    precedente.is_some_and(|p| maintenant.saturating_duration_since(p) < MEME_SELECTION)
 }
 
 /// Le début du message affiché quand aucune sortie son ne marche.
@@ -147,6 +176,11 @@ struct LecteurApp {
     tags: TagsConnus,
     // L'icône près de l'horloge (sous Windows), où se range la fenêtre réduite.
     zone: ZoneDeNotification,
+    // Les fichiers à ouvrir donnés au lancement, puis par les lancements
+    // suivants (double-clic sur un MP3 alors que le lecteur est ouvert).
+    boite: Boite,
+    // Quand le dernier lot de fichiers ouverts depuis l'explorateur est arrivé.
+    derniere_ouverture: Option<Instant>,
     // La pochette du morceau en cours, et le fichier dont elle vient (pour
     // ne la relire que quand le morceau change). Rien si le fichier n'en a pas.
     pochette: Option<(PathBuf, Option<egui::TextureHandle>)>,
@@ -293,6 +327,8 @@ impl LecteurApp {
             visualiseur: Visualiseur::new(),
             tags: TagsConnus::new(ctx),
             zone: ZoneDeNotification::new(ctx),
+            boite: Boite::vide(),
+            derniere_ouverture: None,
             pochette: None,
             message,
             depots: depot::Depots::default(),
@@ -320,6 +356,34 @@ impl LecteurApp {
     fn ajouter(&mut self, fichiers: Vec<PathBuf>) {
         let a_lancer = self.liste.ajouter(fichiers);
         self.jouer_si_rien_en_cours(a_lancer);
+    }
+
+    /// Ouvre les fichiers reçus de l'explorateur (double-clic sur un MP3) :
+    /// ajoutés à la fin de la liste, le premier joue tout de suite, et la
+    /// fenêtre revient au premier plan. Un lancement sans fichier ramène
+    /// juste la fenêtre.
+    fn ouvrir_les_fichiers_recus(&mut self, ctx: &egui::Context) {
+        for lot in self.boite.recus() {
+            let lancement_sans_fichier = lot.is_empty();
+            let fichiers = depot::mp3_deposes(lot);
+            let maintenant = Instant::now();
+            let meme_selection = meme_selection(self.derniere_ouverture, maintenant);
+            if !fichiers.is_empty() {
+                self.derniere_ouverture = Some(maintenant);
+                let premier = self.liste.morceaux().len();
+                if self.liste.ajouter(fichiers).is_some() {
+                    if meme_selection {
+                        // Ouverts ensemble : le premier joue déjà.
+                        self.jouer_si_rien_en_cours(Some(premier));
+                    } else {
+                        self.jouer(premier);
+                    }
+                }
+            } else if !lancement_sans_fichier {
+                self.message = "Aucun fichier MP3 dans ce qui a été ouvert.".to_string();
+            }
+            self.zone.afficher(ctx);
+        }
     }
 
     /// Ajoute les fichiers et dossiers lâchés dans la fenêtre, s'il y en a.
@@ -1237,6 +1301,7 @@ impl eframe::App for LecteurApp {
         for commande in raccourcis::lire(ctx) {
             self.executer(commande);
         }
+        self.ouvrir_les_fichiers_recus(ctx);
         for commande in self.zone.surveiller(ctx, frame) {
             self.executer(commande);
         }
@@ -1559,6 +1624,17 @@ mod tests {
             assert_eq!(liste.courant(), Some(*i));
         }
         (resultat, essayes)
+    }
+
+    #[test]
+    fn des_mp3_ouverts_ensemble_ne_se_coupent_pas() {
+        let debut = Instant::now();
+        assert!(!meme_selection(None, debut));
+        assert!(meme_selection(
+            Some(debut),
+            debut + Duration::from_millis(30)
+        ));
+        assert!(!meme_selection(Some(debut), debut + Duration::from_secs(2)));
     }
 
     #[test]

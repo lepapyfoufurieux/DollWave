@@ -6,10 +6,13 @@
 
 use std::path::PathBuf;
 
+mod instance;
 #[cfg(windows)]
 mod windows;
+
+pub use instance::{demarrer, Boite, Demarrage};
 #[cfg(windows)]
-pub use windows::ZoneDeNotification;
+pub use windows::{autoriser_le_premier_plan, ZoneDeNotification};
 
 /// Le nom de notre dossier de réglages.
 const NOTRE_DOSSIER: &str = "lecteur_mp3";
@@ -54,7 +57,20 @@ impl ZoneDeNotification {
     }
 
     pub fn infobulle(&mut self, _morceau: Option<&str>) {}
+
+    /// Ramène la fenêtre au premier plan (même réduite).
+    pub fn afficher(&mut self, ctx: &eframe::egui::Context) {
+        use eframe::egui::ViewportCommand;
+        if ctx.input(|i| i.viewport().minimized == Some(true)) {
+            ctx.send_viewport_cmd(ViewportCommand::Minimized(false));
+        }
+        ctx.send_viewport_cmd(ViewportCommand::Focus);
+    }
 }
+
+/// Rien à faire hors de Windows (voir la version Windows).
+#[cfg(not(windows))]
+pub fn autoriser_le_premier_plan() {}
 
 /// Taille de l'icône près de l'horloge, en pixels.
 #[cfg_attr(not(windows), allow(dead_code))]
