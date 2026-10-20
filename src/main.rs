@@ -705,8 +705,13 @@ impl eframe::App for LecteurApp {
 
         // Pendant la lecture (ou en pause, le temps que les barres retombent),
         // on redessine à chaque image de l'écran pour que le visualiseur soit fluide.
-        // Sinon, de temps en temps suffit pour voir l'état changer.
-        if self.platine_active().is_some() {
+        // Sinon (en pause, à l'arrêt, ou fenêtre réduite : rien ne bouge à
+        // l'écran), de temps en temps suffit pour voir l'état changer et
+        // passer au morceau suivant.
+        let en_lecture = self.platine_active().is_some_and(|t| !t.en_pause());
+        let reduite = ctx.input(|i| i.viewport().minimized == Some(true));
+        let anime = en_lecture || !self.visualiseur.au_repos() || self.position_glissee.is_some();
+        if anime && !reduite {
             ctx.request_repaint();
         } else {
             ctx.request_repaint_after(Duration::from_millis(200));
