@@ -64,6 +64,24 @@ impl ListeDeLecture {
         self.ajouter(fichiers)
     }
 
+    /// Ajoute ce qui a été déposé dans la fenêtre, dans l'ordre : les fichiers
+    /// MP3 tels quels, et pour chaque dossier ses MP3 (sous-dossiers compris)
+    /// triés par nom. Les autres fichiers sont ignorés.
+    pub fn ajouter_depose(&mut self, elements: Vec<PathBuf>) -> Option<usize> {
+        let mut fichiers = Vec::new();
+        for element in elements {
+            if element.is_dir() {
+                let mut du_dossier = Vec::new();
+                chercher_mp3(&element, &mut du_dossier);
+                du_dossier.sort_by_key(|f| f.to_string_lossy().to_lowercase());
+                fichiers.extend(du_dossier);
+            } else if est_un_mp3(&element) {
+                fichiers.push(element);
+            }
+        }
+        self.ajouter(fichiers)
+    }
+
     /// Retire un morceau. Le numéro du morceau en cours est décalé si besoin.
     /// Renvoie `true` si c'est le morceau en cours qui a été retiré.
     pub fn retirer(&mut self, n: usize) -> bool {
@@ -252,13 +270,17 @@ fn chercher_mp3(dossier: &Path, trouves: &mut Vec<PathBuf>) {
         let chemin = entree.path();
         if chemin.is_dir() {
             chercher_mp3(&chemin, trouves);
-        } else if chemin
-            .extension()
-            .is_some_and(|e| e.eq_ignore_ascii_case("mp3"))
-        {
+        } else if est_un_mp3(&chemin) {
             trouves.push(chemin);
         }
     }
+}
+
+/// Le fichier a-t-il l'extension .mp3 (en majuscules ou minuscules) ?
+fn est_un_mp3(chemin: &Path) -> bool {
+    chemin
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("mp3"))
 }
 
 #[cfg(test)]
@@ -409,6 +431,31 @@ mod tests {
             .collect();
         assert_eq!(noms, ["a.MP3", "d.mp3", "c.mp3"]);
         assert!(l.fichier(3).is_none());
+        std::fs::remove_dir_all(&racine).unwrap();
+    }
+
+    #[test]
+    fn depot_melange_fichiers_et_dossiers() {
+        let racine = std::env::temp_dir().join("lecteur_mp3_test_depot");
+        let _ = std::fs::remove_dir_all(&racine);
+        std::fs::create_dir_all(racine.join("album/cd2")).unwrap();
+        for f in ["seul.mp3", "image.jpg", "album/z.mp3", "album/cd2/a.mp3"] {
+            std::fs::write(racine.join(f), b"").unwrap();
+        }
+        let mut l = ListeDeLecture::default();
+        let depose = vec![
+            racine.join("seul.mp3"),
+            racine.join("image.jpg"),
+            racine.join("album"),
+        ];
+        assert_eq!(l.ajouter_depose(depose), Some(0));
+        let noms: Vec<_> = (0..3)
+            .map(|i| nom_du_fichier(l.fichier(i).unwrap()))
+            .collect();
+        assert_eq!(noms, ["seul.mp3", "a.mp3", "z.mp3"]);
+        assert!(l.fichier(3).is_none());
+        // Rien d'utilisable : la liste ne bouge pas.
+        assert_eq!(l.ajouter_depose(vec![racine.join("image.jpg")]), None);
         std::fs::remove_dir_all(&racine).unwrap();
     }
 }
