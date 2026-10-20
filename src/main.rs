@@ -430,7 +430,10 @@ impl eframe::App for LecteurApp {
                 let noms = self.playlists.noms();
                 let dans_la_liste: HashSet<&Path> =
                     self.liste.morceaux().iter().map(PathBuf::as_path).collect();
-                (self.bibliotheque.afficher(ui, &dans_la_liste, &noms), demande)
+                (
+                    self.bibliotheque.afficher(ui, &dans_la_liste, &noms),
+                    demande,
+                )
             })
             .inner;
         if !demandes.a_ajouter.is_empty() {
@@ -531,10 +534,16 @@ impl eframe::App for LecteurApp {
                 }
                 if !self.liste.est_vide() {
                     let aide = match self.playlists.chargee() {
-                        Some(nom) => format!("Mettre à jour la playlist « {nom} » avec cette liste"),
+                        Some(nom) => {
+                            format!("Mettre à jour la playlist « {nom} » avec cette liste")
+                        }
                         None => "Enregistrer cette liste comme nouvelle playlist".to_string(),
                     };
-                    if ui.small_button("💾 Enregistrer").on_hover_text(aide).clicked() {
+                    if ui
+                        .small_button("💾 Enregistrer")
+                        .on_hover_text(aide)
+                        .clicked()
+                    {
                         self.playlists.enregistrer(self.liste.morceaux());
                     }
                     if ui.small_button("Vider").clicked() {

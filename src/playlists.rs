@@ -210,9 +210,9 @@ impl Playlists {
         ui.horizontal(|ui| {
             let chargee = self.chargee.as_deref() == Some(nom.as_str());
             let texte = format!("🎵 {} ({})", nom, self.toutes[n].nombre);
-            let etiquette = ui
-                .selectable_label(chargee, texte)
-                .on_hover_text("Cliquer pour écouter cette playlist (remplace la liste de lecture)");
+            let etiquette = ui.selectable_label(chargee, texte).on_hover_text(
+                "Cliquer pour écouter cette playlist (remplace la liste de lecture)",
+            );
             if clic_simple(ui, &etiquette) {
                 if let Some(fichiers) = self.lire_pour(&nom) {
                     self.chargee = Some(nom.clone());
@@ -315,9 +315,8 @@ impl Playlists {
             return;
         };
         let resultat = match &self.saisie {
-            Some(Saisie::Nouvelle(texte)) => {
-                nom_valide(texte).and_then(|nom| creer(&dossier, &nom, morceaux).map(|()| (None, nom)))
-            }
+            Some(Saisie::Nouvelle(texte)) => nom_valide(texte)
+                .and_then(|nom| creer(&dossier, &nom, morceaux).map(|()| (None, nom))),
             Some(Saisie::Renommer { ancien, texte }) => nom_valide(texte).and_then(|nom| {
                 renommer(&dossier, ancien, &nom).map(|()| (Some(ancien.clone()), nom))
             }),
@@ -562,7 +561,10 @@ mod tests {
         .unwrap();
         assert_eq!(
             lire(&dossier, "vlc").unwrap(),
-            vec![dossier.join("sous/dossier/1.mp3"), PathBuf::from("/absolu/2.mp3")]
+            vec![
+                dossier.join("sous/dossier/1.mp3"),
+                PathBuf::from("/absolu/2.mp3")
+            ]
         );
     }
 
@@ -576,6 +578,9 @@ mod tests {
         assert!(matches!(playlists.saisie, Some(Saisie::Nouvelle(_))));
         playlists.chargee = Some("p".to_string());
         playlists.enregistrer(&[PathBuf::from("/m/1.mp3")]);
-        assert_eq!(lire(&dossier, "p").unwrap(), vec![PathBuf::from("/m/1.mp3")]);
+        assert_eq!(
+            lire(&dossier, "p").unwrap(),
+            vec![PathBuf::from("/m/1.mp3")]
+        );
     }
 }
