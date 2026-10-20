@@ -301,11 +301,10 @@ impl Bibliotheque {
         if recherche.is_empty() {
             ui.horizontal(|ui| {
                 ui.label(format!("{} morceaux", contenu.tous.len()));
-                if ui
+                let bouton = ui
                     .small_button("➕ Tout ajouter")
-                    .on_hover_text("Ajouter toute la bibliothèque à la liste de lecture")
-                    .clicked()
-                {
+                    .on_hover_text("Ajouter toute la bibliothèque à la liste de lecture");
+                if clic_simple(ui, &bouton) {
                     contenu.racine.tous_les_morceaux(&mut a_ajouter);
                 }
             });
@@ -332,11 +331,10 @@ impl Bibliotheque {
             } else {
                 format!("{nombre} résultats")
             });
-            if ui
+            let bouton = ui
                 .small_button("➕ Tout ajouter")
-                .on_hover_text("Ajouter tous les résultats à la liste de lecture")
-                .clicked()
-            {
+                .on_hover_text("Ajouter tous les résultats à la liste de lecture");
+            if clic_simple(ui, &bouton) {
                 a_ajouter.extend(
                     self.resultats
                         .iter()
@@ -381,17 +379,18 @@ fn afficher_dossier(
                 .show_header(ui, |ui| {
                     // Un clic sur le nom du dossier le déplie ou le replie, comme la flèche.
                     let nom = format!("📁 {} ({})", sous_dossier.nom, sous_dossier.total);
-                    if ui
-                        .add(egui::Label::new(nom).sense(egui::Sense::click()))
-                        .clicked()
-                    {
+                    let etiquette = ui.add(
+                        egui::Label::new(nom)
+                            .selectable(false)
+                            .sense(egui::Sense::click()),
+                    );
+                    if clic_simple(ui, &etiquette) {
                         basculer = true;
                     }
-                    if ui
+                    let bouton = ui
                         .small_button("➕ tout")
-                        .on_hover_text("Ajouter tout ce dossier à la liste de lecture")
-                        .clicked()
-                    {
+                        .on_hover_text("Ajouter tout ce dossier à la liste de lecture");
+                    if clic_simple(ui, &bouton) {
                         sous_dossier.tous_les_morceaux(a_ajouter);
                     }
                 });
@@ -423,13 +422,25 @@ fn ligne_morceau(
     } else {
         "Cliquer pour ajouter à la liste de lecture"
     };
-    if ui
-        .selectable_label(false, texte)
-        .on_hover_text(aide)
-        .clicked()
-    {
+    let ligne = ui.selectable_label(false, texte).on_hover_text(aide);
+    if clic_simple(ui, &ligne) {
         a_ajouter.push(chemin.to_path_buf());
     }
+}
+
+/// Un clic qui compte. Pour egui, un double-clic, c'est deux clics : le
+/// second ajouterait le morceau une deuxième fois. On ignore donc le 2e
+/// (et le 3e) clic d'un double-clic (ou triple-clic) sur le même élément.
+/// Deux clics rapides sur deux morceaux différents comptent bien tous les deux.
+fn clic_simple(ui: &egui::Ui, reponse: &egui::Response) -> bool {
+    if !reponse.clicked() {
+        return false;
+    }
+    let memoire = egui::Id::new("dernier_clic_bibliotheque");
+    let precedent: Option<egui::Id> = ui.ctx().data_mut(|d| d.get_temp(memoire));
+    ui.ctx().data_mut(|d| d.insert_temp(memoire, reponse.id));
+    let repetition = reponse.double_clicked() || reponse.triple_clicked();
+    !(repetition && precedent == Some(reponse.id))
 }
 
 /// Le fichier se termine-t-il par .mp3 (ou .MP3, .Mp3…) ?
@@ -576,6 +587,67 @@ mod tests {
         std::fs::write(&fichier, "  \n").unwrap();
         assert_eq!(lire_reglage(&fichier), None);
         std::fs::remove_dir_all(&racine).unwrap();
+    }
+
+    /// Simule des clics de souris sur deux boutons (à gauche et à droite),
+    /// à des instants donnés, et compte les clics qui comptent pour chacun.
+    fn compter_clics(clics: &[(f64, bool)]) -> [usize; 2] {
+        let ctx = egui::Context::default();
+        let mut comptes = [0, 0];
+        let mut image = |temps: f64, evenements: Vec<egui::Event>| {
+            let entree = egui::RawInput {
+                time: Some(temps),
+                events: evenements,
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(400.0, 300.0),
+                )),
+                ..Default::default()
+            };
+            let mut positions = [egui::Pos2::ZERO; 2];
+            let _ = ctx.run(entree, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    ui.horizontal(|ui| {
+                        for (n, nom) in ["gauche", "droite"].into_iter().enumerate() {
+                            let bouton = ui.button(nom);
+                            positions[n] = bouton.rect.center();
+                            if clic_simple(ui, &bouton) {
+                                comptes[n] += 1;
+                            }
+                        }
+                    });
+                });
+            });
+            positions
+        };
+        let positions = image(0.0, vec![]);
+        for &(temps, a_droite) in clics {
+            let pos = positions[a_droite as usize];
+            let bouton = |pressed| egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            };
+            image(temps, vec![egui::Event::PointerMoved(pos), bouton(true)]);
+            image(temps + 0.01, vec![bouton(false)]);
+            image(temps + 0.02, vec![]);
+        }
+        comptes
+    }
+
+    #[test]
+    fn un_double_clic_ne_compte_qu_une_fois() {
+        // Double-clic, puis triple-clic, sur le même bouton : 1 chacun.
+        assert_eq!(compter_clics(&[(1.0, false), (1.1, false)]), [1, 0]);
+        assert_eq!(
+            compter_clics(&[(1.0, false), (1.1, false), (1.2, false)]),
+            [1, 0]
+        );
+        // Deux clics espacés sur le même bouton : 2.
+        assert_eq!(compter_clics(&[(1.0, false), (2.0, false)]), [2, 0]);
+        // Deux clics rapides sur deux boutons différents : 1 chacun.
+        assert_eq!(compter_clics(&[(1.0, false), (1.1, true)]), [1, 1]);
     }
 
     #[test]
