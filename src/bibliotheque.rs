@@ -214,6 +214,7 @@ impl Bibliotheque {
     /// `dans_la_liste` : les morceaux déjà dans la liste, marqués d'un ✔.
     pub fn afficher(&mut self, ui: &mut egui::Ui, dans_la_liste: &HashSet<&Path>) -> Vec<PathBuf> {
         let mut a_ajouter = Vec::new();
+        dater_le_dernier_clic(ui.ctx());
 
         // La lecture en arrière-plan est-elle finie ?
         if let Some(reception) = &self.en_cours {
@@ -428,19 +429,58 @@ fn ligne_morceau(
     }
 }
 
+/// Le dernier clic dans la bibliothèque : sur quel élément, et à quel moment.
+#[derive(Clone, Copy)]
+struct DernierClic {
+    id: egui::Id,
+    temps: f64,
+    /// Le moment doit-il encore être recalé au début de l'image suivante ?
+    a_dater: bool,
+}
+
+/// Où l'on range le dernier clic dans la mémoire d'egui.
+fn memoire_du_clic() -> egui::Id {
+    egui::Id::new("dernier_clic_bibliotheque")
+}
+
+/// À appeler au début de chaque image. Un clic peut lancer la lecture, et
+/// décoder le morceau fige la fenêtre un instant : le 2e clic d'un double-clic
+/// n'est alors vu qu'après, et paraît venir bien plus tard qu'en vrai. On
+/// compte donc le délai du double-clic à partir de l'image qui suit le clic,
+/// c'est-à-dire une fois le travail du clic terminé.
+fn dater_le_dernier_clic(ctx: &egui::Context) {
+    let maintenant = ctx.input(|i| i.time);
+    ctx.data_mut(|d| {
+        if let Some(clic) = d.get_temp_mut_or_default::<Option<DernierClic>>(memoire_du_clic()) {
+            if clic.a_dater {
+                clic.temps = maintenant;
+                clic.a_dater = false;
+            }
+        }
+    });
+}
+
 /// Un clic qui compte. Pour egui, un double-clic, c'est deux clics : le
-/// second ajouterait le morceau une deuxième fois. On ignore donc le 2e
-/// (et le 3e) clic d'un double-clic (ou triple-clic) sur le même élément.
-/// Deux clics rapides sur deux morceaux différents comptent bien tous les deux.
+/// second ajouterait le morceau une deuxième fois. On ignore donc un clic
+/// sur le même élément que le précédent s'il arrive dans le délai d'un
+/// double-clic (voir `dater_le_dernier_clic`). Deux clics rapides sur deux
+/// morceaux différents comptent bien tous les deux.
 fn clic_simple(ui: &egui::Ui, reponse: &egui::Response) -> bool {
     if !reponse.clicked() {
         return false;
     }
-    let memoire = egui::Id::new("dernier_clic_bibliotheque");
-    let precedent: Option<egui::Id> = ui.ctx().data_mut(|d| d.get_temp(memoire));
-    ui.ctx().data_mut(|d| d.insert_temp(memoire, reponse.id));
-    let repetition = reponse.double_clicked() || reponse.triple_clicked();
-    !(repetition && precedent == Some(reponse.id))
+    let maintenant = ui.input(|i| i.time);
+    let delai = ui.ctx().options(|o| o.input_options.max_double_click_delay);
+    let precedent = ui.ctx().data_mut(|d| {
+        d.get_temp_mut_or_default::<Option<DernierClic>>(memoire_du_clic())
+            .replace(DernierClic {
+                id: reponse.id,
+                temps: maintenant,
+                a_dater: true,
+            })
+    });
+    let repetition = precedent.is_some_and(|p| p.id == reponse.id && maintenant - p.temps < delai);
+    !repetition
 }
 
 /// Le fichier se termine-t-il par .mp3 (ou .MP3, .Mp3…) ?
@@ -589,12 +629,20 @@ mod tests {
         std::fs::remove_dir_all(&racine).unwrap();
     }
 
-    /// Simule des clics de souris sur deux boutons (à gauche et à droite),
-    /// à des instants donnés, et compte les clics qui comptent pour chacun.
-    fn compter_clics(clics: &[(f64, bool)]) -> [usize; 2] {
+    /// Appuyer sur le bouton de gauche (0) ou de droite (1), ou le relâcher.
+    enum Geste {
+        Appui(usize),
+        Relache(usize),
+    }
+    use Geste::{Appui, Relache};
+
+    /// Simule des images successives (à un instant donné, avec des gestes de
+    /// souris) devant deux boutons, et compte les clics qui comptent pour chacun.
+    fn compter_clics(images: &[(f64, Vec<Geste>)]) -> [usize; 2] {
         let ctx = egui::Context::default();
         let mut comptes = [0, 0];
         let mut image = |temps: f64, evenements: Vec<egui::Event>| {
+            let mut positions = [egui::Pos2::ZERO; 2];
             let entree = egui::RawInput {
                 time: Some(temps),
                 events: evenements,
@@ -604,8 +652,8 @@ mod tests {
                 )),
                 ..Default::default()
             };
-            let mut positions = [egui::Pos2::ZERO; 2];
             let _ = ctx.run(entree, |ctx| {
+                dater_le_dernier_clic(ctx);
                 egui::CentralPanel::default().show(ctx, |ui| {
                     ui.horizontal(|ui| {
                         for (n, nom) in ["gauche", "droite"].into_iter().enumerate() {
@@ -620,34 +668,69 @@ mod tests {
             });
             positions
         };
-        let positions = image(0.0, vec![]);
-        for &(temps, a_droite) in clics {
-            let pos = positions[a_droite as usize];
-            let bouton = |pressed| egui::Event::PointerButton {
-                pos,
-                button: egui::PointerButton::Primary,
-                pressed,
-                modifiers: egui::Modifiers::NONE,
-            };
-            image(temps, vec![egui::Event::PointerMoved(pos), bouton(true)]);
-            image(temps + 0.01, vec![bouton(false)]);
-            image(temps + 0.02, vec![]);
+        let positions = image(0.0, vec![]); // pour placer les boutons
+        for (temps, gestes) in images {
+            let evenements = gestes
+                .iter()
+                .flat_map(|geste| {
+                    let (n, pressed) = match geste {
+                        Appui(n) => (*n, true),
+                        Relache(n) => (*n, false),
+                    };
+                    let pos = positions[n];
+                    [
+                        egui::Event::PointerMoved(pos),
+                        egui::Event::PointerButton {
+                            pos,
+                            button: egui::PointerButton::Primary,
+                            pressed,
+                            modifiers: egui::Modifiers::NONE,
+                        },
+                    ]
+                })
+                .collect();
+            image(*temps, evenements);
         }
         comptes
+    }
+
+    /// Des clics (instant, bouton) quand la fenêtre ne se fige pas : après
+    /// chaque clic, egui redessine aussitôt une image.
+    fn clics(liste: &[(f64, usize)]) -> Vec<(f64, Vec<Geste>)> {
+        liste
+            .iter()
+            .flat_map(|&(temps, n)| [(temps, vec![Appui(n), Relache(n)]), (temps + 0.005, vec![])])
+            .collect()
     }
 
     #[test]
     fn un_double_clic_ne_compte_qu_une_fois() {
         // Double-clic, puis triple-clic, sur le même bouton : 1 chacun.
-        assert_eq!(compter_clics(&[(1.0, false), (1.1, false)]), [1, 0]);
+        assert_eq!(compter_clics(&clics(&[(1.0, 0), (1.1, 0)])), [1, 0]);
         assert_eq!(
-            compter_clics(&[(1.0, false), (1.1, false), (1.2, false)]),
+            compter_clics(&clics(&[(1.0, 0), (1.1, 0), (1.2, 0)])),
             [1, 0]
         );
         // Deux clics espacés sur le même bouton : 2.
-        assert_eq!(compter_clics(&[(1.0, false), (2.0, false)]), [2, 0]);
+        assert_eq!(compter_clics(&clics(&[(1.0, 0), (2.0, 0)])), [2, 0]);
         // Deux clics rapides sur deux boutons différents : 1 chacun.
-        assert_eq!(compter_clics(&[(1.0, false), (1.1, true)]), [1, 1]);
+        assert_eq!(compter_clics(&clics(&[(1.0, 0), (1.1, 1)])), [1, 1]);
+    }
+
+    #[test]
+    fn double_clic_pendant_que_la_fenetre_est_figee() {
+        // Le 1er clic lance la lecture et fige la fenêtre 2 secondes : le
+        // 2e clic, fait pendant ce temps, n'est vu qu'à l'image d'après.
+        let mut images = vec![
+            (1.0, vec![Appui(0)]),
+            (1.05, vec![Relache(0)]), // ce clic fige la fenêtre jusqu'à 3.05
+            (3.05, vec![Appui(0), Relache(0)]),
+            (3.055, vec![]),
+        ];
+        assert_eq!(compter_clics(&images), [1, 0]);
+        // Un vrai nouveau clic, plus tard, compte bien.
+        images.extend(clics(&[(4.0, 0)]));
+        assert_eq!(compter_clics(&images), [2, 0]);
     }
 
     #[test]
