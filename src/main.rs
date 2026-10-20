@@ -32,6 +32,7 @@ use platine::{Platine, Telecommande};
 use playlists::{Demande, Playlists};
 use raccourcis::Commande;
 use sortie::{Sortie, Veilleur};
+use systeme::ZoneDeNotification;
 use tags::TagsConnus;
 use visualiseur::Visualiseur;
 
@@ -83,6 +84,8 @@ struct LecteurApp {
     visualiseur: Visualiseur,
     // Les tags (titre, artiste, album, durée) des morceaux, lus en arrière-plan.
     tags: TagsConnus,
+    // L'icône près de l'horloge (sous Windows), où se range la fenêtre réduite.
+    zone: ZoneDeNotification,
     // La pochette du morceau en cours, et le fichier dont elle vient (pour
     // ne la relire que quand le morceau change). Rien si le fichier n'en a pas.
     pochette: Option<(PathBuf, Option<egui::TextureHandle>)>,
@@ -162,6 +165,7 @@ impl LecteurApp {
             muet: false,
             visualiseur: Visualiseur::new(),
             tags: TagsConnus::new(ctx),
+            zone: ZoneDeNotification::new(ctx),
             pochette: None,
             message,
             depots: depot::Depots::default(),
@@ -757,9 +761,13 @@ fn format_temps(d: Duration) -> String {
 
 impl eframe::App for LecteurApp {
     // Appelée à chaque image : on (re)dessine toute l'interface.
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Les raccourcis clavier passent avant l'interface (voir raccourcis::lire).
+    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        // Les raccourcis clavier passent avant l'interface (voir raccourcis::lire),
+        // tout comme le menu de l'icône près de l'horloge.
         for commande in raccourcis::lire(ctx) {
+            self.executer(commande);
+        }
+        for commande in self.zone.surveiller(ctx, frame) {
             self.executer(commande);
         }
 
@@ -836,6 +844,8 @@ impl eframe::App for LecteurApp {
                 Some(chemin) => self.tags.libelle(chemin),
                 None => "Aucun fichier".to_string(),
             };
+            self.zone
+                .infobulle(en_cours.is_some().then_some(nom.as_str()));
             ui.label(format!("Morceau : {nom}"));
             if let Some(album) = en_cours.as_deref().and_then(|c| self.tags.album(c)) {
                 ui.label(format!("Album : {album}"));

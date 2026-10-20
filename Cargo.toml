@@ -22,6 +22,14 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png"]
 # sous Linux.
 dirs = "6"
 
+# Seulement sous Windows (voir src/systeme/windows.rs).
+[target.'cfg(windows)'.dependencies]
+# L'icône du lecteur près de l'horloge, avec son menu.
+tray-icon = "0.26"
+# Accès direct à la fenêtre Windows (la retirer de la barre des tâches).
+raw-window-handle = "0.6"
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
+
 # Les bibliothèques (décodage MP3 notamment) sont optimisées même en mode
 # développement : sinon le décodage serait très lent avec `cargo run`.
 # Notre propre code reste en mode développement normal.
