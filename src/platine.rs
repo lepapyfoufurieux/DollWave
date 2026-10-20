@@ -739,7 +739,10 @@ mod tests {
             volumes.len()
         );
         assert!(volumes[0] < 0.01);
-        assert!(volumes.windows(2).all(|v| v[1] >= v[0] - 1e-4), "{volumes:?}");
+        assert!(
+            volumes.windows(2).all(|v| v[1] >= v[0] - 1e-4),
+            "{volumes:?}"
+        );
         assert!(*volumes.last().unwrap() > 0.99);
         assert!((telecommande.position() - position).as_secs_f64() > 0.299);
 
