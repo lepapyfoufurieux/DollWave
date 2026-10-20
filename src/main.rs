@@ -399,8 +399,10 @@ impl LecteurApp {
     }
 }
 
-/// Côté de la pochette affichée à côté du nom du morceau, en points.
-const TAILLE_POCHETTE: f32 = 64.0;
+/// Côté de la pochette affichée sous le visualiseur, en points : la plus
+/// grande possible dans la place qui reste, entre ces deux tailles.
+const POCHETTE_MIN: f32 = 120.0;
+const POCHETTE_MAX: f32 = 320.0;
 
 impl LecteurApp {
     /// Lit la pochette du morceau en cours quand il change (rien à faire sinon).
@@ -415,6 +417,19 @@ impl LecteurApp {
         let texture = tags::lire_pochette(chemin)
             .map(|image| ctx.load_texture("pochette", image, egui::TextureOptions::LINEAR));
         self.pochette = Some((chemin.to_path_buf(), texture));
+    }
+
+    /// La pochette du morceau en cours, centrée sous le visualiseur.
+    fn afficher_pochette(&self, ui: &mut egui::Ui) {
+        let Some((_, Some(pochette))) = &self.pochette else {
+            return;
+        };
+        ui.add_space(8.0);
+        // On garde de la place pour le message et l'aide des raccourcis en dessous.
+        let cote = (ui.available_height() - 60.0).clamp(POCHETTE_MIN, POCHETTE_MAX);
+        ui.vertical_centered(|ui| {
+            ui.add(egui::Image::new(pochette).fit_to_exact_size(egui::vec2(cote, cote)));
+        });
     }
 }
 
@@ -459,25 +474,15 @@ impl eframe::App for LecteurApp {
                 _ => None,
             };
             self.charger_pochette(ui.ctx(), en_cours.as_deref());
-            ui.horizontal(|ui| {
-                if let Some((_, Some(pochette))) = &self.pochette {
-                    ui.add(
-                        egui::Image::new(pochette)
-                            .fit_to_exact_size(egui::vec2(TAILLE_POCHETTE, TAILLE_POCHETTE)),
-                    );
-                }
-                ui.vertical(|ui| {
-                    let nom = match &en_cours {
-                        Some(chemin) => self.tags.libelle(chemin),
-                        None => "Aucun fichier".to_string(),
-                    };
-                    ui.label(format!("Morceau : {nom}"));
-                    if let Some(album) = en_cours.as_deref().and_then(|c| self.tags.album(c)) {
-                        ui.label(format!("Album : {album}"));
-                    }
-                    ui.label(format!("État : {}", self.etat()));
-                });
-            });
+            let nom = match &en_cours {
+                Some(chemin) => self.tags.libelle(chemin),
+                None => "Aucun fichier".to_string(),
+            };
+            ui.label(format!("Morceau : {nom}"));
+            if let Some(album) = en_cours.as_deref().and_then(|c| self.tags.album(c)) {
+                ui.label(format!("Album : {album}"));
+            }
+            ui.label(format!("État : {}", self.etat()));
 
             ui.add_space(8.0);
             self.barre_de_progression(ui);
@@ -571,6 +576,7 @@ impl eframe::App for LecteurApp {
             let en_lecture = self.etat() == "En lecture";
             self.visualiseur
                 .afficher(ui, self.morceau.as_ref(), position, en_lecture);
+            self.afficher_pochette(ui);
 
             if !self.message.is_empty() {
                 ui.add_space(8.0);
