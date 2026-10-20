@@ -11,11 +11,11 @@
 //! « fenêtre d'outil » (comme les petites palettes), le temps qu'elle reste
 //! rangée.
 //!
-//! Le menu du clic droit bloque la boucle de la fenêtre le temps qu'il est
-//! ouvert, et après lui la fenêtre réduite pouvait ne plus jamais se
-//! réveiller : les clics restaient en attente. Donc chaque clic sur l'icône
-//! ou dans le menu réveille la fenêtre aussitôt, et tant qu'elle est rangée
-//! un petit fil la réveille régulièrement (pour passer au morceau suivant).
+//! Les clics sur l'icône et dans son menu arrivent par Windows, parfois au
+//! beau milieu du travail de la fenêtre : on se contente alors de les mettre
+//! de côté, sans toucher à egui (sinon le lecteur se fige), et la fenêtre
+//! les traite à sa prochaine image. Tant qu'elle est rangée, un petit fil la
+//! réveille régulièrement pour cela (et pour passer au morceau suivant).
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver};
@@ -80,15 +80,12 @@ pub struct ZoneDeNotification {
 impl ZoneDeNotification {
     pub fn new(ctx: &egui::Context) -> Self {
         let (envoi, clics) = mpsc::channel();
-        // Les clics arrivent pendant que la fenêtre attend : on les met de
-        // côté et on la réveille tout de suite pour qu'elle les traite.
-        let (envoi_menu, ctx_menu) = (envoi.clone(), ctx.clone());
+        // Les clics sont seulement mis de côté (voir en haut du fichier).
+        let envoi_menu = envoi.clone();
         MenuEvent::set_event_handler(Some(move |evenement: MenuEvent| {
             trace!("menu cliqué : {:?}", evenement.id);
             let _ = envoi_menu.send(Clic::Menu(evenement.id));
-            ctx_menu.request_repaint();
         }));
-        let ctx_icone = ctx.clone();
         TrayIconEvent::set_event_handler(Some(move |evenement| {
             if !matches!(evenement, TrayIconEvent::Move { .. }) {
                 trace!("icône : {evenement:?}");
@@ -100,7 +97,6 @@ impl ZoneDeNotification {
             } = evenement
             {
                 let _ = envoi.send(Clic::Icone);
-                ctx_icone.request_repaint();
             }
         }));
 
