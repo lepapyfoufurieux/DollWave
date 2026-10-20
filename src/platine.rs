@@ -22,17 +22,26 @@ const VITESSE_MAX: f64 = 8.0;
 /// échantillon ferait un petit « clic ».
 const VITESSE_FONDU: f64 = 0.2;
 
-/// Un changement de vitesse en douceur, comme un vinyle qu'on arrête ou
-/// qu'on relance à la main. Chaque variante garde de combien la vitesse
-/// change à chaque trame.
+/// Comment le son s'arrête ou repart en douceur.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Effet {
+    /// Comme un vinyle arrêté ou relancé à la main : la vitesse change, le
+    /// son descend dans les graves (ou en remonte).
+    Platine,
+    /// Le volume baisse (ou monte) peu à peu, à vitesse normale.
+    Fondu,
+}
+
+/// Un arrêt ou un départ en douceur. Chaque variante garde de combien la
+/// vitesse (ou le volume, pour un fondu) change à chaque trame.
 #[derive(Clone, Copy, PartialEq)]
 enum Rampe {
-    /// Freine jusqu'à 0, puis la platine s'arrête (Stop).
-    Arret(f64),
-    /// Freine jusqu'à 0, puis la platine se met en pause.
-    Pause(f64),
-    /// Accélère jusqu'à la vitesse normale (Lecture).
-    Demarrage(f64),
+    /// Descend jusqu'à 0, puis la platine s'arrête (Stop).
+    Arret(f64, Effet),
+    /// Descend jusqu'à 0, puis la platine se met en pause.
+    Pause(f64, Effet),
+    /// Monte jusqu'à la normale (Lecture).
+    Demarrage(f64, Effet),
 }
 
 /// Ce que l'interface et la platine partagent : l'interface écrit les ordres,
@@ -64,6 +73,7 @@ impl Telecommande {
             trame: vec![0.0; morceau.canaux],
             canal: 0,
             vitesse: 1.0,
+            niveau: 1.0,
             lecture: Lecture::default(),
             morceau: morceau.clone(),
             etat: etat.clone(),
@@ -82,7 +92,7 @@ impl Telecommande {
             let mut nouveau = telecommande.etat.lock().unwrap();
             nouveau.position = ancien.position;
             // (Un freinage vers la pause en cours compte comme une pause.)
-            nouveau.en_pause = ancien.en_pause || matches!(ancien.rampe, Some(Rampe::Pause(_)));
+            nouveau.en_pause = ancien.en_pause || matches!(ancien.rampe, Some(Rampe::Pause(..)));
         }
         (telecommande, platine)
     }
@@ -94,7 +104,7 @@ impl Telecommande {
     /// En pause, ou en train de freiner vers la pause.
     pub fn en_pause(&self) -> bool {
         let etat = self.etat.lock().unwrap();
-        etat.en_pause || matches!(etat.rampe, Some(Rampe::Pause(_)))
+        etat.en_pause || matches!(etat.rampe, Some(Rampe::Pause(..)))
     }
 
     /// Le disque tourne-t-il (du son sort) ? Vrai aussi pendant un freinage.
@@ -116,43 +126,55 @@ impl Telecommande {
         etat.cible_scratch = None;
     }
 
-    /// Freine comme un vinyle qu'on arrête à la main : la vitesse baisse
-    /// régulièrement jusqu'à 0 en `duree`, le son descend dans les graves,
-    /// puis la platine s'arrête (comme à la fin du morceau).
-    pub fn freiner(&self, duree: Duration) {
+    /// Arrête en douceur : avec l'effet platine, freine comme un vinyle
+    /// qu'on arrête à la main (la vitesse baisse régulièrement jusqu'à 0 en
+    /// `duree`, le son descend dans les graves) ; avec le fondu, le volume
+    /// baisse jusqu'à 0. Puis la platine s'arrête (comme à la fin du morceau).
+    pub fn freiner(&self, effet: Effet, duree: Duration) {
         let mut etat = self.etat.lock().unwrap();
-        etat.rampe = Some(Rampe::Arret(self.pente(duree)));
+        etat.rampe = Some(Rampe::Arret(self.pente(duree), effet));
         etat.en_pause = false;
         etat.cible_scratch = None;
     }
 
     /// Comme `freiner`, mais à la fin la platine se met en pause, au même
     /// endroit, au lieu de s'arrêter.
-    pub fn freiner_jusqu_a_la_pause(&self, duree: Duration) {
+    pub fn freiner_jusqu_a_la_pause(&self, effet: Effet, duree: Duration) {
         let mut etat = self.etat.lock().unwrap();
         if !etat.en_pause {
-            etat.rampe = Some(Rampe::Pause(self.pente(duree)));
+            etat.rampe = Some(Rampe::Pause(self.pente(duree), effet));
         }
     }
 
-    /// Relance la lecture en accélérant régulièrement de l'arrêt jusqu'à la
-    /// vitesse normale en `duree` (le son monte depuis les graves). Si le
-    /// disque tournait encore (freinage en cours), on part de sa vitesse.
-    pub fn demarrer_en_douceur(&self, duree: Duration) {
+    /// Relance la lecture en douceur, en `duree` : avec l'effet platine, en
+    /// accélérant régulièrement de l'arrêt jusqu'à la vitesse normale (le
+    /// son monte depuis les graves) ; avec le fondu, le volume monte. Si le
+    /// son ne s'était pas encore éteint, on part d'où il en est.
+    pub fn demarrer_en_douceur(&self, effet: Effet, duree: Duration) {
         let mut etat = self.etat.lock().unwrap();
-        etat.rampe = Some(Rampe::Demarrage(self.pente(duree)));
+        etat.rampe = Some(Rampe::Demarrage(self.pente(duree), effet));
         etat.en_pause = false;
     }
 
     /// La platine est-elle en train d'accélérer (démarrage en douceur) ?
     #[cfg(test)]
     pub fn accelere(&self) -> bool {
-        matches!(self.etat.lock().unwrap().rampe, Some(Rampe::Demarrage(_)))
+        matches!(self.etat.lock().unwrap().rampe, Some(Rampe::Demarrage(..)))
+    }
+
+    /// L'effet de l'arrêt ou du départ en douceur en cours, s'il y en a un.
+    #[cfg(test)]
+    pub fn effet_en_cours(&self) -> Option<Effet> {
+        match self.etat.lock().unwrap().rampe? {
+            Rampe::Arret(_, effet) | Rampe::Pause(_, effet) | Rampe::Demarrage(_, effet) => {
+                Some(effet)
+            }
+        }
     }
 
     /// La platine est-elle en train de freiner après un Stop ?
     pub fn freine(&self) -> bool {
-        matches!(self.etat.lock().unwrap().rampe, Some(Rampe::Arret(_)))
+        matches!(self.etat.lock().unwrap().rampe, Some(Rampe::Arret(..)))
     }
 
     /// De combien la vitesse change à chaque trame pour passer de 0 à 1 en `duree`.
@@ -172,6 +194,8 @@ pub struct Platine {
     etat: Arc<Mutex<Etat>>,
     /// Vitesse actuelle (1 = normale, 0 = arrêt, négative = à l'envers).
     vitesse: f64,
+    /// Volume pendant un fondu (1 = normal, 0 = silence).
+    niveau: f64,
     /// La trame en cours d'envoi, et le prochain canal à envoyer.
     trame: Vec<f32>,
     canal: usize,
@@ -184,7 +208,32 @@ impl Platine {
     /// douceur dès le début du morceau (voir `demarrer_en_douceur`).
     pub fn depuis_l_arret(mut self) -> Self {
         self.vitesse = 0.0;
+        self.niveau = 0.0;
         self
+    }
+
+    /// Ce qu'une rampe fait bouger : la vitesse (effet platine) ou le
+    /// volume (fondu, à vitesse normale).
+    fn cran(&mut self, effet: Effet) -> &mut f64 {
+        match effet {
+            Effet::Platine => {
+                self.niveau = 1.0;
+                &mut self.vitesse
+            }
+            Effet::Fondu => {
+                self.vitesse = 1.0;
+                &mut self.niveau
+            }
+        }
+    }
+
+    /// Le volume de la trame pendant une rampe. Effet platine : normal,
+    /// sauf tout près de l'arrêt (sinon couper net ferait un « clic »).
+    fn gain(&self, effet: Effet) -> f32 {
+        match effet {
+            Effet::Platine => (self.vitesse / VITESSE_FONDU).min(1.0) as f32,
+            Effet::Fondu => self.niveau as f32,
+        }
     }
 
     /// Calcule la prochaine trame et avance dans le morceau.
@@ -203,25 +252,28 @@ impl Platine {
         let mut gain = 1.0;
 
         match (rampe, cible_scratch) {
-            (Some(Rampe::Arret(pente)), _) => {
-                // Le freinage du Stop l'emporte sur tout le reste (pause, scratch).
-                // Il part de la vitesse du moment (1 en lecture normale).
-                self.vitesse = self.vitesse.min(1.0) - pente;
-                if self.vitesse <= 0.0 || position >= fin {
-                    self.vitesse = 0.0;
+            (Some(Rampe::Arret(pente, effet)), _) => {
+                // L'arrêt du Stop l'emporte sur tout le reste (pause, scratch).
+                // Il part d'où en est le son (1 en lecture normale).
+                let cran = self.cran(effet);
+                *cran = cran.min(1.0) - pente;
+                if *cran <= 0.0 || position >= fin {
+                    *cran = 0.0;
                     return false; // disque arrêté
                 }
-                gain = (self.vitesse / VITESSE_FONDU).min(1.0) as f32;
+                gain = self.gain(effet);
             }
-            (Some(Rampe::Pause(pente)), None) => {
+            (Some(Rampe::Pause(pente, effet)), None) => {
                 if position >= fin {
                     return false; // morceau terminé
                 }
-                self.vitesse = self.vitesse.min(1.0) - pente;
-                if self.vitesse <= 0.0 {
-                    // Disque arrêté : la pause commence ici (sauf si
+                let cran = self.cran(effet);
+                *cran = cran.min(1.0) - pente;
+                if *cran <= 0.0 {
+                    // Son éteint : la pause commence ici (sauf si
                     // l'interface a changé d'avis entre-temps).
                     self.vitesse = 0.0;
+                    self.niveau = 0.0;
                     let mut etat = self.etat.lock().unwrap();
                     if etat.rampe == rampe {
                         etat.rampe = None;
@@ -230,22 +282,23 @@ impl Platine {
                     self.trame.fill(0.0);
                     return true;
                 }
-                gain = (self.vitesse / VITESSE_FONDU).min(1.0) as f32;
+                gain = self.gain(effet);
             }
-            (Some(Rampe::Demarrage(pente)), None) => {
+            (Some(Rampe::Demarrage(pente, effet)), None) => {
                 if position >= fin {
                     return false; // morceau terminé
                 }
-                self.vitesse = self.vitesse.max(0.0) + pente;
-                if self.vitesse >= 1.0 {
-                    // Vitesse normale atteinte : la lecture continue normalement.
-                    self.vitesse = 1.0;
+                let cran = self.cran(effet);
+                *cran = cran.max(0.0) + pente;
+                if *cran >= 1.0 {
+                    // Vitesse et volume normaux : la lecture continue normalement.
+                    *cran = 1.0;
                     let mut etat = self.etat.lock().unwrap();
                     if etat.rampe == rampe {
                         etat.rampe = None;
                     }
                 }
-                gain = (self.vitesse / VITESSE_FONDU).min(1.0) as f32;
+                gain = self.gain(effet);
             }
             (_, Some(cible)) => {
                 // On vise la vitesse qui ramène la musique sous la souris,
@@ -257,6 +310,7 @@ impl Platine {
             (None, None) if en_pause => {
                 // En pause : du silence, sans avancer.
                 self.vitesse = 0.0;
+                self.niveau = 0.0;
                 self.trame.fill(0.0);
                 return true;
             }
@@ -265,6 +319,7 @@ impl Platine {
                     return false; // morceau terminé
                 }
                 self.vitesse = 1.0;
+                self.niveau = 1.0;
             }
         }
 
@@ -439,7 +494,7 @@ mod tests {
         telecommande.aller_a(2.0);
         platine.next();
         assert!(!telecommande.freine());
-        telecommande.freiner(Duration::from_secs(1));
+        telecommande.freiner(Effet::Platine, Duration::from_secs(1));
         assert!(telecommande.freine());
 
         // On note l'avancée de la position à chaque trame (= la vitesse).
@@ -488,7 +543,7 @@ mod tests {
         telecommande.aller_a(5.0); // échantillons autour de 5000 : bien audibles
         platine.next(); // le disque tourne
         telecommande.aller_a(5.0);
-        telecommande.freiner(Duration::from_secs(1));
+        telecommande.freiner(Effet::Platine, Duration::from_secs(1));
         let echantillons: Vec<f32> = platine.by_ref().collect();
         let plein = 5000.0 / 32768.0;
         assert!(echantillons[0] > 0.99 * plein);
@@ -504,7 +559,7 @@ mod tests {
         let (telecommande, mut platine) = Telecommande::nouvelle(morceau_test(10));
         platine.next(); // le disque tourne
         telecommande.mettre_en_pause(true);
-        telecommande.freiner(Duration::from_secs(1));
+        telecommande.freiner(Effet::Platine, Duration::from_secs(1));
         assert!(!telecommande.en_pause());
         telecommande.scratcher(9.0); // ignoré pendant le freinage
         assert!((0..2000).any(|_| platine.next().is_none()));
@@ -513,7 +568,7 @@ mod tests {
         let (telecommande, mut platine) = Telecommande::nouvelle(morceau_test(10));
         telecommande.aller_a(9.8);
         platine.next(); // le disque tourne
-        telecommande.freiner(Duration::from_secs(1));
+        telecommande.freiner(Effet::Platine, Duration::from_secs(1));
         assert!(platine.count() < 300);
         assert_eq!(telecommande.position(), Duration::from_millis(9999));
     }
@@ -544,7 +599,7 @@ mod tests {
         let (telecommande, mut platine) = Telecommande::nouvelle(morceau_test(10));
         telecommande.aller_a(2.0);
         platine.next();
-        telecommande.freiner_jusqu_a_la_pause(Duration::from_secs(1));
+        telecommande.freiner_jusqu_a_la_pause(Effet::Platine, Duration::from_secs(1));
         // Pour l'interface, c'est déjà la pause ; mais le disque tourne encore.
         assert!(telecommande.en_pause());
         assert!(telecommande.tourne());
@@ -568,7 +623,7 @@ mod tests {
         telecommande.aller_a(2.0);
         telecommande.mettre_en_pause(true);
         platine.next();
-        telecommande.demarrer_en_douceur(Duration::from_secs(1));
+        telecommande.demarrer_en_douceur(Effet::Platine, Duration::from_secs(1));
         assert!(!telecommande.en_pause());
         let mut v = vitesses(&telecommande, &mut platine, |t| {
             t.etat.lock().unwrap().rampe.is_some()
@@ -589,7 +644,7 @@ mod tests {
         let (telecommande, platine) = Telecommande::nouvelle(morceau_test(10));
         let mut platine = platine.depuis_l_arret();
         telecommande.aller_a(5.0);
-        telecommande.demarrer_en_douceur(Duration::from_secs(1));
+        telecommande.demarrer_en_douceur(Effet::Platine, Duration::from_secs(1));
         assert!(platine.next().unwrap() < 0.01 * 5000.0 / 32768.0);
     }
 
@@ -599,26 +654,26 @@ mod tests {
     fn freinage_et_demarrage_s_enchainent_sans_a_coup() {
         let (telecommande, mut platine) = Telecommande::nouvelle(morceau_test(10));
         platine.next();
-        telecommande.freiner_jusqu_a_la_pause(Duration::from_secs(1));
+        telecommande.freiner_jusqu_a_la_pause(Effet::Platine, Duration::from_secs(1));
         let mut i = 0;
         let v = vitesses(&telecommande, &mut platine, |_| {
             i += 1;
             i <= 300
         });
         assert!((v[299] - 0.7).abs() < 0.01);
-        telecommande.demarrer_en_douceur(Duration::from_secs(1));
+        telecommande.demarrer_en_douceur(Effet::Platine, Duration::from_secs(1));
         assert!(!telecommande.en_pause());
         let v = vitesses(&telecommande, &mut platine, |t| {
             t.etat.lock().unwrap().rampe.is_some()
         });
         assert!(v.len() < 310, "{} trames", v.len()); // de 0,7 à 1 : 0,3 s
         assert!(v[0] > 0.69);
-        telecommande.freiner_jusqu_a_la_pause(Duration::from_secs(1));
+        telecommande.freiner_jusqu_a_la_pause(Effet::Platine, Duration::from_secs(1));
         let v = vitesses(&telecommande, &mut platine, |t| t.tourne());
         assert!(v[0] > 0.99);
         assert!(telecommande.en_pause());
         // Mettre en pause tout de suite annule un freinage en cours.
-        telecommande.demarrer_en_douceur(Duration::from_secs(1));
+        telecommande.demarrer_en_douceur(Effet::Platine, Duration::from_secs(1));
         telecommande.mettre_en_pause(false);
         assert!(telecommande.etat.lock().unwrap().rampe.is_none());
     }
@@ -628,8 +683,71 @@ mod tests {
     fn la_reprise_garde_un_freinage_vers_la_pause() {
         let (telecommande, mut platine) = Telecommande::nouvelle(morceau_test(10));
         platine.next();
-        telecommande.freiner_jusqu_a_la_pause(Duration::from_secs(1));
+        telecommande.freiner_jusqu_a_la_pause(Effet::Platine, Duration::from_secs(1));
         let (reprise, _) = telecommande.reprise();
         assert!(reprise.en_pause());
+    }
+
+    /// Le fondu (sans l'effet platine) : la vitesse reste normale, seul le
+    /// volume baisse régulièrement jusqu'au silence en 0,3 s, puis pause
+    /// (ou arrêt) ; à la reprise, il remonte de même.
+    #[test]
+    fn le_fondu_baisse_le_volume_sans_changer_la_vitesse() {
+        let (telecommande, mut platine) = Telecommande::nouvelle(morceau_test(10));
+        telecommande.aller_a(5.0);
+        platine.next();
+        telecommande.aller_a(5.0);
+
+        // Pause en fondu : 300 trames à vitesse normale, volume qui baisse.
+        telecommande.freiner_jusqu_a_la_pause(Effet::Fondu, Duration::from_millis(300));
+        assert!(telecommande.en_pause());
+        let mut volumes = Vec::new();
+        while telecommande.tourne() {
+            let position = telecommande.position().as_millis() as f32;
+            let echantillon = platine.next().unwrap() * 32768.0;
+            volumes.push(echantillon / position);
+            assert!(volumes.len() < 1000, "ne se fige jamais");
+        }
+        assert!(
+            (299..=301).contains(&volumes.len()),
+            "{} trames",
+            volumes.len()
+        );
+        assert!(volumes[0] > 0.99);
+        assert!(volumes
+            .windows(2)
+            .all(|v| v[1] < v[0] && v[0] - v[1] < 0.004));
+        assert!(
+            (volumes[150] - 0.5).abs() < 0.01,
+            "mi-chemin {}",
+            volumes[150]
+        );
+        let position = telecommande.position();
+        assert!((position.as_secs_f64() - 5.3).abs() < 0.002, "{position:?}");
+        assert!((0..100).all(|_| platine.next() == Some(0.0)));
+
+        // Reprise en fondu : vitesse normale tout de suite, volume qui monte.
+        telecommande.demarrer_en_douceur(Effet::Fondu, Duration::from_millis(300));
+        let mut volumes = Vec::new();
+        while telecommande.effet_en_cours().is_some() {
+            let position = telecommande.position().as_millis() as f32;
+            volumes.push(platine.next().unwrap() * 32768.0 / position);
+        }
+        assert!(
+            (299..=301).contains(&volumes.len()),
+            "{} trames",
+            volumes.len()
+        );
+        assert!(volumes[0] < 0.01);
+        assert!(volumes.windows(2).all(|v| v[1] >= v[0] - 1e-4), "{volumes:?}");
+        assert!(*volumes.last().unwrap() > 0.99);
+        assert!((telecommande.position() - position).as_secs_f64() > 0.299);
+
+        // Stop en fondu : le volume baisse, puis la platine s'arrête.
+        telecommande.freiner(Effet::Fondu, Duration::from_millis(300));
+        assert!(telecommande.freine());
+        let reste: Vec<f32> = platine.by_ref().collect();
+        assert!((298..=301).contains(&reste.len()), "{} trames", reste.len());
+        assert!(*reste.last().unwrap() < 0.01 * 6000.0 / 32768.0);
     }
 }
