@@ -9,14 +9,15 @@ use std::path::{Path, PathBuf};
 use eframe::egui;
 
 use crate::bibliotheque::{clic_simple, fichier_de_reglage};
+use crate::liste::nom_du_fichier;
 
 /// Les caractères que Windows refuse dans un nom de fichier.
 const INTERDITS: &[char] = &['\\', '/', ':', '*', '?', '"', '<', '>', '|'];
 
-/// Une playlist enregistrée : son nom et son nombre de morceaux.
+/// Une playlist enregistrée : son nom et ses morceaux, dans l'ordre.
 pub struct Playlist {
     pub nom: String,
-    pub nombre: usize,
+    pub morceaux: Vec<PathBuf>,
 }
 
 /// Des morceaux qu'on fait glisser depuis la bibliothèque, à lâcher sur
@@ -133,12 +134,54 @@ impl Playlists {
         let Some(dossier) = self.dossier.clone() else {
             return;
         };
-        self.message = match lire(&dossier, nom).and_then(|mut contenu| {
-            contenu.extend_from_slice(morceaux);
-            ecrire(&dossier, nom, &contenu)
-        }) {
-            Ok(()) if morceaux.len() == 1 => format!("1 morceau ajouté à « {nom} »."),
-            Ok(()) => format!("{} morceaux ajoutés à « {nom} ».", morceaux.len()),
+        // Un même morceau ne peut être qu'une fois dans une playlist.
+        let resultat = lire(&dossier, nom).and_then(|mut contenu| {
+            let nouveaux = sans_doublons(&contenu, morceaux);
+            let ajoutes = nouveaux.len();
+            if ajoutes > 0 {
+                contenu.extend(nouveaux);
+                ecrire(&dossier, nom, &contenu)?;
+            }
+            Ok(ajoutes)
+        });
+        self.message = match resultat {
+            Ok(ajoutes) => {
+                let deja = morceaux.len() - ajoutes;
+                let mut texte = match ajoutes {
+                    0 => format!("Déjà dans « {nom} » : rien d'ajouté."),
+                    1 => format!("1 morceau ajouté à « {nom} »."),
+                    n => format!("{n} morceaux ajoutés à « {nom} »."),
+                };
+                if ajoutes > 0 && deja > 0 {
+                    texte.push_str(&format!(
+                        " ({deja} déjà présent{}.)",
+                        if deja > 1 { "s" } else { "" }
+                    ));
+                }
+                texte
+            }
+            Err(e) => format!("Impossible de modifier « {nom} » : {e}"),
+        };
+        self.actualiser();
+    }
+
+    /// Retire le morceau numéro `n` d'une playlist.
+    fn retirer_de(&mut self, nom: &str, n: usize) {
+        let Some(dossier) = self.dossier.clone() else {
+            return;
+        };
+        let resultat = lire(&dossier, nom).and_then(|mut contenu| {
+            if n < contenu.len() {
+                let morceau = contenu.remove(n);
+                ecrire(&dossier, nom, &contenu)?;
+                Ok(Some(morceau))
+            } else {
+                Ok(None)
+            }
+        });
+        self.message = match resultat {
+            Ok(Some(morceau)) => format!("« {} » retiré de « {nom} ».", nom_du_fichier(&morceau)),
+            Ok(None) => String::new(),
             Err(e) => format!("Impossible de modifier « {nom} » : {e}"),
         };
         self.actualiser();
@@ -172,7 +215,7 @@ impl Playlists {
         }
 
         egui::ScrollArea::vertical()
-            .auto_shrink([false, true])
+            .auto_shrink([false, false])
             .max_height((ui.available_height() - 24.0).max(40.0))
             .show(ui, |ui| {
                 for n in 0..self.toutes.len() {
@@ -213,40 +256,72 @@ impl Playlists {
         }
 
         let mut demande = None;
-        let rangee = ui.horizontal(|ui| {
-            let chargee = self.chargee.as_deref() == Some(nom.as_str());
-            let texte = format!("🎵 {} ({})", nom, self.toutes[n].nombre);
-            let etiquette = ui.selectable_label(chargee, texte).on_hover_text(
-                "Cliquer pour écouter cette playlist (remplace la liste de lecture)",
-            );
-            if clic_simple(ui, &etiquette) {
-                if let Some(fichiers) = self.lire_pour(&nom) {
-                    self.chargee = Some(nom.clone());
-                    demande = Some(Demande::Charger(fichiers));
-                }
-            }
-            // Les boutons, calés à droite.
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.small_button("🗑").on_hover_text("Supprimer").clicked() {
-                    self.a_supprimer = Some(nom.clone());
-                    self.saisie = None;
-                }
-                if ui.small_button("✏").on_hover_text("Renommer").clicked() {
-                    self.saisie = Some(Saisie::Renommer {
-                        ancien: nom.clone(),
-                        texte: nom.clone(),
+        let mut a_retirer = None;
+        // Comme un dossier de la bibliothèque : la flèche déplie la playlist
+        // pour voir ses morceaux (fermée au départ).
+        let id = ui.make_persistent_id(("playlist", &nom));
+        let entete =
+            egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, false)
+                .show_header(ui, |ui| {
+                    let chargee = self.chargee.as_deref() == Some(nom.as_str());
+                    let texte = format!("🎵 {} ({})", nom, self.toutes[n].morceaux.len());
+                    let etiquette = ui.selectable_label(chargee, texte).on_hover_text(
+                        "Cliquer pour écouter cette playlist (remplace la liste de lecture)",
+                    );
+                    if clic_simple(ui, &etiquette) {
+                        if let Some(fichiers) = self.lire_pour(&nom) {
+                            self.chargee = Some(nom.clone());
+                            demande = Some(Demande::Charger(fichiers));
+                        }
+                    }
+                    // Les boutons, calés à droite.
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.small_button("🗑").on_hover_text("Supprimer").clicked() {
+                            self.a_supprimer = Some(nom.clone());
+                            self.saisie = None;
+                        }
+                        if ui.small_button("✏").on_hover_text("Renommer").clicked() {
+                            self.saisie = Some(Saisie::Renommer {
+                                ancien: nom.clone(),
+                                texte: nom.clone(),
+                            });
+                            self.donner_la_main = true;
+                            self.a_supprimer = None;
+                        }
+                        let bouton = ui
+                            .small_button("➕")
+                            .on_hover_text("Ajouter à la suite de la liste de lecture");
+                        if clic_simple(ui, &bouton) {
+                            demande = self.lire_pour(&nom).map(Demande::AjouterALaListe);
+                        }
                     });
-                    self.donner_la_main = true;
-                    self.a_supprimer = None;
+                });
+        let rangee = entete
+            .body(|ui| {
+                let morceaux = &self.toutes[n].morceaux;
+                if morceaux.is_empty() {
+                    ui.weak("Vide : glisse des morceaux de la bibliothèque sur la playlist.");
                 }
-                let bouton = ui
-                    .small_button("➕")
-                    .on_hover_text("Ajouter à la suite de la liste de lecture");
-                if clic_simple(ui, &bouton) {
-                    demande = self.lire_pour(&nom).map(Demande::AjouterALaListe);
+                for (i, morceau) in morceaux.iter().enumerate() {
+                    ui.horizontal(|ui| {
+                        ui.label(nom_du_fichier(morceau))
+                            .on_hover_text(morceau.display().to_string());
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui
+                                .small_button("✖")
+                                .on_hover_text("Retirer de la playlist")
+                                .clicked()
+                            {
+                                a_retirer = Some(i);
+                            }
+                        });
+                    });
                 }
-            });
-        });
+            })
+            .1;
+        if let Some(i) = a_retirer {
+            self.retirer_de(&nom, i);
+        }
 
         // Des morceaux glissés depuis la bibliothèque survolent la ligne : on
         // l'encadre, et s'ils sont lâchés ici, on les ajoute à la playlist.
@@ -422,14 +497,24 @@ fn lister(dossier: &Path) -> Vec<Playlist> {
         })
         .filter_map(|chemin| {
             let nom = chemin.file_stem()?.to_string_lossy().into_owned();
-            let nombre = std::fs::read_to_string(&chemin)
-                .map(|texte| lignes_de_morceaux(&texte).count())
-                .unwrap_or(0);
-            Some(Playlist { nom, nombre })
+            let morceaux = lire(dossier, &nom).unwrap_or_default();
+            Some(Playlist { nom, morceaux })
         })
         .collect();
     toutes.sort_by_key(|p| p.nom.to_lowercase());
     toutes
+}
+
+/// Parmi `nouveaux`, ceux qui ne sont pas déjà dans `existants` (ni deux
+/// fois dans `nouveaux`). Comme pour Windows, les majuscules ne comptent pas.
+fn sans_doublons(existants: &[PathBuf], nouveaux: &[PathBuf]) -> Vec<PathBuf> {
+    let cle = |chemin: &PathBuf| chemin.to_string_lossy().to_lowercase();
+    let mut vus: std::collections::HashSet<String> = existants.iter().map(cle).collect();
+    nouveaux
+        .iter()
+        .filter(|chemin| vus.insert(cle(chemin)))
+        .cloned()
+        .collect()
 }
 
 /// Les lignes d'un .m3u qui désignent un morceau (les autres, qui
@@ -504,7 +589,7 @@ mod tests {
     fn noms(dossier: &Path) -> Vec<(String, usize)> {
         lister(dossier)
             .into_iter()
-            .map(|p| (p.nom, p.nombre))
+            .map(|p| (p.nom, p.morceaux.len()))
             .collect()
     }
 
@@ -571,7 +656,30 @@ mod tests {
                 PathBuf::from("/m/3.mp3")
             ]
         );
-        assert_eq!(playlists.toutes[0].nombre, 3);
+        assert_eq!(playlists.toutes[0].morceaux.len(), 3);
+        // Un morceau déjà présent n'est pas ajouté une deuxième fois, même
+        // glissé deux fois de suite.
+        playlists.ajouter_a(
+            "p",
+            &[
+                PathBuf::from("/m/2.mp3"),
+                PathBuf::from("/m/4.mp3"),
+                PathBuf::from("/m/4.mp3"),
+            ],
+        );
+        assert_eq!(playlists.toutes[0].morceaux.len(), 4);
+        playlists.ajouter_a("p", &[PathBuf::from("/M/1.MP3")]);
+        assert_eq!(playlists.toutes[0].morceaux.len(), 4);
+        // Retirer un morceau.
+        playlists.retirer_de("p", 0);
+        assert_eq!(
+            lire(&dossier, "p").unwrap(),
+            vec![
+                PathBuf::from("/m/2.mp3"),
+                PathBuf::from("/m/3.mp3"),
+                PathBuf::from("/m/4.mp3")
+            ]
+        );
     }
 
     #[test]

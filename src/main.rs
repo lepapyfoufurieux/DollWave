@@ -422,9 +422,12 @@ impl eframe::App for LecteurApp {
                 // panneau ; la bibliothèque prend la place qui reste au-dessus.
                 let demande = egui::TopBottomPanel::bottom("playlists")
                     .resizable(true)
-                    .default_height(200.0)
+                    .default_height(240.0)
                     .height_range(110.0..=500.0)
                     .show_inside(ui, |ui| {
+                        // Le panneau garde la hauteur choisie, même s'il y a
+                        // peu de playlists (sinon egui le réduirait à son contenu).
+                        ui.set_min_height(ui.available_height());
                         ui.add_space(4.0);
                         self.playlists.afficher(ui)
                     })
