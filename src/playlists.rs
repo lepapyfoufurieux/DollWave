@@ -112,6 +112,9 @@ pub struct Playlists {
     saisie: Option<Saisie>,
     /// La playlist dont on demande confirmation avant de la supprimer.
     a_supprimer: Option<String>,
+    /// On a répondu « Oui » : elle sera supprimée une fois toutes les lignes
+    /// dessinées (la supprimer pendant qu'on les parcourt ferait planter).
+    suppression_confirmee: bool,
     /// Le champ de saisie vient d'apparaître : on y met le curseur.
     donner_la_main: bool,
     /// Un message affiché sous les playlists (erreur ou confirmation).
@@ -130,6 +133,7 @@ impl Playlists {
             chargee: None,
             saisie: None,
             a_supprimer: None,
+            suppression_confirmee: false,
             donner_la_main: false,
             message: String::new(),
         };
@@ -257,6 +261,12 @@ impl Playlists {
                 }
             });
 
+        if std::mem::take(&mut self.suppression_confirmee) {
+            if let Some(nom) = self.a_supprimer.clone() {
+                self.supprimer(&nom);
+            }
+        }
+
         if !self.message.is_empty() {
             ui.label(egui::RichText::new(&self.message).small().weak());
         }
@@ -278,7 +288,7 @@ impl Playlists {
             ui.horizontal(|ui| {
                 ui.label(format!("Supprimer « {nom} » ?"));
                 if ui.small_button("Oui").clicked() {
-                    self.supprimer(&nom);
+                    self.suppression_confirmee = true;
                 }
                 if ui.small_button("Non").clicked() {
                     self.a_supprimer = None;
@@ -943,6 +953,65 @@ mod tests {
         // Lâché dessus : le morceau y est ajouté.
         glisser_de_la_liste_vers(30.0, &dossier);
         assert_eq!(lire(&dossier, "Soirée").unwrap(), [dossier.join("0.mp3")]);
+        std::fs::remove_dir_all(&dossier).unwrap();
+    }
+
+    /// Bug de l'audit : répondre « Oui » pour supprimer une playlist qui
+    /// n'est pas la dernière faisait planter l'appli.
+    #[test]
+    fn supprimer_la_premiere_playlist_depuis_l_ecran() {
+        let dossier = dossier_de_test("supprimer_ecran");
+        creer(&dossier, "a", &[]).unwrap();
+        creer(&dossier, "b", &[]).unwrap();
+        let ctx = egui::Context::default();
+        let tags = TagsConnus::new(&ctx);
+        let mut playlists = Playlists::dans(Some(dossier.clone()));
+        // On a cliqué sur 🗑 de « a » : la ligne demande confirmation.
+        playlists.a_supprimer = Some("a".to_string());
+        let mut t = 0.0;
+        let mut image = |playlists: &mut Playlists, events: Vec<egui::Event>| {
+            t += 0.02;
+            let entree = egui::RawInput {
+                time: Some(t),
+                events,
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(300.0, 400.0),
+                )),
+                ..Default::default()
+            };
+            let _ = ctx.run(entree, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    playlists.afficher(ui, &tags);
+                });
+            });
+        };
+        let clic = |pos: egui::Pos2, pressed: bool| {
+            vec![
+                egui::Event::PointerMoved(pos),
+                egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ]
+        };
+        image(&mut playlists, vec![]);
+        image(&mut playlists, vec![]);
+        // On ne connaît pas la place exacte du bouton « Oui » : on clique de
+        // gauche à droite sur la 1re ligne. Le texte de la question ne réagit
+        // pas, et « Oui » vient avant « Non ».
+        let mut x = 5.0;
+        while playlists.noms().len() == 2 && x < 300.0 {
+            let pos = egui::pos2(x, 30.0);
+            image(&mut playlists, clic(pos, true));
+            image(&mut playlists, clic(pos, false));
+            image(&mut playlists, vec![]);
+            x += 4.0;
+        }
+        assert_eq!(playlists.noms(), vec!["b".to_string()]);
+        assert!(playlists.a_supprimer.is_none());
         std::fs::remove_dir_all(&dossier).unwrap();
     }
 }
