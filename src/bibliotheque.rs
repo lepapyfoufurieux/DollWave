@@ -9,7 +9,9 @@ use std::sync::mpsc::{self, Receiver, TryRecvError};
 use eframe::egui;
 
 use crate::liste::{nom_du_fichier, rangee};
-use crate::playlists::{menu_ajouter_a_une_playlist, MorceauxGlisses};
+use crate::playlists::{
+    menu_ajouter_a_une_playlist, menu_d_un_morceau, ChoixDuMenu, MorceauxGlisses,
+};
 use crate::regroupement::{regrouper, Album, Regroupement};
 use crate::systeme::{dossier_musique, fichier_de_reglage};
 use crate::tags::TagsConnus;
@@ -415,6 +417,7 @@ impl Bibliotheque {
             a_ajouter: Vec::new(),
             etoile: None,
             vers_playlist: None,
+            tags_a_modifier: None,
             hauteur: self.hauteur_ligne,
             hauteur_entete: self.hauteur_entete,
         };
@@ -423,6 +426,7 @@ impl Bibliotheque {
             a_ajouter,
             etoile,
             vers_playlist,
+            tags_a_modifier,
             hauteur,
             hauteur_entete,
             ..
@@ -442,6 +446,7 @@ impl Bibliotheque {
         Demandes {
             a_ajouter,
             vers_playlist,
+            tags_a_modifier,
         }
     }
 
@@ -563,6 +568,8 @@ pub struct Demandes {
     pub a_ajouter: Vec<PathBuf>,
     /// Des morceaux à ajouter à une playlist (clic droit), et son nom.
     pub vers_playlist: Option<(String, Vec<PathBuf>)>,
+    /// Le morceau dont on veut modifier les tags (clic droit).
+    pub tags_a_modifier: Option<PathBuf>,
 }
 
 /// Ce dont les lignes ont besoin pour se dessiner, et ce qu'on y a cliqué.
@@ -579,6 +586,8 @@ struct Lignes<'a> {
     etoile: Option<PathBuf>,
     /// Des morceaux à ajouter à une playlist (clic droit), et son nom.
     vers_playlist: Option<(String, Vec<PathBuf>)>,
+    /// Le morceau dont on veut modifier les tags (clic droit).
+    tags_a_modifier: Option<PathBuf>,
     /// La hauteur d'une ligne de morceau (voir `liste::rangee`).
     hauteur: Option<f32>,
     /// La hauteur d'une ligne de dossier, d'artiste ou d'album repliée.
@@ -848,7 +857,13 @@ fn ligne_morceau(ui: &mut egui::Ui, chemin: &Path, lignes: &mut Lignes) {
         lignes.a_ajouter.push(chemin.to_path_buf());
     }
     glisser(&ligne, || vec![chemin.to_path_buf()]);
-    menu_playlist(&ligne, lignes, || vec![chemin.to_path_buf()]);
+    match menu_d_un_morceau(&ligne, lignes.playlists) {
+        Some(ChoixDuMenu::Playlist(nom)) => {
+            lignes.vers_playlist = Some((nom, vec![chemin.to_path_buf()]));
+        }
+        Some(ChoixDuMenu::ModifierLesTags) => lignes.tags_a_modifier = Some(chemin.to_path_buf()),
+        None => {}
+    }
 }
 
 /// Le dernier clic dans la bibliothèque : sur quel élément, et à quel moment.

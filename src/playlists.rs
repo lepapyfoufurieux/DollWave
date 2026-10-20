@@ -33,24 +33,54 @@ struct TitreGlisse {
     depuis: usize,
 }
 
-/// Le menu du clic droit sur un morceau (de la bibliothèque ou de la liste
-/// de lecture) : « Ajouter à la playlist » puis le nom de chaque playlist.
+/// Le menu du clic droit sur un dossier ou un artiste de la bibliothèque :
+/// « Ajouter à la playlist » puis le nom de chaque playlist.
 /// Renvoie la playlist choisie.
 pub fn menu_ajouter_a_une_playlist(reponse: &egui::Response, noms: &[String]) -> Option<String> {
     let mut choisie = None;
+    reponse.context_menu(|ui| choisir_une_playlist(ui, noms, &mut choisie));
+    choisie
+}
+
+/// Ce qu'on a choisi dans le menu du clic droit sur un morceau.
+pub enum ChoixDuMenu {
+    /// Ajouter le morceau à cette playlist.
+    Playlist(String),
+    /// Ouvrir la fenêtre « Modifier les tags ».
+    ModifierLesTags,
+}
+
+/// Le menu du clic droit sur un morceau (de la bibliothèque ou de la liste
+/// de lecture) : « Modifier les tags… », puis « Ajouter à la playlist » et
+/// le nom de chaque playlist.
+pub fn menu_d_un_morceau(reponse: &egui::Response, noms: &[String]) -> Option<ChoixDuMenu> {
+    let mut choix = None;
     reponse.context_menu(|ui| {
-        ui.label("Ajouter à la playlist :");
-        if noms.is_empty() {
-            ui.weak("Aucune playlist : crée-en une avec « ➕ Nouvelle », en bas à gauche.");
+        if ui.button("✏ Modifier les tags…").clicked() {
+            choix = Some(ChoixDuMenu::ModifierLesTags);
+            ui.close_menu();
         }
-        for nom in noms {
-            if ui.button(format!("🎵 {nom}")).clicked() {
-                choisie = Some(nom.clone());
-                ui.close_menu();
-            }
+        ui.separator();
+        let mut choisie = None;
+        choisir_une_playlist(ui, noms, &mut choisie);
+        if let Some(nom) = choisie {
+            choix = Some(ChoixDuMenu::Playlist(nom));
         }
     });
-    choisie
+    choix
+}
+
+fn choisir_une_playlist(ui: &mut egui::Ui, noms: &[String], choisie: &mut Option<String>) {
+    ui.label("Ajouter à la playlist :");
+    if noms.is_empty() {
+        ui.weak("Aucune playlist : crée-en une avec « ➕ Nouvelle », en bas à gauche.");
+    }
+    for nom in noms {
+        if ui.button(format!("🎵 {nom}")).clicked() {
+            *choisie = Some(nom.clone());
+            ui.close_menu();
+        }
+    }
 }
 
 /// Pendant qu'on fait glisser des morceaux, une étiquette suit la souris

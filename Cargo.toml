@@ -21,6 +21,7 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png"]
 # Trouve les dossiers du système (Musique, réglages) sous Windows comme
 # sous Linux.
 dirs = "6"
+id3 = "1.17.2"
 
 # Seulement sous Windows (voir src/systeme/windows.rs).
 [target.'cfg(windows)'.dependencies]

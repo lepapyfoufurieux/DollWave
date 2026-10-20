@@ -263,6 +263,18 @@ impl TagsConnus {
         f(etat.lus.get(chemin))
     }
 
+    /// Relit ce fichier dès que possible (ses tags viennent d'être modifiés).
+    /// En attendant, on garde les anciens tags à l'écran.
+    pub fn relire(&self, chemin: &Path) {
+        let mut etat = self.etat();
+        if !etat.en_attente.insert(chemin.to_path_buf()) {
+            // Déjà dans la file : on le remet en tête.
+            etat.a_lire.retain(|c| c != chemin);
+        }
+        etat.a_lire.push_front(chemin.to_path_buf());
+        self.partage.1.notify_one();
+    }
+
     /// Le nom à afficher pour ce morceau (voir `Tags::libelle`).
     pub fn libelle(&self, chemin: &Path) -> String {
         self.avec(chemin, |tags| match tags {

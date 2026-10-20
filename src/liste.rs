@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use eframe::egui;
 
 use crate::format_temps;
-use crate::playlists::menu_ajouter_a_une_playlist;
+use crate::playlists::{menu_d_un_morceau, ChoixDuMenu};
 use crate::tags::TagsConnus;
 
 /// Hauteur maximale de la liste à l'écran ; au-delà, on fait défiler.
@@ -22,6 +22,8 @@ pub enum Action {
     Retirer(usize),
     /// Ajouter ce morceau à la playlist `nom` (clic droit).
     AjouterAPlaylist { nom: String, fichier: PathBuf },
+    /// Ouvrir la fenêtre « Modifier les tags » de ce morceau (clic droit).
+    ModifierLesTags(PathBuf),
 }
 
 #[derive(Default)]
@@ -416,11 +418,17 @@ impl ListeDeLecture {
                                 },
                             );
                         }
-                        if let Some(nom) = menu_ajouter_a_une_playlist(&ligne, playlists) {
-                            action = Some(Action::AjouterAPlaylist {
-                                nom,
-                                fichier: fichier.clone(),
-                            });
+                        match menu_d_un_morceau(&ligne, playlists) {
+                            Some(ChoixDuMenu::Playlist(nom)) => {
+                                action = Some(Action::AjouterAPlaylist {
+                                    nom,
+                                    fichier: fichier.clone(),
+                                });
+                            }
+                            Some(ChoixDuMenu::ModifierLesTags) => {
+                                action = Some(Action::ModifierLesTags(fichier.clone()));
+                            }
+                            None => {}
                         }
                         // L'infobulle n'est préparée que si la souris est dessus.
                         let ligne = if glisse.is_some() {
