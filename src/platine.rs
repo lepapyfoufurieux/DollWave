@@ -52,6 +52,21 @@ impl Telecommande {
         (Self { morceau, etat }, platine)
     }
 
+    /// Une nouvelle platine qui reprend le morceau là où en est celle-ci
+    /// (même position, en pause si elle l'était), et sa télécommande. Sert
+    /// quand la sortie son change : l'ancienne platine reste coincée dans
+    /// l'ancienne sortie.
+    pub fn reprise(&self) -> (Self, Platine) {
+        let (telecommande, platine) = Self::nouvelle(self.morceau.clone());
+        {
+            let ancien = self.etat.lock().unwrap();
+            let mut nouveau = telecommande.etat.lock().unwrap();
+            nouveau.position = ancien.position;
+            nouveau.en_pause = ancien.en_pause;
+        }
+        (telecommande, platine)
+    }
+
     pub fn position(&self) -> Duration {
         self.morceau.secondes(self.etat.lock().unwrap().position)
     }
@@ -245,6 +260,30 @@ mod tests {
         }
         // En 1 seconde, impossible d'avancer de plus de 8 secondes.
         assert!(telecommande.position().as_secs_f64() <= VITESSE_MAX);
+    }
+
+    /// La reprise sur une autre sortie repart au même endroit, garde la
+    /// pause, et ne dépend plus de l'ancienne platine.
+    #[test]
+    fn la_reprise_continue_au_meme_endroit() {
+        let (telecommande, mut ancienne) = Telecommande::nouvelle(morceau_test(10));
+        telecommande.aller_a(3.0);
+        for _ in 0..250 {
+            ancienne.next();
+        }
+        telecommande.mettre_en_pause(true);
+        let (reprise, mut platine) = telecommande.reprise();
+        assert_eq!(reprise.position(), Duration::from_millis(3250));
+        assert!(reprise.en_pause());
+        assert_eq!(platine.next(), Some(0.0)); // en pause : silence
+        reprise.mettre_en_pause(false);
+        assert_eq!(platine.next(), Some(3250.0 / 32768.0));
+        // L'ancienne platine ne fait plus avancer la nouvelle.
+        telecommande.mettre_en_pause(false);
+        for _ in 0..100 {
+            ancienne.next();
+        }
+        assert_eq!(reprise.position(), Duration::from_millis(3251));
     }
 
     /// Pendant que la platine prépare une trame (sans tenir le verrou),
