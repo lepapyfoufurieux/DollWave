@@ -45,6 +45,9 @@ pub struct ListeDeLecture {
     /// En lecture aléatoire : le morceau demandé avec « Lire ensuite », qui
     /// passe avant le hasard.
     prochain: Option<usize>,
+    /// En lecture aléatoire : le morceau déjà tiré au sort pour passer
+    /// ensuite (voir `a_suivre`), pour que le tirage ne change pas d'ici là.
+    tirage: Option<usize>,
     /// La hauteur d'une ligne à l'écran, pour réserver la place de celles
     /// qu'on ne dessine pas (hors de l'écran).
     hauteur_ligne: Option<f32>,
@@ -84,11 +87,13 @@ impl ListeDeLecture {
         }
         self.morceaux.remove(n);
         self.deja_joue.remove(n);
-        self.prochain = match self.prochain {
+        let decaler = |p: Option<usize>| match p {
             Some(p) if p == n => None,
             Some(p) if p > n => Some(p - 1),
             p => p,
         };
+        self.prochain = decaler(self.prochain);
+        self.tirage = decaler(self.tirage);
         // Dans l'historique, on oublie ce morceau et on décale les suivants.
         self.historique.retain(|&h| h != n);
         for h in &mut self.historique {
@@ -129,6 +134,7 @@ impl ListeDeLecture {
         self.historique.clear();
         self.courant = None;
         self.prochain = None;
+        self.tirage = None;
     }
 
     pub fn aleatoire(&self) -> bool {
@@ -140,6 +146,7 @@ impl ListeDeLecture {
     pub fn changer_aleatoire(&mut self, actif: bool) {
         self.aleatoire = actif;
         self.prochain = None;
+        self.tirage = None;
         self.deja_joue.fill(false);
         self.historique.clear();
         if let Some(c) = self.courant {
@@ -215,34 +222,69 @@ impl ListeDeLecture {
     /// répétition, au bout de la liste on repart du premier ; en aléatoire,
     /// on remélange pour un nouveau tour.
     pub fn suivant(&mut self) -> Option<usize> {
+        let n = self.a_suivre();
+        if self.aleatoire && n.is_some() {
+            if self.prochain == n {
+                self.prochain = None; // « Lire ensuite » passe avant le hasard
+            } else if self.tour_fini() {
+                // Nouveau tour : tout le monde peut repasser.
+                self.deja_joue.fill(false);
+            }
+        }
+        self.tirage = None;
+        n
+    }
+
+    /// Le morceau qui passera ensuite, sans encore y aller : sert à l'ouvrir
+    /// à l'avance pour le fondu enchaîné. En aléatoire, le tirage au sort
+    /// est gardé : `suivant` donnera bien ce morceau-là (sauf si la liste
+    /// change d'ici là).
+    pub fn a_suivre(&mut self) -> Option<usize> {
         if self.morceaux.is_empty() {
             return None;
         }
-        if self.aleatoire {
-            if let Some(p) = self.prochain.take() {
-                return Some(p);
-            }
-            let mut restants: Vec<usize> = (0..self.morceaux.len())
-                .filter(|&i| !self.deja_joue[i])
-                .collect();
-            if restants.is_empty() {
-                if !self.repetition {
-                    return None;
-                }
-                // Nouveau tour : tout le monde peut repasser, sauf le morceau
-                // qui vient de jouer (pour ne pas l'entendre deux fois de suite).
-                self.deja_joue.fill(false);
-                restants = (0..self.morceaux.len())
-                    .filter(|&i| self.morceaux.len() == 1 || Some(i) != self.courant)
-                    .collect();
-            }
-            return Some(restants[hasard(restants.len())]);
+        if !self.aleatoire {
+            let n = self.courant.map_or(0, |c| c + 1);
+            return if n < self.morceaux.len() {
+                Some(n)
+            } else {
+                self.repetition.then_some(0)
+            };
         }
-        let n = self.courant.map_or(0, |c| c + 1);
-        if n < self.morceaux.len() {
-            Some(n)
+        if let Some(p) = self.prochain {
+            return Some(p);
+        }
+        let fini = self.tour_fini();
+        if fini && !self.repetition {
+            return None;
+        }
+        if let Some(t) = self.tirage.filter(|&t| self.tirable(t, fini)) {
+            return Some(t);
+        }
+        let restants: Vec<usize> = (0..self.morceaux.len())
+            .filter(|&i| self.tirable(i, fini))
+            .collect();
+        let t = restants[hasard(restants.len())];
+        self.tirage = Some(t);
+        Some(t)
+    }
+
+    /// En aléatoire : tous les morceaux ont-ils été joués pendant ce tour ?
+    fn tour_fini(&self) -> bool {
+        self.deja_joue.iter().all(|&joue| joue)
+    }
+
+    /// En aléatoire : le morceau `i` peut-il être tiré au sort ? Pendant un
+    /// tour, s'il n'a pas encore été joué ; pour un nouveau tour, tous sauf
+    /// celui qui vient de jouer (pour ne pas l'entendre deux fois de suite).
+    fn tirable(&self, i: usize, nouveau_tour: bool) -> bool {
+        if i >= self.morceaux.len() {
+            return false;
+        }
+        if nouveau_tour {
+            self.morceaux.len() == 1 || Some(i) != self.courant
         } else {
-            self.repetition.then_some(0)
+            !self.deja_joue[i]
         }
     }
 
@@ -298,6 +340,7 @@ impl ListeDeLecture {
         self.courant = self.courant.map(nouveau);
         self.courant_affiche = self.courant_affiche.map(nouveau);
         self.prochain = self.prochain.map(nouveau);
+        self.tirage = self.tirage.map(nouveau);
     }
 
     /// « Lire ensuite » : place le morceau juste après celui en cours (en tête
@@ -650,6 +693,67 @@ mod tests {
         let n = l.suivant().unwrap();
         l.choisir(n);
         assert_eq!(compteur(&l, &tags), "Titre 2 / 5");
+    }
+
+    /// Le morceau à suivre (ouvert à l'avance pour le fondu enchaîné) est
+    /// bien celui qui passe ensuite, même tiré au sort.
+    #[test]
+    fn a_suivre_annonce_le_morceau_suivant() {
+        let mut l = liste(3);
+        l.choisir(1);
+        assert_eq!(l.a_suivre(), Some(2));
+        assert_eq!(l.suivant(), Some(2));
+        l.choisir(2);
+        assert_eq!(l.a_suivre(), None);
+        l.changer_repetition(true);
+        assert_eq!(l.a_suivre(), Some(0));
+
+        let mut l = liste(50);
+        l.changer_aleatoire(true);
+        l.choisir(0);
+        for _ in 0..49 {
+            let annonce = l.a_suivre();
+            assert!(annonce.is_some());
+            assert_eq!(l.a_suivre(), annonce, "le tirage ne change pas");
+            assert_eq!(l.suivant(), annonce);
+            l.choisir(annonce.unwrap());
+        }
+        assert_eq!(l.a_suivre(), None);
+        // Nouveau tour avec la répétition : pas le morceau qui vient de jouer.
+        l.changer_repetition(true);
+        let annonce = l.a_suivre();
+        assert_ne!(annonce, l.courant());
+        assert_eq!(l.suivant(), annonce);
+    }
+
+    /// « Lire ensuite », et les morceaux déplacés ou retirés, sont pris en
+    /// compte par le morceau à suivre.
+    #[test]
+    fn a_suivre_suit_les_changements_de_la_liste() {
+        let mut l = liste(10);
+        l.changer_aleatoire(true);
+        l.choisir(0);
+        let tire = l.a_suivre().unwrap();
+        l.lire_ensuite(if tire == 5 { 6 } else { 5 });
+        let ensuite = l.a_suivre().unwrap();
+        assert_eq!(
+            l.fichier(ensuite),
+            Some(Path::new(if tire == 5 { "6.mp3" } else { "5.mp3" }))
+        );
+        assert_eq!(l.suivant(), Some(ensuite));
+        l.choisir(ensuite);
+
+        // Le morceau tiré au sort suit sa place quand la liste bouge.
+        let tire = l.a_suivre().unwrap();
+        let fichier = l.fichier(tire).unwrap().to_path_buf();
+        l.deplacer(tire, 0);
+        let apres = l.a_suivre().unwrap();
+        assert_eq!(l.fichier(apres), Some(fichier.as_path()));
+        // Retiré : on en tire un autre.
+        l.retirer(apres);
+        let autre = l.a_suivre().unwrap();
+        assert_ne!(l.fichier(autre), Some(fichier.as_path()));
+        assert_eq!(l.suivant(), Some(autre));
     }
 
     #[test]
