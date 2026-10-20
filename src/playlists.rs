@@ -25,6 +25,13 @@ pub struct Playlist {
 /// une playlist pour les y ajouter.
 pub struct MorceauxGlisses(pub Vec<PathBuf>);
 
+/// Un titre d'une playlist dépliée qu'on fait glisser pour le déplacer
+/// dans cette même playlist.
+struct TitreGlisse {
+    playlist: String,
+    depuis: usize,
+}
+
 /// Pendant qu'on fait glisser des morceaux, une étiquette suit la souris
 /// pour montrer ce qu'on transporte.
 pub fn dessiner_glissement(ctx: &egui::Context) {
@@ -52,8 +59,13 @@ pub fn dessiner_glissement(ctx: &egui::Context) {
 
 /// Ce que l'utilisateur a demandé en cliquant sur une playlist.
 pub enum Demande {
-    /// Remplacer la liste de lecture par ces morceaux (clic sur une playlist).
-    Charger(Vec<PathBuf>),
+    /// Remplacer la liste de lecture par ces morceaux (clic sur une
+    /// playlist), et lancer le morceau numéro `depart` s'il est donné (clic
+    /// sur l'un de ses titres) ; sinon, la liste choisit comme d'habitude.
+    Charger {
+        fichiers: Vec<PathBuf>,
+        depart: Option<usize>,
+    },
     /// Ajouter ces morceaux à la suite de la liste de lecture (bouton ➕).
     AjouterALaListe(Vec<PathBuf>),
 }
@@ -259,6 +271,8 @@ impl Playlists {
 
         let mut demande = None;
         let mut a_retirer = None;
+        let mut a_lancer = None;
+        let mut a_deplacer = None;
         // Comme un dossier de la bibliothèque : la flèche déplie la playlist
         // pour voir ses morceaux (fermée au départ).
         let id = ui.make_persistent_id(("playlist", &nom));
@@ -273,7 +287,10 @@ impl Playlists {
                     if clic_simple(ui, &etiquette) {
                         if let Some(fichiers) = self.lire_pour(&nom) {
                             self.chargee = Some(nom.clone());
-                            demande = Some(Demande::Charger(fichiers));
+                            demande = Some(Demande::Charger {
+                                fichiers,
+                                depart: None,
+                            });
                         }
                     }
                     // Les boutons, calés à droite.
@@ -304,10 +321,34 @@ impl Playlists {
                 if morceaux.is_empty() {
                     ui.weak("Vide : glisse des morceaux de la bibliothèque sur la playlist.");
                 }
+                // La place de chaque ligne, pour savoir où lâcher un titre glissé.
+                let mut lignes = Vec::with_capacity(morceaux.len());
                 for (i, morceau) in morceaux.iter().enumerate() {
-                    ui.horizontal(|ui| {
-                        ui.label(tags.libelle(morceau))
-                            .on_hover_text(tags.infobulle(morceau));
+                    let ligne = ui.horizontal(|ui| {
+                        // Un clic lance ce titre ; le faire glisser le déplace.
+                        let aide = format!(
+                            "{}\n\nCliquer pour écouter la playlist à partir de ce titre ; glisser pour le déplacer",
+                            tags.infobulle(morceau)
+                        );
+                        let titre = ui
+                            .add(
+                                egui::Label::new(tags.libelle(morceau))
+                                    .selectable(false)
+                                    .sense(egui::Sense::click_and_drag()),
+                            )
+                            .on_hover_text(aide);
+                        if clic_simple(ui, &titre) {
+                            a_lancer = Some(i);
+                        }
+                        if titre.drag_started() {
+                            egui::DragAndDrop::set_payload(
+                                ui.ctx(),
+                                TitreGlisse {
+                                    playlist: nom.clone(),
+                                    depuis: i,
+                                },
+                            );
+                        }
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if ui
                                 .small_button("✖")
@@ -318,11 +359,19 @@ impl Playlists {
                             }
                         });
                     });
+                    lignes.push(ligne.response.rect);
                 }
+                a_deplacer = deposer_un_titre(ui, &nom, &lignes);
             })
             .1;
         if let Some(i) = a_retirer {
             self.retirer_de(&nom, i);
+        }
+        if let Some((depuis, vers)) = a_deplacer {
+            self.deplacer_dans(&nom, depuis, vers);
+        }
+        if let Some(i) = a_lancer {
+            demande = self.lancer_depuis(n, i);
         }
 
         // Des morceaux glissés depuis la bibliothèque survolent la ligne : on
@@ -343,6 +392,42 @@ impl Playlists {
             }
         }
         demande
+    }
+
+    /// Clic sur le titre numéro `i` de la playlist numéro `n` : la playlist
+    /// remplace la liste de lecture, et ce titre est lancé.
+    fn lancer_depuis(&mut self, n: usize, i: usize) -> Option<Demande> {
+        let nom = self.toutes[n].nom.clone();
+        let titre = self.toutes[n].morceaux.get(i)?.clone();
+        let fichiers = self.lire_pour(&nom)?;
+        // Les morceaux introuvables ont été écartés : on retrouve le titre.
+        let Some(depart) = fichiers.iter().position(|f| *f == titre) else {
+            self.message = format!("Ce fichier est introuvable : {}", titre.display());
+            return None;
+        };
+        self.chargee = Some(nom);
+        Some(Demande::Charger {
+            fichiers,
+            depart: Some(depart),
+        })
+    }
+
+    /// Déplace un titre dans une playlist (glisser-déposer). `vers` est la
+    /// place où on l'a lâché, comptée avant de l'enlever de la sienne.
+    fn deplacer_dans(&mut self, nom: &str, depuis: usize, vers: usize) {
+        let Some(dossier) = self.dossier.clone() else {
+            return;
+        };
+        let resultat = lire(&dossier, nom).and_then(|mut contenu| {
+            if deplacer(&mut contenu, depuis, vers) {
+                ecrire(&dossier, nom, &contenu)?;
+            }
+            Ok(())
+        });
+        if let Err(e) = resultat {
+            self.message = format!("Impossible de modifier « {nom} » : {e}");
+        }
+        self.actualiser();
     }
 
     /// Lit une playlist pour l'écouter. Les morceaux qui n'existent plus
@@ -461,6 +546,51 @@ impl Playlists {
         };
         self.actualiser();
     }
+}
+
+/// Pendant qu'on fait glisser un titre de cette playlist sur ses lignes
+/// (`lignes` : leur place à l'écran), on dessine un trait là où il irait.
+/// S'il est lâché, renvoie (sa place d'origine, sa nouvelle place).
+fn deposer_un_titre(ui: &egui::Ui, nom: &str, lignes: &[egui::Rect]) -> Option<(usize, usize)> {
+    let ctx = ui.ctx();
+    let glisse = egui::DragAndDrop::payload::<TitreGlisse>(ctx)?;
+    if glisse.playlist != nom {
+        return None;
+    }
+    ctx.set_cursor_icon(egui::CursorIcon::Grabbing);
+    let zone = lignes.iter().copied().reduce(|a, b| a.union(b))?;
+    let souris = ctx.input(|i| i.pointer.hover_pos())?;
+    if !zone.expand2(egui::vec2(0.0, 6.0)).contains(souris) {
+        return None;
+    }
+    // On l'insère avant la première ligne dont le milieu est sous la souris.
+    let vers = lignes
+        .iter()
+        .position(|r| souris.y < r.center().y)
+        .unwrap_or(lignes.len());
+    let y = match lignes.get(vers) {
+        Some(r) => r.top() - ui.spacing().item_spacing.y / 2.0,
+        None => zone.bottom() + ui.spacing().item_spacing.y / 2.0,
+    };
+    let trait_ = egui::Stroke::new(2.0_f32, ui.visuals().selection.stroke.color);
+    ui.painter().hline(zone.x_range(), y, trait_);
+    if ctx.input(|i| i.pointer.any_released()) {
+        egui::DragAndDrop::clear_payload(ctx);
+        return Some((glisse.depuis, vers));
+    }
+    None
+}
+
+/// Déplace l'élément `depuis` pour qu'il arrive à la place `vers` (comptée
+/// avant de l'enlever). Renvoie `false` si rien ne bouge.
+fn deplacer<T>(liste: &mut Vec<T>, depuis: usize, vers: usize) -> bool {
+    if depuis >= liste.len() || vers > liste.len() || vers == depuis || vers == depuis + 1 {
+        return false;
+    }
+    let element = liste.remove(depuis);
+    let vers = if vers > depuis { vers - 1 } else { vers };
+    liste.insert(vers, element);
+    true
 }
 
 /// Le fichier d'une playlist.
@@ -682,6 +812,24 @@ mod tests {
                 PathBuf::from("/m/4.mp3")
             ]
         );
+    }
+
+    #[test]
+    fn deplace_un_titre() {
+        let mut v = vec!['a', 'b', 'c', 'd'];
+        // « a » lâché avant « d » (place 3).
+        assert!(deplacer(&mut v, 0, 3));
+        assert_eq!(v, ['b', 'c', 'a', 'd']);
+        // « d » lâché tout en haut.
+        assert!(deplacer(&mut v, 3, 0));
+        assert_eq!(v, ['d', 'b', 'c', 'a']);
+        // « b » lâché tout en bas.
+        assert!(deplacer(&mut v, 1, 4));
+        assert_eq!(v, ['d', 'c', 'a', 'b']);
+        // Lâché juste avant ou juste après lui-même : rien ne bouge.
+        assert!(!deplacer(&mut v, 2, 2));
+        assert!(!deplacer(&mut v, 2, 3));
+        assert_eq!(v, ['d', 'c', 'a', 'b']);
     }
 
     #[test]

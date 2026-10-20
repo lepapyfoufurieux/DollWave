@@ -495,10 +495,17 @@ impl eframe::App for LecteurApp {
         }
         match demande {
             // Écouter une playlist : elle remplace la liste de lecture.
-            Some(Demande::Charger(fichiers)) => {
+            Some(Demande::Charger { fichiers, depart }) => {
                 self.liste.vider();
                 self.oublier_morceau();
-                self.ajouter(fichiers);
+                match depart {
+                    // Clic sur un titre de la playlist : on lance celui-là.
+                    Some(n) => {
+                        self.liste.ajouter(fichiers);
+                        self.jouer(n);
+                    }
+                    None => self.ajouter(fichiers),
+                }
             }
             Some(Demande::AjouterALaListe(fichiers)) => self.ajouter(fichiers),
             None => {}
