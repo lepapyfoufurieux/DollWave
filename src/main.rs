@@ -7,6 +7,7 @@ mod liste;
 mod morceau;
 mod platine;
 mod raccourcis;
+mod tags;
 mod visualiseur;
 
 use std::collections::HashSet;
@@ -22,6 +23,7 @@ use liste::{Action, ListeDeLecture};
 use morceau::Morceau;
 use platine::Telecommande;
 use raccourcis::Commande;
+use tags::TagsConnus;
 use visualiseur::Visualiseur;
 
 fn main() -> eframe::Result {
@@ -63,6 +65,11 @@ struct LecteurApp {
     muet: bool,
     // L'image qui bouge avec la musique.
     visualiseur: Visualiseur,
+    // Les tags (titre, artiste, album, durée) des morceaux, lus en arrière-plan.
+    tags: TagsConnus,
+    // La pochette du morceau en cours, et le fichier dont elle vient (pour
+    // ne la relire que quand le morceau change). Rien si le fichier n'en a pas.
+    pochette: Option<(PathBuf, Option<egui::TextureHandle>)>,
     // Un message affiché en bas de la fenêtre (erreurs, infos).
     message: String,
 }
@@ -85,6 +92,8 @@ impl LecteurApp {
             volume: 0.5,
             muet: false,
             visualiseur: Visualiseur::new(),
+            tags: TagsConnus::new(ctx),
+            pochette: None,
             message,
         }
     }
@@ -390,6 +399,25 @@ impl LecteurApp {
     }
 }
 
+/// Côté de la pochette affichée à côté du nom du morceau, en points.
+const TAILLE_POCHETTE: f32 = 64.0;
+
+impl LecteurApp {
+    /// Lit la pochette du morceau en cours quand il change (rien à faire sinon).
+    fn charger_pochette(&mut self, ctx: &egui::Context, en_cours: Option<&Path>) {
+        let Some(chemin) = en_cours else {
+            self.pochette = None;
+            return;
+        };
+        if self.pochette.as_ref().is_some_and(|(p, _)| p == chemin) {
+            return;
+        }
+        let texture = tags::lire_pochette(chemin)
+            .map(|image| ctx.load_texture("pochette", image, egui::TextureOptions::LINEAR));
+        self.pochette = Some((chemin.to_path_buf(), texture));
+    }
+}
+
 /// Écrit une durée sous la forme « minutes:secondes », par exemple 3:07.
 fn format_temps(d: Duration) -> String {
     let s = d.as_secs();
@@ -415,7 +443,7 @@ impl eframe::App for LecteurApp {
             .show(ctx, |ui| {
                 let dans_la_liste: HashSet<&Path> =
                     self.liste.morceaux().iter().map(PathBuf::as_path).collect();
-                self.bibliotheque.afficher(ui, &dans_la_liste)
+                self.bibliotheque.afficher(ui, &dans_la_liste, &self.tags)
             })
             .inner;
         if !a_ajouter.is_empty() {
@@ -426,16 +454,30 @@ impl eframe::App for LecteurApp {
         // pas changer le volume.
         let mut zone_liste = egui::Rect::NOTHING;
         let panneau = egui::CentralPanel::default().show(ctx, |ui| {
-            let nom = match (&self.morceau, self.liste.courant()) {
-                (Some(_), Some(n)) => self
-                    .liste
-                    .fichier(n)
-                    .map(liste::nom_du_fichier)
-                    .unwrap_or_default(),
-                _ => "Aucun fichier".to_string(),
+            let en_cours = match (&self.morceau, self.liste.courant()) {
+                (Some(_), Some(n)) => self.liste.fichier(n).map(Path::to_path_buf),
+                _ => None,
             };
-            ui.label(format!("Morceau : {nom}"));
-            ui.label(format!("État : {}", self.etat()));
+            self.charger_pochette(ui.ctx(), en_cours.as_deref());
+            ui.horizontal(|ui| {
+                if let Some((_, Some(pochette))) = &self.pochette {
+                    ui.add(
+                        egui::Image::new(pochette)
+                            .fit_to_exact_size(egui::vec2(TAILLE_POCHETTE, TAILLE_POCHETTE)),
+                    );
+                }
+                ui.vertical(|ui| {
+                    let nom = match &en_cours {
+                        Some(chemin) => self.tags.libelle(chemin),
+                        None => "Aucun fichier".to_string(),
+                    };
+                    ui.label(format!("Morceau : {nom}"));
+                    if let Some(album) = en_cours.as_deref().and_then(|c| self.tags.album(c)) {
+                        ui.label(format!("Album : {album}"));
+                    }
+                    ui.label(format!("État : {}", self.etat()));
+                });
+            });
 
             ui.add_space(8.0);
             self.barre_de_progression(ui);
@@ -503,7 +545,7 @@ impl eframe::App for LecteurApp {
                     self.oublier_morceau();
                 }
             });
-            let liste = ui.scope(|ui| self.liste.afficher(ui));
+            let liste = ui.scope(|ui| self.liste.afficher(ui, &self.tags));
             zone_liste = liste.response.rect;
             match liste.inner {
                 Some(Action::Jouer(n)) => self.jouer(n),
