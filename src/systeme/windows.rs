@@ -35,6 +35,17 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 use super::{icone_vinyle, texte_d_infobulle, TAILLE_ICONE};
 use crate::raccourcis::Commande;
 
+/// TRACES TEMPORAIRES pour trouver le bug du menu (à retirer avant le merge).
+macro_rules! trace {
+    ($($t:tt)*) => {
+        if cfg!(debug_assertions) {
+            eprintln!("[zone {:?}] {}", std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() % 100_000,
+                format!($($t)*));
+        }
+    };
+}
+
 /// Tous les combien on réveille la fenêtre quand elle est rangée.
 const REVEIL: Duration = Duration::from_millis(250);
 
@@ -73,11 +84,15 @@ impl ZoneDeNotification {
         // côté et on la réveille tout de suite pour qu'elle les traite.
         let (envoi_menu, ctx_menu) = (envoi.clone(), ctx.clone());
         MenuEvent::set_event_handler(Some(move |evenement: MenuEvent| {
+            trace!("menu cliqué : {:?}", evenement.id);
             let _ = envoi_menu.send(Clic::Menu(evenement.id));
             ctx_menu.request_repaint();
         }));
         let ctx_icone = ctx.clone();
         TrayIconEvent::set_event_handler(Some(move |evenement| {
+            if !matches!(evenement, TrayIconEvent::Move { .. }) {
+                trace!("icône : {evenement:?}");
+            }
             if let TrayIconEvent::Click {
                 button: MouseButton::Left,
                 button_state: MouseButtonState::Up,
@@ -116,11 +131,21 @@ impl ZoneDeNotification {
             return commandes;
         };
         let Some(fenetre) = fenetre(frame) else {
+            trace!("pas de fenêtre Windows !");
             return commandes;
         };
 
         let mut afficher = false;
+        if self.rangee.is_some() {
+            trace!("image pendant que la fenêtre est rangée");
+        }
         while let Ok(clic) = self.clics.try_recv() {
+            trace!(
+                "clic traité : {}",
+                matches!(clic, Clic::Icone)
+                    .then_some("icône")
+                    .unwrap_or("menu")
+            );
             let id = match clic {
                 Clic::Icone => {
                     afficher = true;
@@ -216,6 +241,7 @@ fn fenetre(frame: &eframe::Frame) -> Option<HWND> {
 /// Retire la fenêtre (déjà réduite) de la barre des tâches, et rend son
 /// style d'origine.
 fn ranger(fenetre: HWND) -> isize {
+    trace!("ranger");
     // SAFETY : la fenêtre est celle du lecteur, ouverte pendant tout son
     // fonctionnement ; on ne change que son style et son affichage.
     unsafe {
@@ -232,6 +258,7 @@ fn ranger(fenetre: HWND) -> isize {
 /// Remet la fenêtre dans la barre des tâches, à sa taille d'avant, au
 /// premier plan.
 fn ressortir(fenetre: HWND, style: isize) {
+    trace!("ressortir");
     // SAFETY : voir `ranger`.
     unsafe {
         ShowWindow(fenetre, SW_HIDE);
