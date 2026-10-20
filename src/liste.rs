@@ -45,6 +45,9 @@ pub struct ListeDeLecture {
     /// En lecture aléatoire : le morceau demandé avec « Lire ensuite », qui
     /// passe avant le hasard.
     prochain: Option<usize>,
+    /// La hauteur d'une ligne à l'écran, pour réserver la place de celles
+    /// qu'on ne dessine pas (hors de l'écran).
+    hauteur_ligne: Option<f32>,
 }
 
 /// Ce qu'on transporte quand on glisse un morceau de la liste : son numéro,
@@ -298,12 +301,13 @@ impl ListeDeLecture {
             .max_height(HAUTEUR_MAX)
             .auto_shrink([false, true])
             .show(ui, |ui| {
+                let mut hauteur = self.hauteur_ligne;
                 for (n, fichier) in self.morceaux.iter().enumerate() {
-                    let rangee = ui.horizontal(|ui| {
+                    let en_cours = self.courant == Some(n);
+                    let (place, _) = rangee(ui, &mut hauteur, n, |ui| {
                         if ui.small_button("✖").on_hover_text("Retirer").clicked() {
                             action = Some(Action::Retirer(n));
                         }
-                        let en_cours = self.courant == Some(n);
                         if ui
                             .add_enabled(!en_cours, egui::Button::new("⏭").small())
                             .on_hover_text("Lire ensuite")
@@ -338,19 +342,19 @@ impl ListeDeLecture {
                                 fichier: fichier.clone(),
                             });
                         }
+                        // L'infobulle n'est préparée que si la souris est dessus.
                         let ligne = if glisse.is_some() {
                             ligne
                         } else {
-                            ligne.on_hover_text(tags.infobulle(fichier))
+                            ligne.on_hover_ui(|ui| {
+                                ui.label(tags.infobulle(fichier));
+                            })
                         };
                         if let Some(duree) = tags.duree(fichier) {
                             ui.with_layout(
                                 egui::Layout::right_to_left(egui::Align::Center),
                                 |ui| ui.weak(format_temps(duree)),
                             );
-                        }
-                        if en_cours && defiler {
-                            ligne.scroll_to_me(None);
                         }
                         // Un clic suffit. Pour egui, un double-clic, c'est deux
                         // clics : le second tombe sur le morceau devenu le
@@ -359,8 +363,14 @@ impl ListeDeLecture {
                             action = Some(Action::Jouer(n));
                         }
                     });
-                    lignes.push(rangee.response.rect);
+                    // Le morceau en cours vient de changer : on fait défiler la
+                    // liste jusqu'à lui, même s'il était hors de l'écran.
+                    if en_cours && defiler {
+                        ui.scroll_to_rect(place, None);
+                    }
+                    lignes.push(place);
                 }
+                self.hauteur_ligne = hauteur;
                 if let Some(de) = glisse {
                     self.glisser(ui, de, &lignes);
                 }
@@ -423,6 +433,32 @@ fn place_sous_la_souris(lignes: &[egui::Rect], y: f32) -> usize {
 /// on s'en sert comme d'un dé, sans ajouter de bibliothèque.
 fn hasard(n: usize) -> usize {
     (RandomState::new().hash_one(0u8) % n as u64) as usize
+}
+
+/// Une rangée d'une longue liste qu'on fait défiler. Si elle est hors de
+/// l'écran, on réserve juste sa place, sans rien dessiner : avec des milliers
+/// de morceaux, dessiner toutes les lignes à chaque image coûterait cher.
+/// `hauteur` est celle d'une rangée, mesurée sur la dernière dessinée (rien au
+/// tout début : on dessine alors). `n` donne à la rangée un identifiant qui
+/// ne change pas quand on fait défiler. Renvoie la place de la rangée et ce
+/// que `contenu` a renvoyé (rien si elle n'a pas été dessinée).
+pub fn rangee<R>(
+    ui: &mut egui::Ui,
+    hauteur: &mut Option<f32>,
+    n: impl std::hash::Hash,
+    contenu: impl FnOnce(&mut egui::Ui) -> R,
+) -> (egui::Rect, Option<R>) {
+    if let Some(h) = *hauteur {
+        let taille = egui::vec2(ui.available_width(), h);
+        if !ui.is_rect_visible(egui::Rect::from_min_size(ui.cursor().min, taille)) {
+            let (place, _) = ui.allocate_exact_size(taille, egui::Sense::hover());
+            return (place, None);
+        }
+    }
+    let dessinee = ui.push_id(n, |ui| ui.horizontal(contenu).inner);
+    let place = dessinee.response.rect;
+    *hauteur = Some(place.height());
+    (place, Some(dessinee.inner))
 }
 
 /// Le nom d'un fichier sans son dossier, par exemple « chanson.mp3 ».
@@ -606,6 +642,39 @@ mod tests {
         jouer
     }
 
+    /// Avec une très longue liste, seules les lignes à l'écran sont dessinées :
+    /// on vérifie que la liste défile bien jusqu'au morceau en cours, même
+    /// très loin, et qu'on peut cliquer sur les lignes qu'on y voit.
+    #[test]
+    fn une_longue_liste_defile_jusqu_au_morceau_en_cours() {
+        let mut l = liste(3000);
+        l.choisir(2500);
+        let ctx = egui::Context::default();
+        let tags = TagsConnus::new(&ctx);
+        // Quelques images, le temps que le défilement (animé) arrive.
+        for i in 0..40 {
+            let entree = egui::RawInput {
+                time: Some(i as f64 * 0.05),
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(400.0, 300.0),
+                )),
+                ..Default::default()
+            };
+            let _ = ctx.run(entree, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    l.afficher(ui, &tags, &[]);
+                });
+            });
+        }
+        let n = cliquer_a(&mut l, &ctx, &tags, 10.0, 20.0).expect("aucune ligne sous la souris");
+        assert!((2400..=2500).contains(&n), "ligne {n}");
+        // Et la ligne d'en dessous est bien la suivante.
+        let hauteur = l.hauteur_ligne.unwrap();
+        let suivante = cliquer_a(&mut l, &ctx, &tags, 20.0, 20.0 + hauteur);
+        assert_eq!(suivante, Some(n + 1));
+    }
+
     #[test]
     fn un_simple_clic_joue_le_morceau() {
         let mut l = liste(3);
@@ -772,6 +841,19 @@ mod tests {
         let actions = glisser_de(&mut l, 3.0 * 21.0 + 10.0, egui::pos2(70.0, 3.0));
         assert!(actions.is_empty());
         assert_eq!(noms(&l), ["0.mp3", "1.mp3", "2.mp3", "3.mp3"]);
+    }
+
+    /// Dans une très longue liste (lignes hors de l'écran non dessinées),
+    /// glisser un morceau donne la même chose que dans une petite liste.
+    #[test]
+    fn glisser_dans_une_longue_liste() {
+        let mut petite = liste(6);
+        let mut longue = liste(1000);
+        glisser_de(&mut petite, 15.0, egui::pos2(70.0, 3.0 * 21.0 + 2.0));
+        glisser_de(&mut longue, 15.0, egui::pos2(70.0, 3.0 * 21.0 + 2.0));
+        assert_ne!(noms(&petite)[0], "0.mp3", "le morceau a bougé");
+        assert_eq!(noms(&longue)[..5], noms(&petite)[..5]);
+        assert_eq!(noms(&longue).len(), 1000);
     }
 
     #[test]

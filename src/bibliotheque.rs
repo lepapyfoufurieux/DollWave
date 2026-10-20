@@ -7,7 +7,7 @@ use std::sync::mpsc::{self, Receiver, TryRecvError};
 
 use eframe::egui;
 
-use crate::liste::nom_du_fichier;
+use crate::liste::{nom_du_fichier, rangee};
 use crate::playlists::{menu_ajouter_a_une_playlist, MorceauxGlisses};
 use crate::tags::TagsConnus;
 
@@ -172,6 +172,9 @@ pub struct Bibliotheque {
     /// Les dossiers et morceaux mis en favori (★) : ils remontent en tête
     /// de leur dossier.
     favoris: HashSet<PathBuf>,
+    /// La hauteur d'une ligne de morceau à l'écran, pour réserver la place
+    /// de celles qu'on ne dessine pas (hors de l'écran).
+    hauteur_ligne: Option<f32>,
 }
 
 impl Bibliotheque {
@@ -192,6 +195,7 @@ impl Bibliotheque {
             recherche: String::new(),
             resultats: Vec::new(),
             recherche_faite: None,
+            hauteur_ligne: None,
         };
         bibliotheque.actualiser(ctx);
         bibliotheque
@@ -318,14 +322,17 @@ impl Bibliotheque {
             a_ajouter: Vec::new(),
             etoile: None,
             vers_playlist: None,
+            hauteur: self.hauteur_ligne,
         };
         self.afficher_contenu(ui, &mut lignes);
         let Lignes {
             a_ajouter,
             etoile,
             vers_playlist,
+            hauteur,
             ..
         } = lignes;
+        self.hauteur_ligne = hauteur;
         self.favoris = favoris;
 
         // Un clic sur une étoile : on ajoute ou retire le favori, et on le
@@ -420,13 +427,15 @@ impl Bibliotheque {
                 let tous = &contenu.tous;
                 let resultats =
                     favoris_d_abord(&self.resultats, |&n| &tous[n].chemin, lignes.favoris);
+                let mut hauteur = lignes.hauteur;
                 for &n in resultats.into_iter().take(RESULTATS_MAX) {
                     let entree = &tous[n];
-                    ui.horizontal(|ui| {
+                    rangee(ui, &mut hauteur, n, |ui| {
                         ligne_morceau(ui, &entree.chemin, lignes);
                         ui.label(egui::RichText::new(&entree.dossier).small().weak());
                     });
                 }
+                lignes.hauteur = hauteur;
                 if self.resultats.len() > RESULTATS_MAX {
                     ui.label(format!(
                         "… et {} autres : précise ta recherche pour les voir.",
@@ -459,6 +468,8 @@ struct Lignes<'a> {
     etoile: Option<PathBuf>,
     /// Des morceaux à ajouter à une playlist (clic droit), et son nom.
     vers_playlist: Option<(String, Vec<PathBuf>)>,
+    /// La hauteur d'une ligne de morceau (voir `liste::rangee`).
+    hauteur: Option<f32>,
 }
 
 /// Quand on commence à faire glisser un dossier ou un morceau, on emporte
@@ -539,9 +550,13 @@ fn afficher_dossier(ui: &mut egui::Ui, dossier: &Dossier, lignes: &mut Lignes) {
         }
         entete.body(|ui| afficher_dossier(ui, sous_dossier, lignes));
     }
+    let mut hauteur = lignes.hauteur;
     for morceau in favoris_d_abord(&dossier.morceaux, PathBuf::as_path, lignes.favoris) {
-        ui.horizontal(|ui| ligne_morceau(ui, morceau, lignes));
+        rangee(ui, &mut hauteur, morceau, |ui| {
+            ligne_morceau(ui, morceau, lignes)
+        });
     }
+    lignes.hauteur = hauteur;
 }
 
 /// L'étoile devant un dossier ou un morceau : ★ s'il est en favori, ☆ sinon.
@@ -582,11 +597,14 @@ fn ligne_morceau(ui: &mut egui::Ui, chemin: &Path, lignes: &mut Lignes) {
     } else {
         "Cliquer pour ajouter à la liste de lecture (glisser sur une playlist ou clic droit pour l'y ajouter)"
     };
-    let aide = format!("{}\n\n{aide}", lignes.tags.infobulle(chemin));
+    // L'infobulle n'est préparée que si la souris est dessus.
+    let tags = lignes.tags;
     let ligne = ui
         .selectable_label(false, texte)
         .interact(egui::Sense::drag())
-        .on_hover_text(aide);
+        .on_hover_ui(|ui| {
+            ui.label(format!("{}\n\n{aide}", tags.infobulle(chemin)));
+        });
     if clic_simple(ui, &ligne) {
         lignes.a_ajouter.push(chemin.to_path_buf());
     }
@@ -929,6 +947,91 @@ mod tests {
             .iter()
             .flat_map(|&(temps, n)| [(temps, vec![Appui(n), Relache(n)]), (temps + 0.005, vec![])])
             .collect()
+    }
+
+    /// Une grosse bibliothèque : seules les lignes à l'écran sont dessinées.
+    /// Après avoir fait défiler loin avec la molette, un clic sur une ligne
+    /// ajoute bien le morceau qu'on voit à cet endroit.
+    #[test]
+    fn une_grosse_bibliotheque_se_parcourt_et_se_clique() {
+        let racine = dossier_de_test("grosse");
+        for i in 0..2000 {
+            std::fs::write(racine.join(format!("{i:04}.mp3")), b"").unwrap();
+        }
+        let ctx = egui::Context::default();
+        let tags = TagsConnus::new(&ctx);
+        let mut bibliotheque = Bibliotheque {
+            dossier: racine.clone(),
+            contenu: Some(Contenu::lire(&racine)),
+            en_cours: None,
+            recherche: String::new(),
+            resultats: Vec::new(),
+            recherche_faite: None,
+            favoris: HashSet::new(),
+            hauteur_ligne: None,
+        };
+        let dans_la_liste = HashSet::new();
+        let mut image = |temps: f64, events: Vec<egui::Event>| {
+            let entree = egui::RawInput {
+                time: Some(temps),
+                events,
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(400.0, 300.0),
+                )),
+                ..Default::default()
+            };
+            let mut ajoutes = Vec::new();
+            let _ = ctx.run(entree, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    ajoutes = bibliotheque
+                        .afficher(ui, &dans_la_liste, &tags, &[])
+                        .a_ajouter;
+                });
+            });
+            ajoutes
+        };
+        let souris = egui::pos2(100.0, 150.0);
+        let mut t = 0.0;
+        image(t, vec![]);
+        // Dix crans de molette vers le bas, puis le temps que ça défile.
+        for _ in 0..10 {
+            t += 0.05;
+            image(
+                t,
+                vec![
+                    egui::Event::PointerMoved(souris),
+                    egui::Event::MouseWheel {
+                        unit: egui::MouseWheelUnit::Page,
+                        delta: egui::vec2(0.0, -1.0),
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+            );
+        }
+        for _ in 0..40 {
+            t += 0.05;
+            image(t, vec![]);
+        }
+        let clic = |pressed| egui::Event::PointerButton {
+            pos: souris,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        t += 1.0;
+        image(t, vec![egui::Event::PointerMoved(souris), clic(true)]);
+        let ajoutes = image(t + 0.05, vec![clic(false)]);
+        assert_eq!(ajoutes.len(), 1);
+        let numero: usize = ajoutes[0]
+            .file_stem()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!(numero > 50, "morceau {numero} : la liste n'a pas défilé");
+        std::fs::remove_dir_all(&racine).unwrap();
     }
 
     #[test]

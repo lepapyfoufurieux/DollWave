@@ -105,6 +105,12 @@ impl Visualiseur {
         }
     }
 
+    /// Vrai quand plus rien ne bouge (les barres sont retombées) : inutile
+    /// alors de redessiner à chaque image.
+    pub fn au_repos(&self) -> bool {
+        self.style != Style::Barres || self.barres.iter().all(|&b| b <= 0.0)
+    }
+
     /// Dessine le menu de choix puis le visualiseur.
     /// `position` : où en est la lecture (en secondes). `en_lecture` : faux si
     /// la musique est en pause ou arrêtée (les barres retombent alors à zéro).
@@ -350,5 +356,31 @@ mod tests {
                 assert!(hauteur < 0.2, "barre {b} : hauteurs {hauteurs:?}");
             }
         }
+    }
+
+    /// En pause, les barres retombent puis le visualiseur se dit « au repos »
+    /// (l'appli arrête alors de redessiner à chaque image).
+    #[test]
+    fn en_pause_les_barres_retombent_puis_tout_s_arrete() {
+        let morceau = Arc::new(Morceau::sinus(1000.0, 44_100, 1.0));
+        let mut visualiseur = Visualiseur::new();
+        visualiseur.style = Style::Barres;
+        let ctx = egui::Context::default();
+        let image = |visualiseur: &mut Visualiseur, en_lecture: bool| {
+            let _ = ctx.run(egui::RawInput::default(), |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    visualiseur.afficher(ui, Some(&morceau), 0.0, en_lecture);
+                });
+            });
+        };
+        image(&mut visualiseur, true);
+        assert!(!visualiseur.au_repos());
+        // Les barres mettent moins d'une seconde à retomber (60 images).
+        let mut images = 0;
+        while !visualiseur.au_repos() && images < 120 {
+            image(&mut visualiseur, false);
+            images += 1;
+        }
+        assert!(images <= 60, "{images} images pour retomber");
     }
 }

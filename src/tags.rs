@@ -189,7 +189,10 @@ impl TagsConnus {
     /// fichier passe en tête de la file : il est à l'écran, on le veut vite.
     fn avec<T>(&self, chemin: &Path, f: impl FnOnce(Option<&Tags>) -> T) -> T {
         let mut etat = self.etat();
-        if etat.demandes.insert(chemin.to_path_buf()) {
+        // On vérifie d'abord sans rien copier : c'est le cas courant, à
+        // chaque image pour chaque ligne affichée.
+        if !etat.demandes.contains(chemin) {
+            etat.demandes.insert(chemin.to_path_buf());
             etat.a_lire.push_front(chemin.to_path_buf());
             self.partage.1.notify_one();
         }
