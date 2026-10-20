@@ -761,10 +761,6 @@ impl LecteurApp {
                 let ensuite = (1..=A_MESURER_A_L_AVANCE.min(morceaux.len().saturating_sub(1)))
                     .map(|ecart| (courant + ecart) % morceaux.len());
                 let numeros = std::iter::once(courant).chain(a_suivre).chain(ensuite);
-                eprintln!(
-                    "[volume] demande : morceau {courant}, écrire dans les MP3 : {}",
-                    self.ecrire_volume
-                );
                 self.volumes
                     .demander(numeros.map(|n| morceaux[n].as_path()));
             }

@@ -381,31 +381,18 @@ fn mesurer_en_arriere_plan(partage: &Partage, fichier: Option<&Path>, prevenir: 
                 })
             }
         };
-        if let Some(mesure) = resultat {
-            eprintln!(
-                "[volume] {} : {:?} (écrire dans les MP3 : {})",
-                chemin.display(),
-                mesure,
-                partage.ecrire.load(Ordering::Relaxed)
-            );
-        }
         // Écriture dans le MP3, s'il n'a pas déjà ses tags ReplayGain. Un
         // échec (lecture seule, fichier ouvert ailleurs) n'empêche pas
         // l'égalisation : on réessaiera la prochaine fois.
         let ecrire = partage.ecrire.load(Ordering::Relaxed);
         let mut ecrit = false;
         if let (true, Some(Some(mesure))) = (ecrire, resultat) {
-            let deja = tags::lire_replaygain(&chemin).is_some();
-            if deja {
-                eprintln!("[volume] déjà des tags ReplayGain : {}", chemin.display());
-            }
-            ecrit = deja
+            ecrit = tags::lire_replaygain(&chemin).is_some()
                 || ecrire_replaygain(&chemin, mesure)
                     .inspect_err(|e| {
                         eprintln!("[volume] écriture impossible ({e}) : {}", chemin.display())
                     })
                     .is_ok_and(|()| {
-                        eprintln!("[volume] tags écrits : {}", chemin.display());
                         // Le fichier a grandi : on note sa nouvelle taille.
                         taille = std::fs::metadata(&chemin).map_or(0, |m| m.len());
                         if let Some(fichier) = fichier {
