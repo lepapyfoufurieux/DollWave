@@ -586,9 +586,6 @@ impl eframe::App for LecteurApp {
             ui.add_space(8.0);
             ui.horizontal(|ui| {
                 ui.strong("Liste de lecture");
-                if let Some(nom) = self.playlists.chargee() {
-                    ui.weak(format!("🎵 {nom}"));
-                }
                 if ui
                     .small_button("📂 Autre fichier…")
                     .on_hover_text("Ajouter un MP3 rangé en dehors de la bibliothèque")
@@ -602,7 +599,8 @@ impl eframe::App for LecteurApp {
                     self.oublier_morceau();
                 }
             });
-            let liste = ui.scope(|ui| self.liste.afficher(ui, &self.tags));
+            let noms = self.playlists.noms();
+            let liste = ui.scope(|ui| self.liste.afficher(ui, &self.tags, &noms));
             zone_liste = liste.response.rect;
             match liste.inner {
                 // Un clic sur le morceau en cours ne le relance pas depuis le
@@ -620,6 +618,9 @@ impl eframe::App for LecteurApp {
                             self.oublier_morceau();
                         }
                     }
+                }
+                Some(Action::AjouterAPlaylist { nom, fichier }) => {
+                    self.playlists.ajouter_a(&nom, &[fichier]);
                 }
                 None => {}
             }

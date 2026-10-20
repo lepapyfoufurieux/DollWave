@@ -8,7 +8,7 @@ use std::sync::mpsc::{self, Receiver, TryRecvError};
 use eframe::egui;
 
 use crate::liste::nom_du_fichier;
-use crate::playlists::MorceauxGlisses;
+use crate::playlists::{menu_ajouter_a_une_playlist, MorceauxGlisses};
 use crate::tags::TagsConnus;
 
 /// Au-delà de ce nombre de résultats de recherche, on n'affiche que les
@@ -477,20 +477,7 @@ fn menu_playlist(
     lignes: &mut Lignes,
     morceaux: impl FnOnce() -> Vec<PathBuf>,
 ) {
-    let mut choisie = None;
-    reponse.context_menu(|ui| {
-        ui.label("Ajouter à la playlist :");
-        if lignes.playlists.is_empty() {
-            ui.weak("Aucune playlist : crée-en une avec « ➕ Nouvelle », en bas à gauche.");
-        }
-        for nom in lignes.playlists {
-            if ui.button(format!("🎵 {nom}")).clicked() {
-                choisie = Some(nom.clone());
-                ui.close_menu();
-            }
-        }
-    });
-    if let Some(nom) = choisie {
+    if let Some(nom) = menu_ajouter_a_une_playlist(reponse, lignes.playlists) {
         lignes.vers_playlist = Some((nom, morceaux()));
     }
 }

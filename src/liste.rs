@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use eframe::egui;
 
 use crate::format_temps;
+use crate::playlists::menu_ajouter_a_une_playlist;
 use crate::tags::TagsConnus;
 
 /// Hauteur maximale de la liste à l'écran ; au-delà, on fait défiler.
@@ -19,6 +20,8 @@ pub enum Action {
     Jouer(usize),
     /// Retirer le morceau numéro n de la liste (bouton ✖).
     Retirer(usize),
+    /// Ajouter ce morceau à la playlist `nom` (clic droit).
+    AjouterAPlaylist { nom: String, fichier: PathBuf },
 }
 
 #[derive(Default)]
@@ -39,6 +42,17 @@ pub struct ListeDeLecture {
     /// Le morceau en cours lors du dernier affichage. S'il a changé depuis,
     /// on fait défiler la liste jusqu'au nouveau.
     courant_affiche: Option<usize>,
+    /// En lecture aléatoire : le morceau demandé avec « Lire ensuite », qui
+    /// passe avant le hasard.
+    prochain: Option<usize>,
+}
+
+/// Ce qu'on transporte quand on glisse un morceau de la liste : son numéro,
+/// pour le lâcher ailleurs dans la liste, et son fichier, pour le lâcher
+/// sur une playlist.
+pub struct MorceauGlisse {
+    n: usize,
+    pub fichier: PathBuf,
 }
 
 impl ListeDeLecture {
@@ -67,6 +81,11 @@ impl ListeDeLecture {
         }
         self.morceaux.remove(n);
         self.deja_joue.remove(n);
+        self.prochain = match self.prochain {
+            Some(p) if p == n => None,
+            Some(p) if p > n => Some(p - 1),
+            p => p,
+        };
         // Dans l'historique, on oublie ce morceau et on décale les suivants.
         self.historique.retain(|&h| h != n);
         for h in &mut self.historique {
@@ -92,6 +111,7 @@ impl ListeDeLecture {
         self.deja_joue.clear();
         self.historique.clear();
         self.courant = None;
+        self.prochain = None;
     }
 
     pub fn aleatoire(&self) -> bool {
@@ -102,6 +122,7 @@ impl ListeDeLecture {
     /// pour un nouveau tour : seul le morceau en cours compte comme déjà joué.
     pub fn changer_aleatoire(&mut self, actif: bool) {
         self.aleatoire = actif;
+        self.prochain = None;
         self.deja_joue.fill(false);
         self.historique.clear();
         if let Some(c) = self.courant {
@@ -138,6 +159,9 @@ impl ListeDeLecture {
 
     pub fn choisir(&mut self, n: usize) {
         self.courant = Some(n);
+        if self.prochain == Some(n) {
+            self.prochain = None;
+        }
         if let Some(joue) = self.deja_joue.get_mut(n) {
             *joue = true;
         }
@@ -155,6 +179,9 @@ impl ListeDeLecture {
             return None;
         }
         if self.aleatoire {
+            if let Some(p) = self.prochain.take() {
+                return Some(p);
+            }
             let mut restants: Vec<usize> = (0..self.morceaux.len())
                 .filter(|&i| !self.deja_joue[i])
                 .collect();
@@ -195,11 +222,74 @@ impl ListeDeLecture {
         Some(self.courant.map_or(0, |c| c.saturating_sub(1)))
     }
 
+    /// Déplace le morceau numéro `de` pour l'insérer à la place `vers`
+    /// (0 : tout en haut ; le nombre de morceaux : tout en bas), comptée dans
+    /// la liste d'avant le déplacement. Le morceau en cours, l'historique et
+    /// les morceaux déjà joués suivent leur morceau.
+    pub fn deplacer(&mut self, de: usize, vers: usize) {
+        let taille = self.morceaux.len();
+        if de >= taille || vers > taille {
+            return;
+        }
+        // Une fois le morceau retiré, tout ce qui le suivait remonte d'un cran.
+        let arrivee = if vers > de { vers - 1 } else { vers };
+        if arrivee == de {
+            return;
+        }
+        // Le nouveau numéro d'un morceau qui avait le numéro i.
+        let nouveau = |i: usize| {
+            if i == de {
+                arrivee
+            } else if de < i && i <= arrivee {
+                i - 1
+            } else if arrivee <= i && i < de {
+                i + 1
+            } else {
+                i
+            }
+        };
+        let morceau = self.morceaux.remove(de);
+        self.morceaux.insert(arrivee, morceau);
+        let joue = self.deja_joue.remove(de);
+        self.deja_joue.insert(arrivee, joue);
+        for h in &mut self.historique {
+            *h = nouveau(*h);
+        }
+        self.courant = self.courant.map(nouveau);
+        self.courant_affiche = self.courant_affiche.map(nouveau);
+        self.prochain = self.prochain.map(nouveau);
+    }
+
+    /// « Lire ensuite » : place le morceau juste après celui en cours (en tête
+    /// de liste si rien ne joue), pour qu'il passe au prochain morceau. En
+    /// lecture aléatoire, il passe aussi avant le hasard.
+    pub fn lire_ensuite(&mut self, n: usize) {
+        if n >= self.morceaux.len() || self.courant == Some(n) {
+            return;
+        }
+        let vers = self.courant.map_or(0, |c| c + 1);
+        self.deplacer(n, vers);
+        let arrivee = if vers > n { vers - 1 } else { vers };
+        if self.aleatoire {
+            self.prochain = Some(arrivee);
+        }
+    }
+
     /// Dessine la liste. Renvoie ce que l'utilisateur a demandé, s'il a cliqué.
     /// Chaque morceau est nommé d'après ses tags (« Artiste – Titre »), avec
     /// sa durée à droite.
-    pub fn afficher(&mut self, ui: &mut egui::Ui, tags: &TagsConnus) -> Option<Action> {
+    /// `playlists` : les noms des playlists, pour le menu du clic droit.
+    pub fn afficher(
+        &mut self,
+        ui: &mut egui::Ui,
+        tags: &TagsConnus,
+        playlists: &[String],
+    ) -> Option<Action> {
         let mut action = None;
+        let mut a_lire_ensuite = None;
+        // Les rectangles des lignes, pour savoir où lâcher un morceau glissé.
+        let mut lignes: Vec<egui::Rect> = Vec::with_capacity(self.morceaux.len());
+        let glisse = egui::DragAndDrop::payload::<MorceauGlisse>(ui.ctx()).map(|m| m.n);
         // On ne défile que quand le morceau change : entre-temps, on peut
         // faire défiler la liste à la main sans qu'elle revienne toute seule.
         let defiler = self.courant != self.courant_affiche;
@@ -209,15 +299,50 @@ impl ListeDeLecture {
             .auto_shrink([false, true])
             .show(ui, |ui| {
                 for (n, fichier) in self.morceaux.iter().enumerate() {
-                    ui.horizontal(|ui| {
+                    let rangee = ui.horizontal(|ui| {
                         if ui.small_button("✖").on_hover_text("Retirer").clicked() {
                             action = Some(Action::Retirer(n));
                         }
                         let en_cours = self.courant == Some(n);
+                        if ui
+                            .add_enabled(!en_cours, egui::Button::new("⏭").small())
+                            .on_hover_text("Lire ensuite")
+                            .clicked()
+                        {
+                            a_lire_ensuite = Some(n);
+                        }
                         let texte = format!("{}. {}", n + 1, tags.libelle(fichier));
+                        // Le morceau qu'on est en train de glisser est grisé.
+                        let texte = if glisse == Some(n) {
+                            egui::RichText::new(texte).weak()
+                        } else {
+                            egui::RichText::new(texte)
+                        };
+                        // Un clic lance le morceau ; si on bouge la souris en
+                        // gardant le bouton appuyé, on le glisse ailleurs.
                         let ligne = ui
                             .selectable_label(en_cours, texte)
-                            .on_hover_text(tags.infobulle(fichier));
+                            .interact(egui::Sense::drag());
+                        if ligne.drag_started() {
+                            egui::DragAndDrop::set_payload(
+                                ui.ctx(),
+                                MorceauGlisse {
+                                    n,
+                                    fichier: fichier.clone(),
+                                },
+                            );
+                        }
+                        if let Some(nom) = menu_ajouter_a_une_playlist(&ligne, playlists) {
+                            action = Some(Action::AjouterAPlaylist {
+                                nom,
+                                fichier: fichier.clone(),
+                            });
+                        }
+                        let ligne = if glisse.is_some() {
+                            ligne
+                        } else {
+                            ligne.on_hover_text(tags.infobulle(fichier))
+                        };
                         if let Some(duree) = tags.duree(fichier) {
                             ui.with_layout(
                                 egui::Layout::right_to_left(egui::Align::Center),
@@ -234,10 +359,63 @@ impl ListeDeLecture {
                             action = Some(Action::Jouer(n));
                         }
                     });
+                    lignes.push(rangee.response.rect);
+                }
+                if let Some(de) = glisse {
+                    self.glisser(ui, de, &lignes);
                 }
             });
+        if let Some(n) = a_lire_ensuite {
+            self.lire_ensuite(n);
+        }
         action
     }
+
+    /// Pendant qu'on glisse le morceau `de` : montre par un trait où il va
+    /// atterrir, et le déplace quand on lâche le bouton de la souris.
+    fn glisser(&mut self, ui: &mut egui::Ui, de: usize, lignes: &[egui::Rect]) {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+        let Some(souris) = ui.ctx().pointer_interact_pos() else {
+            return;
+        };
+        let zone = ui.clip_rect();
+        // Près du haut ou du bas de la liste, on la fait défiler.
+        if souris.y < zone.top() + 15.0 {
+            ui.scroll_with_delta(egui::vec2(0.0, 4.0));
+        } else if souris.y > zone.bottom() - 15.0 {
+            ui.scroll_with_delta(egui::vec2(0.0, -4.0));
+        }
+        let vers = place_sous_la_souris(lignes, souris.y);
+        // Un peu au-dessus ou au-dessous de la liste, ça compte encore : on
+        // vise le haut ou le bas sans avoir à être précis.
+        let dans_la_liste = zone.expand2(egui::vec2(0.0, 20.0)).contains(souris);
+        if dans_la_liste {
+            if let (Some(premiere), Some(derniere)) = (lignes.first(), lignes.last()) {
+                let y = lignes.get(vers).map_or(derniere.bottom(), |r| r.top());
+                let trait_ = ui.visuals().selection.stroke;
+                ui.painter().hline(
+                    premiere.left()..=premiere.right(),
+                    y,
+                    egui::Stroke::new(2.0_f32, trait_.color),
+                );
+            }
+        }
+        // Lâché hors de la liste, on ne déplace rien : il a pu être lâché
+        // sur une playlist, qui s'en occupe.
+        if dans_la_liste && ui.input(|i| i.pointer.any_released()) {
+            egui::DragAndDrop::clear_payload(ui.ctx());
+            self.deplacer(de, vers);
+        }
+    }
+}
+
+/// La place où insérer un morceau lâché à la hauteur `y` : avant la
+/// première ligne dont le milieu est plus bas que la souris, ou tout en bas.
+fn place_sous_la_souris(lignes: &[egui::Rect], y: f32) -> usize {
+    lignes
+        .iter()
+        .position(|r| y < r.center().y)
+        .unwrap_or(lignes.len())
 }
 
 /// Un nombre au hasard entre 0 et n - 1 (n doit être au moins 1).
@@ -397,7 +575,7 @@ mod tests {
         temps: f64,
         y: f32,
     ) -> Option<usize> {
-        let pos = egui::pos2(45.0, y);
+        let pos = egui::pos2(70.0, y);
         let mut jouer = None;
         for (n, pressed) in [false, true].into_iter().enumerate() {
             let entree = egui::RawInput {
@@ -419,7 +597,7 @@ mod tests {
             };
             let _ = ctx.run(entree, |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| {
-                    if let Some(Action::Jouer(n)) = l.afficher(ui, tags) {
+                    if let Some(Action::Jouer(n)) = l.afficher(ui, tags, &[]) {
                         jouer = Some(n);
                     }
                 });
@@ -444,5 +622,186 @@ mod tests {
             }
         }
         assert_eq!(joues, vec![0, 1, 2]);
+    }
+
+    /// Les noms des morceaux, dans l'ordre de la liste.
+    fn noms(l: &ListeDeLecture) -> Vec<String> {
+        l.morceaux().iter().map(|m| nom_du_fichier(m)).collect()
+    }
+
+    #[test]
+    fn deplacer_garde_le_morceau_en_cours() {
+        let mut l = liste(5);
+        l.choisir(1);
+        l.deplacer(0, 5); // le premier tout en bas
+        assert_eq!(noms(&l), ["1.mp3", "2.mp3", "3.mp3", "4.mp3", "0.mp3"]);
+        assert_eq!(l.courant(), Some(0));
+        l.deplacer(3, 0); // 4.mp3 tout en haut
+        assert_eq!(noms(&l), ["4.mp3", "1.mp3", "2.mp3", "3.mp3", "0.mp3"]);
+        assert_eq!(l.courant(), Some(1));
+        l.deplacer(1, 4); // le morceau en cours avant le dernier
+        assert_eq!(noms(&l), ["4.mp3", "2.mp3", "3.mp3", "1.mp3", "0.mp3"]);
+        assert_eq!(l.courant(), Some(3));
+        assert_eq!(l.suivant(), Some(4));
+        // Lâché sur place : rien ne change.
+        l.deplacer(2, 2);
+        l.deplacer(2, 3);
+        assert_eq!(noms(&l), ["4.mp3", "2.mp3", "3.mp3", "1.mp3", "0.mp3"]);
+    }
+
+    #[test]
+    fn lire_ensuite_place_le_morceau_apres_celui_en_cours() {
+        let mut l = liste(5);
+        l.choisir(1);
+        l.lire_ensuite(4);
+        assert_eq!(noms(&l), ["0.mp3", "1.mp3", "4.mp3", "2.mp3", "3.mp3"]);
+        assert_eq!(l.suivant(), Some(2));
+        l.lire_ensuite(0); // un morceau placé avant celui en cours
+        assert_eq!(noms(&l), ["1.mp3", "0.mp3", "4.mp3", "2.mp3", "3.mp3"]);
+        assert_eq!(l.courant(), Some(0));
+        assert_eq!(l.suivant(), Some(1));
+        // Sur le morceau en cours : rien ne change.
+        l.lire_ensuite(0);
+        assert_eq!(noms(&l), ["1.mp3", "0.mp3", "4.mp3", "2.mp3", "3.mp3"]);
+    }
+
+    #[test]
+    fn lire_ensuite_sans_morceau_en_cours_remonte_en_tete() {
+        let mut l = liste(3);
+        l.lire_ensuite(2);
+        assert_eq!(noms(&l), ["2.mp3", "0.mp3", "1.mp3"]);
+        assert_eq!(l.suivant(), Some(0));
+    }
+
+    #[test]
+    fn lire_ensuite_passe_avant_le_hasard() {
+        for _ in 0..20 {
+            let mut l = liste(8);
+            l.changer_aleatoire(true);
+            l.choisir(3);
+            l.lire_ensuite(6);
+            assert_eq!(l.suivant(), Some(4));
+            l.choisir(4);
+            // Ensuite, le hasard reprend parmi les morceaux pas encore joués.
+            let n = l.suivant().unwrap();
+            assert!(n != 3 && n != 4);
+        }
+    }
+
+    #[test]
+    fn retirer_le_morceau_a_lire_ensuite_l_oublie() {
+        let mut l = liste(4);
+        l.changer_aleatoire(true);
+        l.choisir(0);
+        l.lire_ensuite(3);
+        l.retirer(1);
+        let n = l.suivant().unwrap();
+        assert!(n == 1 || n == 2);
+    }
+
+    /// Une image de la liste avec ces gestes de souris (à un instant donné).
+    fn image(
+        l: &mut ListeDeLecture,
+        ctx: &egui::Context,
+        tags: &TagsConnus,
+        temps: f64,
+        events: Vec<egui::Event>,
+    ) -> Option<Action> {
+        let entree = egui::RawInput {
+            time: Some(temps),
+            events,
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(400.0, 300.0),
+            )),
+            ..Default::default()
+        };
+        let mut action = None;
+        let _ = ctx.run(entree, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                action = l.afficher(ui, tags, &[]);
+            });
+        });
+        action
+    }
+
+    fn bouton(pos: egui::Pos2, pressed: bool) -> Vec<egui::Event> {
+        vec![
+            egui::Event::PointerMoved(pos),
+            egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            },
+        ]
+    }
+
+    /// Glisse le morceau à la hauteur `de` jusqu'à la position `vers`, en
+    /// plusieurs petits pas, puis lâche. Renvoie les actions demandées.
+    fn glisser_de(l: &mut ListeDeLecture, de: f32, vers: egui::Pos2) -> Vec<Action> {
+        let ctx = egui::Context::default();
+        let tags = TagsConnus::new(&ctx);
+        let mut actions = Vec::new();
+        let depart = egui::pos2(70.0, de);
+        let mut t = 0.0;
+        let mut pas = |l: &mut ListeDeLecture, events| {
+            t += 0.02;
+            actions.extend(image(l, &ctx, &tags, t, events));
+        };
+        pas(l, vec![]);
+        pas(l, bouton(depart, true));
+        for i in 1..=20 {
+            let p = depart + (vers - depart) * (i as f32 / 20.0);
+            pas(l, vec![egui::Event::PointerMoved(p)]);
+        }
+        pas(l, bouton(vers, false));
+        pas(l, vec![]);
+        actions
+    }
+
+    #[test]
+    fn glisser_un_morceau_change_sa_place() {
+        // Les lignes font une vingtaine de pixels de haut : on attrape la
+        // première et on la lâche tout en bas de la liste.
+        let mut l = liste(4);
+        let actions = glisser_de(&mut l, 15.0, egui::pos2(70.0, 4.0 * 21.0 + 2.0));
+        assert!(actions.is_empty(), "un glisser ne lance pas de morceau");
+        assert_eq!(noms(&l), ["1.mp3", "2.mp3", "3.mp3", "0.mp3"]);
+        // Et le dernier, on le remonte en haut.
+        let actions = glisser_de(&mut l, 3.0 * 21.0 + 10.0, egui::pos2(70.0, 3.0));
+        assert!(actions.is_empty());
+        assert_eq!(noms(&l), ["0.mp3", "1.mp3", "2.mp3", "3.mp3"]);
+    }
+
+    #[test]
+    fn lacher_hors_de_la_liste_ne_change_rien() {
+        let mut l = liste(4);
+        glisser_de(&mut l, 15.0, egui::pos2(70.0, 290.0));
+        assert_eq!(noms(&l), ["0.mp3", "1.mp3", "2.mp3", "3.mp3"]);
+    }
+
+    #[test]
+    fn un_morceau_glisse_hors_de_la_liste_emporte_son_fichier() {
+        // Hors de la liste, c'est une playlist qui pourra le recevoir : le
+        // morceau glissé doit donc transporter son fichier.
+        let mut l = liste(3);
+        let ctx = egui::Context::default();
+        let tags = TagsConnus::new(&ctx);
+        let depart = egui::pos2(70.0, 36.0); // le 2e morceau
+        image(&mut l, &ctx, &tags, 0.0, vec![]);
+        image(&mut l, &ctx, &tags, 0.02, bouton(depart, true));
+        for i in 1..=10 {
+            let p = depart + egui::vec2(0.0, 25.0 * i as f32);
+            image(
+                &mut l,
+                &ctx,
+                &tags,
+                0.02 + 0.02 * i as f64,
+                vec![egui::Event::PointerMoved(p)],
+            );
+        }
+        let fichier = egui::DragAndDrop::payload::<MorceauGlisse>(&ctx).map(|m| m.fichier.clone());
+        assert_eq!(fichier, Some(PathBuf::from("1.mp3")));
     }
 }

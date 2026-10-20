@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use eframe::egui;
 
 use crate::bibliotheque::{clic_simple, fichier_de_reglage};
-use crate::liste::nom_du_fichier;
+use crate::liste::{nom_du_fichier, MorceauGlisse};
 use crate::tags::TagsConnus;
 
 /// Les caractères que Windows refuse dans un nom de fichier.
@@ -32,20 +32,43 @@ struct TitreGlisse {
     depuis: usize,
 }
 
+/// Le menu du clic droit sur un morceau (de la bibliothèque ou de la liste
+/// de lecture) : « Ajouter à la playlist » puis le nom de chaque playlist.
+/// Renvoie la playlist choisie.
+pub fn menu_ajouter_a_une_playlist(reponse: &egui::Response, noms: &[String]) -> Option<String> {
+    let mut choisie = None;
+    reponse.context_menu(|ui| {
+        ui.label("Ajouter à la playlist :");
+        if noms.is_empty() {
+            ui.weak("Aucune playlist : crée-en une avec « ➕ Nouvelle », en bas à gauche.");
+        }
+        for nom in noms {
+            if ui.button(format!("🎵 {nom}")).clicked() {
+                choisie = Some(nom.clone());
+                ui.close_menu();
+            }
+        }
+    });
+    choisie
+}
+
 /// Pendant qu'on fait glisser des morceaux, une étiquette suit la souris
 /// pour montrer ce qu'on transporte.
 pub fn dessiner_glissement(ctx: &egui::Context) {
-    let Some(glisses) = egui::DragAndDrop::payload::<MorceauxGlisses>(ctx) else {
+    let texte = if let Some(glisses) = egui::DragAndDrop::payload::<MorceauxGlisses>(ctx) {
+        match glisses.0.len() {
+            1 => "🎵 1 morceau : lâche-le sur une playlist".to_string(),
+            n => format!("🎵 {n} morceaux : lâche-les sur une playlist"),
+        }
+    } else if egui::DragAndDrop::has_payload_of_type::<MorceauGlisse>(ctx) {
+        "🎵 Lâche-le ailleurs dans la liste, ou sur une playlist".to_string()
+    } else {
         return;
     };
     let Some(souris) = ctx.input(|i| i.pointer.hover_pos()) else {
         return;
     };
     ctx.set_cursor_icon(egui::CursorIcon::Grabbing);
-    let texte = match glisses.0.len() {
-        1 => "🎵 1 morceau : lâche-le sur une playlist".to_string(),
-        n => format!("🎵 {n} morceaux : lâche-les sur une playlist"),
-    };
     egui::Area::new(egui::Id::new("morceaux_glisses"))
         .order(egui::Order::Tooltip)
         .fixed_pos(souris + egui::vec2(14.0, 10.0))
@@ -122,11 +145,6 @@ impl Playlists {
     /// Les noms des playlists, dans l'ordre affiché.
     pub fn noms(&self) -> Vec<String> {
         self.toutes.iter().map(|p| p.nom.clone()).collect()
-    }
-
-    /// La playlist chargée dans la liste de lecture, s'il y en a une.
-    pub fn chargee(&self) -> Option<&str> {
-        self.chargee.as_deref()
     }
 
     /// La liste de lecture a été vidée : elle n'est plus liée à une playlist.
@@ -374,10 +392,12 @@ impl Playlists {
             demande = self.lancer_depuis(n, i);
         }
 
-        // Des morceaux glissés depuis la bibliothèque survolent la ligne : on
-        // l'encadre, et s'ils sont lâchés ici, on les ajoute à la playlist.
+        // Des morceaux glissés depuis la bibliothèque ou la liste de lecture
+        // survolent la ligne : on l'encadre, et s'ils sont lâchés ici, on les
+        // ajoute à la playlist.
         let ctx = ui.ctx().clone();
-        if egui::DragAndDrop::has_payload_of_type::<MorceauxGlisses>(&ctx)
+        if (egui::DragAndDrop::has_payload_of_type::<MorceauxGlisses>(&ctx)
+            || egui::DragAndDrop::has_payload_of_type::<MorceauGlisse>(&ctx))
             && ui.rect_contains_pointer(rangee.response.rect)
         {
             ui.painter().rect_stroke(
@@ -386,9 +406,14 @@ impl Playlists {
                 ui.visuals().selection.stroke,
             );
             if ctx.input(|i| i.pointer.any_released()) {
-                if let Some(glisses) = egui::DragAndDrop::take_payload::<MorceauxGlisses>(&ctx) {
+                // Attention : `take_payload` vide le glissement même s'il n'est
+                // pas du type demandé. On regarde donc d'abord ce qu'il porte.
+                if let Some(glisses) = egui::DragAndDrop::payload::<MorceauxGlisses>(&ctx) {
                     self.ajouter_a(&nom, &glisses.0);
+                } else if let Some(morceau) = egui::DragAndDrop::payload::<MorceauGlisse>(&ctx) {
+                    self.ajouter_a(&nom, std::slice::from_ref(&morceau.fichier));
                 }
+                egui::DragAndDrop::clear_payload(&ctx);
             }
         }
         demande
@@ -848,5 +873,76 @@ mod tests {
                 PathBuf::from("/absolu/2.mp3")
             ]
         );
+    }
+
+    /// Glisse un morceau de la liste de lecture (à droite) jusqu'à la
+    /// hauteur `y` du panneau des playlists (à gauche), et lâche.
+    fn glisser_de_la_liste_vers(y: f32, dossier: &Path) {
+        use crate::liste::ListeDeLecture;
+        let ctx = egui::Context::default();
+        let tags = TagsConnus::new(&ctx);
+        let mut playlists = Playlists::dans(Some(dossier.to_path_buf()));
+        let mut liste = ListeDeLecture::default();
+        liste.ajouter((0..3).map(|i| PathBuf::from(format!("{i}.mp3"))).collect());
+        let mut t = 0.0;
+        let mut image = |events: Vec<egui::Event>| {
+            t += 0.02;
+            let entree = egui::RawInput {
+                time: Some(t),
+                events,
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(800.0, 400.0),
+                )),
+                ..Default::default()
+            };
+            let _ = ctx.run(entree, |ctx| {
+                egui::SidePanel::left("gauche")
+                    .exact_width(300.0)
+                    .show(ctx, |ui| {
+                        playlists.afficher(ui, &tags);
+                    });
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    liste.afficher(ui, &tags, &[]);
+                });
+                dessiner_glissement(ctx);
+            });
+        };
+        let bouton = |pos: egui::Pos2, pressed: bool| {
+            vec![
+                egui::Event::PointerMoved(pos),
+                egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ]
+        };
+        // Le 1er morceau de la liste, et la 1re playlist (vers y = 30).
+        let depart = egui::pos2(380.0, 15.0);
+        let arrivee = egui::pos2(60.0, y);
+        image(vec![]);
+        image(vec![]);
+        image(bouton(depart, true));
+        for i in 1..=20 {
+            let p = depart + (arrivee - depart) * (i as f32 / 20.0);
+            image(vec![egui::Event::PointerMoved(p)]);
+        }
+        image(bouton(arrivee, false));
+        image(vec![]);
+    }
+
+    #[test]
+    fn glisser_un_morceau_de_la_liste_sur_une_playlist() {
+        let dossier = dossier_de_test("depuis_la_liste");
+        creer(&dossier, "Soirée", &[]).unwrap();
+        // Lâché à côté de la playlist : rien.
+        glisser_de_la_liste_vers(150.0, &dossier);
+        assert!(lire(&dossier, "Soirée").unwrap().is_empty());
+        // Lâché dessus : le morceau y est ajouté.
+        glisser_de_la_liste_vers(30.0, &dossier);
+        assert_eq!(lire(&dossier, "Soirée").unwrap(), [dossier.join("0.mp3")]);
+        std::fs::remove_dir_all(&dossier).unwrap();
     }
 }
