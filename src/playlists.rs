@@ -33,15 +33,6 @@ struct TitreGlisse {
     depuis: usize,
 }
 
-/// Le menu du clic droit sur un dossier ou un artiste de la bibliothèque :
-/// « Ajouter à la playlist » puis le nom de chaque playlist.
-/// Renvoie la playlist choisie.
-pub fn menu_ajouter_a_une_playlist(reponse: &egui::Response, noms: &[String]) -> Option<String> {
-    let mut choisie = None;
-    reponse.context_menu(|ui| choisir_une_playlist(ui, noms, &mut choisie));
-    choisie
-}
-
 /// Ce qu'on a choisi dans le menu du clic droit sur un morceau.
 pub enum ChoixDuMenu {
     /// Ajouter le morceau à cette playlist.
@@ -50,13 +41,17 @@ pub enum ChoixDuMenu {
     ModifierLesTags,
 }
 
-/// Le menu du clic droit sur un morceau (de la bibliothèque ou de la liste
-/// de lecture) : « Modifier les tags… », puis « Ajouter à la playlist » et
-/// le nom de chaque playlist.
-pub fn menu_d_un_morceau(reponse: &egui::Response, noms: &[String]) -> Option<ChoixDuMenu> {
+/// Le menu du clic droit sur un morceau, un dossier, un artiste ou un album
+/// (de la bibliothèque ou de la liste de lecture) : `modifier` (« ✏ Modifier
+/// les tags… »), puis « Ajouter à la playlist » et le nom de chaque playlist.
+pub fn menu_clic_droit(
+    reponse: &egui::Response,
+    noms: &[String],
+    modifier: &str,
+) -> Option<ChoixDuMenu> {
     let mut choix = None;
     reponse.context_menu(|ui| {
-        if ui.button("✏ Modifier les tags…").clicked() {
+        if ui.button(modifier).clicked() {
             choix = Some(ChoixDuMenu::ModifierLesTags);
             ui.close_menu();
         }

@@ -29,7 +29,7 @@ use eframe::egui;
 use rodio::Sink;
 
 use bibliotheque::{memoriser, Bibliotheque};
-use editeur_tags::{EditeurTags, Issue};
+use editeur_tags::EditeurTags;
 use egalisation::VolumesConnus;
 use liste::{Action, ListeDeLecture};
 use morceau::Morceau;
@@ -999,23 +999,22 @@ impl LecteurApp {
         let Some(editeur) = &mut self.editeur else {
             return;
         };
-        match editeur.afficher(ctx) {
-            Issue::Ouverte => {}
-            Issue::Annulee => self.editeur = None,
-            Issue::Enregistree => {
-                let chemin = editeur.chemin().to_path_buf();
-                self.tags.relire(&chemin);
-                if self.pochette.as_ref().is_some_and(|(p, _)| *p == chemin)
-                    || self
-                        .pochette_en_cours
-                        .as_ref()
-                        .is_some_and(|(p, _)| *p == chemin)
-                {
-                    self.pochette = None;
-                    self.pochette_en_cours = None;
-                }
-                self.editeur = None;
-            }
+        let retour = editeur.afficher(ctx);
+        for chemin in &retour.a_relire {
+            self.tags.relire(chemin);
+        }
+        let touche = |chemin: &PathBuf| retour.a_relire.contains(chemin);
+        if self.pochette.as_ref().is_some_and(|(p, _)| touche(p))
+            || self
+                .pochette_en_cours
+                .as_ref()
+                .is_some_and(|(p, _)| touche(p))
+        {
+            self.pochette = None;
+            self.pochette_en_cours = None;
+        }
+        if retour.fermer {
+            self.editeur = None;
         }
     }
 
@@ -1288,8 +1287,8 @@ impl eframe::App for LecteurApp {
         if let Some((nom, morceaux)) = demandes.vers_playlist {
             self.playlists.ajouter_a(&nom, &morceaux);
         }
-        if let Some(chemin) = demandes.tags_a_modifier {
-            self.editeur = Some(EditeurTags::ouvrir(ctx, &chemin));
+        if let Some(chemins) = demandes.tags_a_modifier {
+            self.editeur = Some(EditeurTags::ouvrir(ctx, chemins, &self.tags));
         }
         match demande {
             // Écouter une playlist : elle remplace la liste de lecture.
@@ -1428,7 +1427,7 @@ impl eframe::App for LecteurApp {
                     self.playlists.ajouter_a(&nom, &[fichier]);
                 }
                 Some(Action::ModifierLesTags(fichier)) => {
-                    self.editeur = Some(EditeurTags::ouvrir(ui.ctx(), &fichier));
+                    self.editeur = Some(EditeurTags::ouvrir(ui.ctx(), vec![fichier], &self.tags));
                 }
                 None => {}
             }
