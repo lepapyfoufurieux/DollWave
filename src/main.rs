@@ -45,6 +45,9 @@ fn main() -> eframe::Result {
     )
 }
 
+/// Le début du message affiché quand aucune sortie son ne marche.
+const SORTIE_INDISPONIBLE: &str = "Sortie audio indisponible";
+
 /// L'état de l'application.
 struct LecteurApp {
     // La sortie son (haut-parleurs, casque…). Rien si aucune n'a pu être ouverte.
@@ -361,29 +364,29 @@ impl LecteurApp {
             return;
         }
         match Sortie::ouvrir() {
-            Ok(nouvelle) => self.passer_sur(nouvelle),
+            Ok(nouvelle) => self.passer_sur(nouvelle, maintenant),
             Err(e) => {
                 // On réessaiera dans un moment (pas à chaque image).
                 self.veilleur = Veilleur::new(maintenant);
-                self.message = format!("Sortie audio indisponible ({e}), nouvel essai…");
+                self.message = format!("{SORTIE_INDISPONIBLE} ({e}), nouvel essai…");
             }
         }
     }
 
     /// Remplace la sortie son. Le morceau en cours reprend au même endroit
     /// sur la nouvelle, en pause s'il l'était.
-    fn passer_sur(&mut self, sortie: Sortie) {
+    fn passer_sur(&mut self, sortie: Sortie, maintenant: Instant) {
         let reprise = self.platine_active().map(Telecommande::reprise);
         if let Some(sink) = self.sink.take() {
             sink.stop();
         }
         self.telecommande = None;
-        self.message = match &sortie.nom {
-            Some(nom) => format!("Sortie audio : {nom}"),
-            None => String::new(),
-        };
+        // Le son est revenu : on efface le message de panne, s'il y en avait un.
+        if self.message.starts_with(SORTIE_INDISPONIBLE) {
+            self.message.clear();
+        }
         self.sortie = Some(sortie);
-        self.veilleur = Veilleur::new(Instant::now());
+        self.veilleur = Veilleur::new(maintenant);
         if let Some((telecommande, platine)) = reprise {
             if let Err(e) = self.lancer(telecommande, platine) {
                 self.message = format!("Impossible de reprendre la lecture : {e}");
@@ -1137,35 +1140,32 @@ mod tests {
         app.telecommande.as_ref().unwrap().aller_a(1.0);
         let avant = app.position();
 
-        // Une sortie qui marche n'est pas remplacée.
-        let debut = Instant::now();
-        app.prochaine_verification = debut + Duration::from_secs(60);
-        app.surveiller_sortie(debut);
-        std::thread::sleep(Duration::from_millis(300));
-        app.surveiller_sortie(debut + Duration::from_secs(2));
-        app.surveiller_sortie(debut + Duration::from_secs(4));
-        assert!(app.sortie.as_ref().unwrap().battements() > 0);
         let telecommande = app.telecommande.clone().unwrap();
+        // Vrai tant que c'est encore l'ancienne platine qui joue.
+        let ancienne_platine = |app: &LecteurApp| {
+            telecommande.aller_a(0.5);
+            let oui = app.position() == telecommande.position();
+            telecommande.aller_a(1.0);
+            oui
+        };
+        assert!(ancienne_platine(&app));
 
         // La sortie meurt : le compte du témoin ne bouge plus.
+        let debut = Instant::now();
+        app.prochaine_verification = debut + Duration::from_secs(60);
+        app.veilleur = Veilleur::new(debut);
         app.sortie.as_mut().unwrap().figer();
-        app.surveiller_sortie(debut + Duration::from_secs(5));
-        std::thread::sleep(Duration::from_millis(300));
-        assert_eq!(
-            app.sortie.as_ref().unwrap().battements(),
-            0,
-            "remplacée trop tôt"
-        );
-        app.surveiller_sortie(debut + Duration::from_secs(6));
+        app.surveiller_sortie(debut);
+        app.surveiller_sortie(debut + Duration::from_millis(900));
+        assert!(ancienne_platine(&app), "remplacée trop tôt");
+        assert_eq!(app.sortie.as_ref().unwrap().battements(), 0);
 
-        // Une nouvelle sortie tourne, avec une nouvelle platine au même
-        // endroit, toujours en pause.
+        // Au bout d'une seconde : une nouvelle sortie qui tourne, avec une
+        // nouvelle platine au même endroit, toujours en pause.
+        app.surveiller_sortie(debut + sortie::SILENCE_MAX);
+        assert!(!ancienne_platine(&app), "pas remplacée");
         std::thread::sleep(Duration::from_millis(300));
-        assert!(
-            app.sortie.as_ref().unwrap().battements() > 0,
-            "pas remplacée"
-        );
-        telecommande.aller_a(0.0); // l'ancienne platine ne compte plus
+        assert!(app.sortie.as_ref().unwrap().battements() > 0);
         assert!(app.etat() == Etat::Pause);
         assert_eq!(app.position(), avant);
     }
