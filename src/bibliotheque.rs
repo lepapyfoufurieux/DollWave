@@ -8,6 +8,7 @@ use std::sync::mpsc::{self, Receiver, TryRecvError};
 use eframe::egui;
 
 use crate::liste::nom_du_fichier;
+use crate::playlists::MorceauxGlisses;
 use crate::tags::TagsConnus;
 
 /// Au-delà de ce nombre de résultats de recherche, on n'affiche que les
@@ -227,16 +228,17 @@ impl Bibliotheque {
         self.actualiser(ctx);
     }
 
-    /// Dessine la bibliothèque. Renvoie les morceaux sur lesquels on a
-    /// cliqué, à ajouter à la liste de lecture (vide si aucun).
+    /// Dessine la bibliothèque. Renvoie ce qu'on y a demandé en cliquant.
     /// `dans_la_liste` : les morceaux déjà dans la liste, marqués d'un ✔.
     /// `tags` : les tags des morceaux, pour les nommer et pour la recherche.
+    /// `playlists` : les noms des playlists, proposés au clic droit.
     pub fn afficher(
         &mut self,
         ui: &mut egui::Ui,
         dans_la_liste: &HashSet<&Path>,
         tags: &TagsConnus,
-    ) -> Vec<PathBuf> {
+        playlists: &[String],
+    ) -> Demandes {
         dater_le_dernier_clic(ui.ctx());
 
         // La lecture en arrière-plan est-elle finie ?
@@ -312,12 +314,17 @@ impl Bibliotheque {
             dans_la_liste,
             tags,
             favoris: &favoris,
+            playlists,
             a_ajouter: Vec::new(),
             etoile: None,
+            vers_playlist: None,
         };
         self.afficher_contenu(ui, &mut lignes);
         let Lignes {
-            a_ajouter, etoile, ..
+            a_ajouter,
+            etoile,
+            vers_playlist,
+            ..
         } = lignes;
         self.favoris = favoris;
 
@@ -329,7 +336,10 @@ impl Bibliotheque {
             }
             memoriser(REGLAGE_FAVORIS, &texte_des_favoris(&self.favoris));
         }
-        a_ajouter
+        Demandes {
+            a_ajouter,
+            vers_playlist,
+        }
     }
 
     /// Dessine les morceaux : l'arbre des dossiers, ou les résultats de la
@@ -427,16 +437,62 @@ impl Bibliotheque {
     }
 }
 
+/// Ce qu'on a demandé en cliquant dans la bibliothèque.
+pub struct Demandes {
+    /// Les morceaux à ajouter à la liste de lecture (vide si aucun).
+    pub a_ajouter: Vec<PathBuf>,
+    /// Des morceaux à ajouter à une playlist (clic droit), et son nom.
+    pub vers_playlist: Option<(String, Vec<PathBuf>)>,
+}
+
 /// Ce dont les lignes ont besoin pour se dessiner, et ce qu'on y a cliqué.
 struct Lignes<'a> {
     /// Les morceaux déjà dans la liste de lecture, marqués d'un ✔.
     dans_la_liste: &'a HashSet<&'a Path>,
     tags: &'a TagsConnus,
     favoris: &'a HashSet<PathBuf>,
+    /// Les noms des playlists, proposés au clic droit.
+    playlists: &'a [String],
     /// Les morceaux à ajouter à la liste de lecture.
     a_ajouter: Vec<PathBuf>,
     /// Le dossier ou le morceau dont on a cliqué l'étoile.
     etoile: Option<PathBuf>,
+    /// Des morceaux à ajouter à une playlist (clic droit), et son nom.
+    vers_playlist: Option<(String, Vec<PathBuf>)>,
+}
+
+/// Quand on commence à faire glisser un dossier ou un morceau, on emporte
+/// ses morceaux, pour les lâcher sur une playlist.
+fn glisser(reponse: &egui::Response, morceaux: impl FnOnce() -> Vec<PathBuf>) {
+    if reponse.drag_started() {
+        egui::DragAndDrop::set_payload(&reponse.ctx, MorceauxGlisses(morceaux()));
+    }
+}
+
+/// Le menu du clic droit sur un dossier ou un morceau : « Ajouter à la
+/// playlist » puis le nom de chaque playlist. `morceaux` donne ce qu'il
+/// faut y ajouter (on ne le calcule que si on a choisi une playlist).
+fn menu_playlist(
+    reponse: &egui::Response,
+    lignes: &mut Lignes,
+    morceaux: impl FnOnce() -> Vec<PathBuf>,
+) {
+    let mut choisie = None;
+    reponse.context_menu(|ui| {
+        ui.label("Ajouter à la playlist :");
+        if lignes.playlists.is_empty() {
+            ui.weak("Aucune playlist : crée-en une avec « ➕ Nouvelle », en bas à gauche.");
+        }
+        for nom in lignes.playlists {
+            if ui.button(format!("🎵 {nom}")).clicked() {
+                choisie = Some(nom.clone());
+                ui.close_menu();
+            }
+        }
+    });
+    if let Some(nom) = choisie {
+        lignes.vers_playlist = Some((nom, morceaux()));
+    }
 }
 
 /// Les éléments mis en favori d'abord, puis les autres. Chaque groupe
@@ -467,11 +523,21 @@ fn afficher_dossier(ui: &mut egui::Ui, dossier: &Dossier, lignes: &mut Lignes) {
                     let etiquette = ui.add(
                         egui::Label::new(nom)
                             .selectable(false)
-                            .sense(egui::Sense::click()),
+                            .sense(egui::Sense::click_and_drag()),
                     );
                     if clic_simple(ui, &etiquette) {
                         basculer = true;
                     }
+                    glisser(&etiquette, || {
+                        let mut morceaux = Vec::new();
+                        sous_dossier.tous_les_morceaux(&mut morceaux);
+                        morceaux
+                    });
+                    menu_playlist(&etiquette, lignes, || {
+                        let mut morceaux = Vec::new();
+                        sous_dossier.tous_les_morceaux(&mut morceaux);
+                        morceaux
+                    });
                     let bouton = ui
                         .small_button("➕ tout")
                         .on_hover_text("Ajouter tout ce dossier à la liste de lecture");
@@ -525,15 +591,20 @@ fn ligne_morceau(ui: &mut egui::Ui, chemin: &Path, lignes: &mut Lignes) {
         lignes.tags.libelle(chemin)
     );
     let aide = if deja {
-        "Déjà dans la liste de lecture (cliquer pour l'ajouter encore une fois)"
+        "Déjà dans la liste de lecture (cliquer pour l'ajouter encore une fois ; glisser sur une playlist ou clic droit pour l'y ajouter)"
     } else {
-        "Cliquer pour ajouter à la liste de lecture"
+        "Cliquer pour ajouter à la liste de lecture (glisser sur une playlist ou clic droit pour l'y ajouter)"
     };
     let aide = format!("{}\n\n{aide}", lignes.tags.infobulle(chemin));
-    let ligne = ui.selectable_label(false, texte).on_hover_text(aide);
+    let ligne = ui
+        .selectable_label(false, texte)
+        .interact(egui::Sense::drag())
+        .on_hover_text(aide);
     if clic_simple(ui, &ligne) {
         lignes.a_ajouter.push(chemin.to_path_buf());
     }
+    glisser(&ligne, || vec![chemin.to_path_buf()]);
+    menu_playlist(&ligne, lignes, || vec![chemin.to_path_buf()]);
 }
 
 /// Le dernier clic dans la bibliothèque : sur quel élément, et à quel moment.
@@ -572,7 +643,7 @@ fn dater_le_dernier_clic(ctx: &egui::Context) {
 /// sur le même élément que le précédent s'il arrive dans le délai d'un
 /// double-clic (voir `dater_le_dernier_clic`). Deux clics rapides sur deux
 /// morceaux différents comptent bien tous les deux.
-fn clic_simple(ui: &egui::Ui, reponse: &egui::Response) -> bool {
+pub fn clic_simple(ui: &egui::Ui, reponse: &egui::Response) -> bool {
     if !reponse.clicked() {
         return false;
     }
