@@ -104,10 +104,19 @@ mod tests {
     fn les_touches_donnent_leur_commande() {
         let ctx = egui::Context::default();
         let rien = |_: &mut egui::Ui| {};
-        assert!(matches!(appuyer(&ctx, Key::Space, rien)[..], [Commande::LecturePause]));
-        assert!(matches!(appuyer(&ctx, Key::ArrowRight, rien)[..], [Commande::Suivant]));
+        assert!(matches!(
+            appuyer(&ctx, Key::Space, rien)[..],
+            [Commande::LecturePause]
+        ));
+        assert!(matches!(
+            appuyer(&ctx, Key::ArrowRight, rien)[..],
+            [Commande::Suivant]
+        ));
         assert!(matches!(appuyer(&ctx, Key::Q, rien)[..], [Commande::Deplacer(s)] if s < 0.0));
-        assert!(matches!(appuyer(&ctx, Key::A, rien)[..], [Commande::Aleatoire]));
+        assert!(matches!(
+            appuyer(&ctx, Key::A, rien)[..],
+            [Commande::Aleatoire]
+        ));
         assert!(appuyer(&ctx, Key::Z, rien).is_empty());
     }
 
@@ -137,7 +146,10 @@ mod tests {
             }
         };
         appuyer(&ctx, Key::Z, bouton);
-        assert!(matches!(appuyer(&ctx, Key::Space, bouton)[..], [Commande::LecturePause]));
+        assert!(matches!(
+            appuyer(&ctx, Key::Space, bouton)[..],
+            [Commande::LecturePause]
+        ));
         assert_eq!(clics.get(), 0);
     }
 }
