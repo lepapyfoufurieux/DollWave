@@ -4,6 +4,7 @@
 mod bibliotheque;
 mod liste;
 mod platine;
+mod raccourcis;
 mod visualiseur;
 
 use std::collections::HashSet;
@@ -17,6 +18,7 @@ use rodio::{OutputStream, OutputStreamHandle, Sink};
 use bibliotheque::Bibliotheque;
 use liste::{Action, ListeDeLecture};
 use platine::{Morceau, Telecommande};
+use raccourcis::Commande;
 use visualiseur::Visualiseur;
 
 fn main() -> eframe::Result {
@@ -242,6 +244,46 @@ impl LecteurApp {
 }
 
 impl LecteurApp {
+    /// Exécute une commande demandée au clavier.
+    fn executer(&mut self, commande: Commande) {
+        match commande {
+            Commande::LecturePause => match self.platine_active() {
+                Some(t) if !t.en_pause() => self.pause(),
+                _ if !self.liste.est_vide() => self.lecture(),
+                _ => {}
+            },
+            Commande::Stop => self.stop(),
+            Commande::Precedent if !self.liste.est_vide() => self.precedent(),
+            Commande::Suivant if !self.liste.est_vide() => self.suivant(),
+            Commande::Precedent | Commande::Suivant => {}
+            Commande::Deplacer(secondes) => {
+                if let (Some(t), Some(morceau)) = (self.platine_active(), &self.morceau) {
+                    let fin = morceau.duree().as_secs_f32();
+                    let cible = (t.position().as_secs_f32() + secondes).clamp(0.0, fin);
+                    t.aller_a(cible);
+                }
+            }
+            Commande::Muet => {
+                self.muet = !self.muet;
+                self.appliquer_volume();
+            }
+            Commande::Aleatoire => {
+                let aleatoire = self.liste.aleatoire();
+                self.liste.changer_aleatoire(!aleatoire);
+            }
+        }
+    }
+
+    /// Change le volume (de -1.0 à 1.0), comme si on bougeait le curseur.
+    fn changer_volume(&mut self, de: f32) {
+        self.volume = (self.volume + de).clamp(0.0, 1.0);
+        // Comme le curseur, changer le volume remet le son.
+        self.muet = false;
+        self.appliquer_volume();
+    }
+}
+
+impl LecteurApp {
     /// La barre de progression : temps écoulé / durée totale, et un curseur
     /// qu'on peut faire glisser (avec un bruit de scratch) ou cliquer pour
     /// se déplacer dans le morceau.
@@ -336,6 +378,11 @@ fn format_temps(d: Duration) -> String {
 impl eframe::App for LecteurApp {
     // Appelée à chaque image : on (re)dessine toute l'interface.
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Les raccourcis clavier passent avant l'interface (voir raccourcis::lire).
+        for commande in raccourcis::lire(ctx) {
+            self.executer(commande);
+        }
+
         // À gauche, la bibliothèque. Un clic sur un morceau (ou sur « ➕ tout »)
         // l'ajoute à la liste de lecture.
         let a_ajouter = egui::SidePanel::left("bibliotheque")
@@ -352,7 +399,10 @@ impl eframe::App for LecteurApp {
             self.ajouter(a_ajouter);
         }
 
-        egui::CentralPanel::default().show(ctx, |ui| {
+        // La zone de la liste de lecture : la molette y fait défiler la liste,
+        // pas changer le volume.
+        let mut zone_liste = egui::Rect::NOTHING;
+        let panneau = egui::CentralPanel::default().show(ctx, |ui| {
             let nom = match (&self.morceau, self.liste.courant()) {
                 (Some(_), Some(n)) => self
                     .liste
@@ -430,7 +480,9 @@ impl eframe::App for LecteurApp {
                     self.oublier_morceau();
                 }
             });
-            match self.liste.afficher(ui) {
+            let liste = ui.scope(|ui| self.liste.afficher(ui));
+            zone_liste = liste.response.rect;
+            match liste.inner {
                 Some(Action::Jouer(n)) => self.jouer(n),
                 Some(Action::Retirer(n)) => {
                     // Si c'était le morceau en cours, on joue celui qui a pris sa
@@ -459,7 +511,20 @@ impl eframe::App for LecteurApp {
                 ui.add_space(8.0);
                 ui.colored_label(egui::Color32::LIGHT_RED, &self.message);
             }
+
+            ui.add_space(8.0);
+            ui.weak("⌨ Raccourcis").on_hover_text(raccourcis::AIDE);
         });
+
+        // La molette change le volume dans la partie lecteur de la fenêtre (pas sur la
+        // bibliothèque ni sur la liste, où elle sert à faire défiler).
+        let souris = ctx.input(|i| i.pointer.hover_pos());
+        if souris.is_some_and(|p| panneau.response.rect.contains(p) && !zone_liste.contains(p)) {
+            let de = raccourcis::molette(ctx);
+            if de != 0.0 {
+                self.changer_volume(de);
+            }
+        }
 
         // Le morceau en cours vient de se terminer tout seul : on passe au suivant.
         // (Après un Stop, il n'y a plus de lecteur, donc on ne passe pas ici.)
