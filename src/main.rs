@@ -596,6 +596,10 @@ impl eframe::App for LecteurApp {
             let liste = ui.scope(|ui| self.liste.afficher(ui, &self.tags));
             zone_liste = liste.response.rect;
             match liste.inner {
+                // Un clic sur le morceau en cours ne le relance pas depuis le
+                // début : il continue, reprend s'il était en pause, ou
+                // repart s'il était arrêté.
+                Some(Action::Jouer(n)) if self.liste.courant() == Some(n) => self.lecture(),
                 Some(Action::Jouer(n)) => self.jouer(n),
                 Some(Action::Retirer(n)) => {
                     // Si c'était le morceau en cours, on joue celui qui a pris sa

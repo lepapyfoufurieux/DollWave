@@ -15,7 +15,7 @@ const HAUTEUR_MAX: f32 = 160.0;
 
 /// Ce que l'utilisateur a demandé en cliquant dans la liste.
 pub enum Action {
-    /// Jouer le morceau numéro n (double-clic sur sa ligne).
+    /// Jouer le morceau numéro n (clic sur sa ligne).
     Jouer(usize),
     /// Retirer le morceau numéro n de la liste (bouton ✖).
     Retirer(usize),
@@ -227,7 +227,10 @@ impl ListeDeLecture {
                         if en_cours && defiler {
                             ligne.scroll_to_me(None);
                         }
-                        if ligne.double_clicked() {
+                        // Un clic suffit. Pour egui, un double-clic, c'est deux
+                        // clics : le second tombe sur le morceau devenu le
+                        // morceau en cours, ce qui ne le relance pas (voir main.rs).
+                        if ligne.clicked() {
                             action = Some(Action::Jouer(n));
                         }
                     });
@@ -383,5 +386,63 @@ mod tests {
         let mut l = liste(2);
         assert_eq!(l.ajouter(vec![PathBuf::from("x.mp3")]), Some(2));
         assert_eq!(l.ajouter(vec![]), None);
+    }
+
+    /// Un simple clic (appui puis relâche) à la hauteur y, sur les noms des
+    /// morceaux : renvoie le numéro du morceau à jouer, s'il y en a un.
+    fn cliquer_a(
+        l: &mut ListeDeLecture,
+        ctx: &egui::Context,
+        tags: &TagsConnus,
+        temps: f64,
+        y: f32,
+    ) -> Option<usize> {
+        let pos = egui::pos2(45.0, y);
+        let mut jouer = None;
+        for (n, pressed) in [false, true].into_iter().enumerate() {
+            let entree = egui::RawInput {
+                time: Some(temps + n as f64 * 0.05),
+                events: vec![
+                    egui::Event::PointerMoved(pos),
+                    egui::Event::PointerButton {
+                        pos,
+                        button: egui::PointerButton::Primary,
+                        pressed: !pressed,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(400.0, 300.0),
+                )),
+                ..Default::default()
+            };
+            let _ = ctx.run(entree, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    if let Some(Action::Jouer(n)) = l.afficher(ui, tags) {
+                        jouer = Some(n);
+                    }
+                });
+            });
+        }
+        jouer
+    }
+
+    #[test]
+    fn un_simple_clic_joue_le_morceau() {
+        let mut l = liste(3);
+        let ctx = egui::Context::default();
+        let tags = TagsConnus::new(&ctx);
+        // On balaie la liste de haut en bas, un clic tous les 2 pixels :
+        // chaque morceau doit être lancé, dans l'ordre, d'un seul clic.
+        let mut joues = Vec::new();
+        for i in 0..100 {
+            if let Some(n) = cliquer_a(&mut l, &ctx, &tags, i as f64, i as f32 * 2.0) {
+                if joues.last() != Some(&n) {
+                    joues.push(n);
+                }
+            }
+        }
+        assert_eq!(joues, vec![0, 1, 2]);
     }
 }
