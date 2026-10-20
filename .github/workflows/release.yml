@@ -1,0 +1,42 @@
+# Compile lecteur_mp3.exe sur un Windows de GitHub.
+# - À chaque pull request ou lancement manuel : le .exe est disponible
+#   dans l'onglet « Actions » (rubrique « Artifacts ») pour le tester.
+# - Quand on pousse une étiquette de version (ex. v0.1.0) : le .exe est
+#   en plus publié sur une page « Release » du dépôt.
+name: Compilation Windows
+
+on:
+  pull_request:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Tests
+        run: cargo test --release
+
+      - name: Compilation du .exe
+        run: cargo build --release
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lecteur_mp3
+          path: target/release/lecteur_mp3.exe
+
+      - name: Publication de la Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${{ github.ref_name }}" target/release/lecteur_mp3.exe --title "Lecteur MP3 ${{ github.ref_name }}" --generate-notes
