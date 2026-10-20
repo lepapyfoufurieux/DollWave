@@ -19,6 +19,35 @@ pub struct Playlist {
     pub nombre: usize,
 }
 
+/// Des morceaux qu'on fait glisser depuis la bibliothèque, à lâcher sur
+/// une playlist pour les y ajouter.
+pub struct MorceauxGlisses(pub Vec<PathBuf>);
+
+/// Pendant qu'on fait glisser des morceaux, une étiquette suit la souris
+/// pour montrer ce qu'on transporte.
+pub fn dessiner_glissement(ctx: &egui::Context) {
+    let Some(glisses) = egui::DragAndDrop::payload::<MorceauxGlisses>(ctx) else {
+        return;
+    };
+    let Some(souris) = ctx.input(|i| i.pointer.hover_pos()) else {
+        return;
+    };
+    ctx.set_cursor_icon(egui::CursorIcon::Grabbing);
+    let texte = match glisses.0.len() {
+        1 => "🎵 1 morceau : lâche-le sur une playlist".to_string(),
+        n => format!("🎵 {n} morceaux : lâche-les sur une playlist"),
+    };
+    egui::Area::new(egui::Id::new("morceaux_glisses"))
+        .order(egui::Order::Tooltip)
+        .fixed_pos(souris + egui::vec2(14.0, 10.0))
+        .interactable(false)
+        .show(ctx, |ui| {
+            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                ui.label(texte);
+            });
+        });
+}
+
 /// Ce que l'utilisateur a demandé en cliquant sur une playlist.
 pub enum Demande {
     /// Remplacer la liste de lecture par ces morceaux (clic sur une playlist).
@@ -29,7 +58,7 @@ pub enum Demande {
 
 /// Le nom qu'on est en train de taper.
 enum Saisie {
-    /// Pour enregistrer la liste de lecture sous une nouvelle playlist.
+    /// Pour créer une nouvelle playlist (vide).
     Nouvelle(String),
     /// Pour renommer la playlist `ancien`.
     Renommer { ancien: String, texte: String },
@@ -91,34 +120,12 @@ impl Playlists {
         self.chargee = None;
     }
 
-    /// « 💾 Enregistrer » : met à jour la playlist chargée, ou à défaut
-    /// demande un nom pour en créer une nouvelle.
-    pub fn enregistrer(&mut self, morceaux: &[PathBuf]) {
-        match self.chargee.clone() {
-            Some(nom) => self.ecrire_et_annoncer(&nom, morceaux),
-            None => self.demander_un_nom(),
-        }
-    }
-
     /// Ouvre le champ pour taper le nom d'une nouvelle playlist.
     fn demander_un_nom(&mut self) {
         self.saisie = Some(Saisie::Nouvelle(String::new()));
         self.donner_la_main = true;
         self.a_supprimer = None;
         self.message.clear();
-    }
-
-    fn ecrire_et_annoncer(&mut self, nom: &str, morceaux: &[PathBuf]) {
-        let resultat = self
-            .dossier
-            .as_deref()
-            .ok_or_else(|| io::Error::other("dossier des réglages introuvable"))
-            .and_then(|dossier| ecrire(dossier, nom, morceaux));
-        self.message = match resultat {
-            Ok(()) => format!("Playlist « {nom} » enregistrée."),
-            Err(e) => format!("Impossible d'enregistrer « {nom} » : {e}"),
-        };
-        self.actualiser();
     }
 
     /// Ajoute des morceaux à la fin d'une playlist (clic droit dans la bibliothèque).
@@ -137,9 +144,8 @@ impl Playlists {
         self.actualiser();
     }
 
-    /// Dessine les playlists. `morceaux` : la liste de lecture actuelle, que
-    /// « ➕ Nouvelle » enregistre.
-    pub fn afficher(&mut self, ui: &mut egui::Ui, morceaux: &[PathBuf]) -> Option<Demande> {
+    /// Dessine les playlists.
+    pub fn afficher(&mut self, ui: &mut egui::Ui) -> Option<Demande> {
         let mut demande = None;
 
         ui.horizontal(|ui| {
@@ -147,7 +153,7 @@ impl Playlists {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui
                     .button("➕ Nouvelle")
-                    .on_hover_text("Enregistrer la liste de lecture actuelle sous un nouveau nom")
+                    .on_hover_text("Créer une playlist vide, à remplir en y glissant des morceaux")
                     .clicked()
                 {
                     self.demander_un_nom();
@@ -156,13 +162,13 @@ impl Playlists {
         });
 
         if matches!(self.saisie, Some(Saisie::Nouvelle(_))) {
-            self.champ_de_saisie(ui, morceaux);
+            self.champ_de_saisie(ui);
         }
 
         if self.dossier.is_none() {
             ui.label("Impossible de trouver où enregistrer les playlists.");
         } else if self.toutes.is_empty() && self.saisie.is_none() {
-            ui.weak("Aucune playlist pour l'instant. Remplis la liste de lecture, puis « ➕ Nouvelle » pour l'enregistrer.");
+            ui.weak("Aucune playlist pour l'instant. Crée-en une avec « ➕ Nouvelle », puis glisses-y des morceaux depuis la bibliothèque.");
         }
 
         egui::ScrollArea::vertical()
@@ -170,7 +176,7 @@ impl Playlists {
             .max_height((ui.available_height() - 24.0).max(40.0))
             .show(ui, |ui| {
                 for n in 0..self.toutes.len() {
-                    if let Some(d) = self.ligne(ui, n, morceaux) {
+                    if let Some(d) = self.ligne(ui, n) {
                         demande = Some(d);
                     }
                 }
@@ -183,12 +189,12 @@ impl Playlists {
     }
 
     /// Une ligne de playlist : son nom (un clic la charge), et ses boutons.
-    fn ligne(&mut self, ui: &mut egui::Ui, n: usize, morceaux: &[PathBuf]) -> Option<Demande> {
+    fn ligne(&mut self, ui: &mut egui::Ui, n: usize) -> Option<Demande> {
         let nom = self.toutes[n].nom.clone();
 
         // En train de la renommer : le champ prend la place de la ligne.
         if matches!(&self.saisie, Some(Saisie::Renommer { ancien, .. }) if *ancien == nom) {
-            self.champ_de_saisie(ui, morceaux);
+            self.champ_de_saisie(ui);
             return None;
         }
 
@@ -207,7 +213,7 @@ impl Playlists {
         }
 
         let mut demande = None;
-        ui.horizontal(|ui| {
+        let rangee = ui.horizontal(|ui| {
             let chargee = self.chargee.as_deref() == Some(nom.as_str());
             let texte = format!("🎵 {} ({})", nom, self.toutes[n].nombre);
             let etiquette = ui.selectable_label(chargee, texte).on_hover_text(
@@ -241,6 +247,24 @@ impl Playlists {
                 }
             });
         });
+
+        // Des morceaux glissés depuis la bibliothèque survolent la ligne : on
+        // l'encadre, et s'ils sont lâchés ici, on les ajoute à la playlist.
+        let ctx = ui.ctx().clone();
+        if egui::DragAndDrop::has_payload_of_type::<MorceauxGlisses>(&ctx)
+            && ui.rect_contains_pointer(rangee.response.rect)
+        {
+            ui.painter().rect_stroke(
+                rangee.response.rect.expand(2.0),
+                3.0,
+                ui.visuals().selection.stroke,
+            );
+            if ctx.input(|i| i.pointer.any_released()) {
+                if let Some(glisses) = egui::DragAndDrop::take_payload::<MorceauxGlisses>(&ctx) {
+                    self.ajouter_a(&nom, &glisses.0);
+                }
+            }
+        }
         demande
     }
 
@@ -270,7 +294,7 @@ impl Playlists {
 
     /// Le champ où l'on tape un nom (nouvelle playlist ou renommage).
     /// Entrée valide, Échap annule.
-    fn champ_de_saisie(&mut self, ui: &mut egui::Ui, morceaux: &[PathBuf]) {
+    fn champ_de_saisie(&mut self, ui: &mut egui::Ui) {
         let Some(saisie) = &mut self.saisie else {
             return;
         };
@@ -306,17 +330,18 @@ impl Playlists {
         if annuler {
             self.saisie = None;
         } else if valider {
-            self.valider_la_saisie(morceaux);
+            self.valider_la_saisie();
         }
     }
 
-    fn valider_la_saisie(&mut self, morceaux: &[PathBuf]) {
+    fn valider_la_saisie(&mut self) {
         let Some(dossier) = self.dossier.clone() else {
             return;
         };
         let resultat = match &self.saisie {
-            Some(Saisie::Nouvelle(texte)) => nom_valide(texte)
-                .and_then(|nom| creer(&dossier, &nom, morceaux).map(|()| (None, nom))),
+            Some(Saisie::Nouvelle(texte)) => {
+                nom_valide(texte).and_then(|nom| creer(&dossier, &nom, &[]).map(|()| (None, nom)))
+            }
             Some(Saisie::Renommer { ancien, texte }) => nom_valide(texte).and_then(|nom| {
                 renommer(&dossier, ancien, &nom).map(|()| (Some(ancien.clone()), nom))
             }),
@@ -328,9 +353,8 @@ impl Playlists {
                     None => format!("Playlist « {nom} » créée."),
                     Some(ancien) => format!("« {ancien} » renommée en « {nom} »."),
                 };
-                // Une nouvelle playlist devient celle de la liste de lecture ;
-                // si l'on renomme la playlist chargée, elle garde ce lien.
-                if ancien.is_none() || ancien == self.chargee {
+                // Si l'on renomme la playlist chargée, elle garde ce lien.
+                if ancien.is_some() && ancien == self.chargee {
                     self.chargee = Some(nom);
                 }
                 self.saisie = None;
@@ -565,22 +589,6 @@ mod tests {
                 dossier.join("sous/dossier/1.mp3"),
                 PathBuf::from("/absolu/2.mp3")
             ]
-        );
-    }
-
-    #[test]
-    fn enregistrer_met_a_jour_la_playlist_chargee() {
-        let dossier = dossier_de_test("enregistrer");
-        creer(&dossier, "p", &[]).unwrap();
-        let mut playlists = Playlists::dans(Some(dossier.clone()));
-        // Sans playlist chargée, « Enregistrer » demande un nom.
-        playlists.enregistrer(&[PathBuf::from("/m/1.mp3")]);
-        assert!(matches!(playlists.saisie, Some(Saisie::Nouvelle(_))));
-        playlists.chargee = Some("p".to_string());
-        playlists.enregistrer(&[PathBuf::from("/m/1.mp3")]);
-        assert_eq!(
-            lire(&dossier, "p").unwrap(),
-            vec![PathBuf::from("/m/1.mp3")]
         );
     }
 }

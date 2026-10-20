@@ -426,7 +426,7 @@ impl eframe::App for LecteurApp {
                     .height_range(110.0..=500.0)
                     .show_inside(ui, |ui| {
                         ui.add_space(4.0);
-                        self.playlists.afficher(ui, self.liste.morceaux())
+                        self.playlists.afficher(ui)
                     })
                     .inner;
                 let noms = self.playlists.noms();
@@ -534,25 +534,10 @@ impl eframe::App for LecteurApp {
                 {
                     self.ajouter_fichiers();
                 }
-                if !self.liste.est_vide() {
-                    let aide = match self.playlists.chargee() {
-                        Some(nom) => {
-                            format!("Mettre à jour la playlist « {nom} » avec cette liste")
-                        }
-                        None => "Enregistrer cette liste comme nouvelle playlist".to_string(),
-                    };
-                    if ui
-                        .small_button("💾 Enregistrer")
-                        .on_hover_text(aide)
-                        .clicked()
-                    {
-                        self.playlists.enregistrer(self.liste.morceaux());
-                    }
-                    if ui.small_button("Vider").clicked() {
-                        self.liste.vider();
-                        self.playlists.oublier_la_chargee();
-                        self.oublier_morceau();
-                    }
+                if !self.liste.est_vide() && ui.small_button("Vider").clicked() {
+                    self.liste.vider();
+                    self.playlists.oublier_la_chargee();
+                    self.oublier_morceau();
                 }
             });
             let liste = ui.scope(|ui| self.liste.afficher(ui));
@@ -602,6 +587,7 @@ impl eframe::App for LecteurApp {
         }
 
         depot::dessiner_survol(ctx);
+        playlists::dessiner_glissement(ctx);
 
         // Le morceau en cours vient de se terminer tout seul : on passe au suivant.
         // (Après un Stop, il n'y a plus de lecteur, donc on ne passe pas ici.)

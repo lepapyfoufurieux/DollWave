@@ -8,6 +8,7 @@ use std::sync::mpsc::{self, Receiver, TryRecvError};
 use eframe::egui;
 
 use crate::liste::nom_du_fichier;
+use crate::playlists::MorceauxGlisses;
 
 /// Au-delà de ce nombre de résultats de recherche, on n'affiche que les
 /// premiers (sinon la fenêtre ralentirait) ; « Ajouter » les prend tous.
@@ -443,6 +444,14 @@ struct Lignes<'a> {
     vers_playlist: Option<(String, Vec<PathBuf>)>,
 }
 
+/// Quand on commence à faire glisser un dossier ou un morceau, on emporte
+/// ses morceaux, pour les lâcher sur une playlist.
+fn glisser(reponse: &egui::Response, morceaux: impl FnOnce() -> Vec<PathBuf>) {
+    if reponse.drag_started() {
+        egui::DragAndDrop::set_payload(&reponse.ctx, MorceauxGlisses(morceaux()));
+    }
+}
+
 /// Le menu du clic droit sur un dossier ou un morceau : « Ajouter à la
 /// playlist » puis le nom de chaque playlist. `morceaux` donne ce qu'il
 /// faut y ajouter (on ne le calcule que si on a choisi une playlist).
@@ -497,11 +506,16 @@ fn afficher_dossier(ui: &mut egui::Ui, dossier: &Dossier, lignes: &mut Lignes) {
                     let etiquette = ui.add(
                         egui::Label::new(nom)
                             .selectable(false)
-                            .sense(egui::Sense::click()),
+                            .sense(egui::Sense::click_and_drag()),
                     );
                     if clic_simple(ui, &etiquette) {
                         basculer = true;
                     }
+                    glisser(&etiquette, || {
+                        let mut morceaux = Vec::new();
+                        sous_dossier.tous_les_morceaux(&mut morceaux);
+                        morceaux
+                    });
                     menu_playlist(&etiquette, lignes, || {
                         let mut morceaux = Vec::new();
                         sous_dossier.tous_les_morceaux(&mut morceaux);
@@ -560,14 +574,18 @@ fn ligne_morceau(ui: &mut egui::Ui, chemin: &Path, lignes: &mut Lignes) {
         nom_du_fichier(chemin)
     );
     let aide = if deja {
-        "Déjà dans la liste de lecture (cliquer pour l'ajouter encore une fois ; clic droit pour une playlist)"
+        "Déjà dans la liste de lecture (cliquer pour l'ajouter encore une fois ; glisser sur une playlist ou clic droit pour l'y ajouter)"
     } else {
-        "Cliquer pour ajouter à la liste de lecture (clic droit : ajouter à une playlist)"
+        "Cliquer pour ajouter à la liste de lecture (glisser sur une playlist ou clic droit pour l'y ajouter)"
     };
-    let ligne = ui.selectable_label(false, texte).on_hover_text(aide);
+    let ligne = ui
+        .selectable_label(false, texte)
+        .interact(egui::Sense::drag())
+        .on_hover_text(aide);
     if clic_simple(ui, &ligne) {
         lignes.a_ajouter.push(chemin.to_path_buf());
     }
+    glisser(&ligne, || vec![chemin.to_path_buf()]);
     menu_playlist(&ligne, lignes, || vec![chemin.to_path_buf()]);
 }
 
