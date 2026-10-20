@@ -406,12 +406,14 @@ impl Playlists {
                 ui.visuals().selection.stroke,
             );
             if ctx.input(|i| i.pointer.any_released()) {
-                if let Some(glisses) = egui::DragAndDrop::take_payload::<MorceauxGlisses>(&ctx) {
+                // Attention : `take_payload` vide le glissement même s'il n'est
+                // pas du type demandé. On regarde donc d'abord ce qu'il porte.
+                if let Some(glisses) = egui::DragAndDrop::payload::<MorceauxGlisses>(&ctx) {
                     self.ajouter_a(&nom, &glisses.0);
-                } else if let Some(morceau) = egui::DragAndDrop::take_payload::<MorceauGlisse>(&ctx)
-                {
+                } else if let Some(morceau) = egui::DragAndDrop::payload::<MorceauGlisse>(&ctx) {
                     self.ajouter_a(&nom, std::slice::from_ref(&morceau.fichier));
                 }
+                egui::DragAndDrop::clear_payload(&ctx);
             }
         }
         demande
@@ -871,5 +873,76 @@ mod tests {
                 PathBuf::from("/absolu/2.mp3")
             ]
         );
+    }
+
+    /// Glisse un morceau de la liste de lecture (à droite) jusqu'à la
+    /// hauteur `y` du panneau des playlists (à gauche), et lâche.
+    fn glisser_de_la_liste_vers(y: f32, dossier: &Path) {
+        use crate::liste::ListeDeLecture;
+        let ctx = egui::Context::default();
+        let tags = TagsConnus::new(&ctx);
+        let mut playlists = Playlists::dans(Some(dossier.to_path_buf()));
+        let mut liste = ListeDeLecture::default();
+        liste.ajouter((0..3).map(|i| PathBuf::from(format!("{i}.mp3"))).collect());
+        let mut t = 0.0;
+        let mut image = |events: Vec<egui::Event>| {
+            t += 0.02;
+            let entree = egui::RawInput {
+                time: Some(t),
+                events,
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(800.0, 400.0),
+                )),
+                ..Default::default()
+            };
+            let _ = ctx.run(entree, |ctx| {
+                egui::SidePanel::left("gauche")
+                    .exact_width(300.0)
+                    .show(ctx, |ui| {
+                        playlists.afficher(ui, &tags);
+                    });
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    liste.afficher(ui, &tags, &[]);
+                });
+                dessiner_glissement(ctx);
+            });
+        };
+        let bouton = |pos: egui::Pos2, pressed: bool| {
+            vec![
+                egui::Event::PointerMoved(pos),
+                egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ]
+        };
+        // Le 1er morceau de la liste, et la 1re playlist (vers y = 30).
+        let depart = egui::pos2(380.0, 15.0);
+        let arrivee = egui::pos2(60.0, y);
+        image(vec![]);
+        image(vec![]);
+        image(bouton(depart, true));
+        for i in 1..=20 {
+            let p = depart + (arrivee - depart) * (i as f32 / 20.0);
+            image(vec![egui::Event::PointerMoved(p)]);
+        }
+        image(bouton(arrivee, false));
+        image(vec![]);
+    }
+
+    #[test]
+    fn glisser_un_morceau_de_la_liste_sur_une_playlist() {
+        let dossier = dossier_de_test("depuis_la_liste");
+        creer(&dossier, "Soirée", &[]).unwrap();
+        // Lâché à côté de la playlist : rien.
+        glisser_de_la_liste_vers(150.0, &dossier);
+        assert!(lire(&dossier, "Soirée").unwrap().is_empty());
+        // Lâché dessus : le morceau y est ajouté.
+        glisser_de_la_liste_vers(30.0, &dossier);
+        assert_eq!(lire(&dossier, "Soirée").unwrap(), [dossier.join("0.mp3")]);
+        std::fs::remove_dir_all(&dossier).unwrap();
     }
 }
