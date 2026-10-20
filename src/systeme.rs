@@ -41,7 +41,7 @@ pub struct ZoneDeNotification;
 
 #[cfg(not(windows))]
 impl ZoneDeNotification {
-    pub fn new() -> Self {
+    pub fn new(_ctx: &eframe::egui::Context) -> Self {
         Self
     }
 

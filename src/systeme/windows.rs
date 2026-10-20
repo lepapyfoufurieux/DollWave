@@ -10,10 +10,21 @@
 //! qu'elle disparaisse de la barre des tâches, on la marque comme une
 //! « fenêtre d'outil » (comme les petites palettes), le temps qu'elle reste
 //! rangée.
+//!
+//! Le menu du clic droit bloque la boucle de la fenêtre le temps qu'il est
+//! ouvert, et après lui la fenêtre réduite pouvait ne plus jamais se
+//! réveiller : les clics restaient en attente. Donc chaque clic sur l'icône
+//! ou dans le menu réveille la fenêtre aussitôt, et tant qu'elle est rangée
+//! un petit fil la réveille régulièrement (pour passer au morceau suivant).
+
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver};
+use std::sync::Arc;
+use std::time::Duration;
 
 use eframe::egui;
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
+use tray_icon::menu::{Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem};
 use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 use windows_sys::Win32::Foundation::HWND;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
@@ -23,6 +34,15 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 
 use super::{icone_vinyle, texte_d_infobulle, TAILLE_ICONE};
 use crate::raccourcis::Commande;
+
+/// Tous les combien on réveille la fenêtre quand elle est rangée.
+const REVEIL: Duration = Duration::from_millis(250);
+
+/// Un clic sur l'icône (ou dans son menu).
+enum Clic {
+    Icone,
+    Menu(MenuId),
+}
 
 /// Les entrées du menu du clic droit.
 struct Entrees {
@@ -40,14 +60,49 @@ pub struct ZoneDeNotification {
     icone: Option<(TrayIcon, Entrees)>,
     /// Le style de la fenêtre avant qu'on la range, pour le lui rendre.
     rangee: Option<isize>,
+    /// Vrai tant que la fenêtre est rangée : le fil de réveil travaille.
+    endormie: Arc<AtomicBool>,
+    clics: Receiver<Clic>,
     infobulle: String,
 }
 
 impl ZoneDeNotification {
-    pub fn new() -> Self {
+    pub fn new(ctx: &egui::Context) -> Self {
+        let (envoi, clics) = mpsc::channel();
+        // Les clics arrivent pendant que la fenêtre attend : on les met de
+        // côté et on la réveille tout de suite pour qu'elle les traite.
+        let (envoi_menu, ctx_menu) = (envoi.clone(), ctx.clone());
+        MenuEvent::set_event_handler(Some(move |evenement: MenuEvent| {
+            let _ = envoi_menu.send(Clic::Menu(evenement.id));
+            ctx_menu.request_repaint();
+        }));
+        let ctx_icone = ctx.clone();
+        TrayIconEvent::set_event_handler(Some(move |evenement| {
+            if let TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            } = evenement
+            {
+                let _ = envoi.send(Clic::Icone);
+                ctx_icone.request_repaint();
+            }
+        }));
+
+        let endormie = Arc::new(AtomicBool::new(false));
+        let (reveil, ctx_reveil) = (endormie.clone(), ctx.clone());
+        std::thread::spawn(move || loop {
+            std::thread::sleep(REVEIL);
+            if reveil.load(Ordering::Relaxed) {
+                ctx_reveil.request_repaint();
+            }
+        });
+
         Self {
             icone: creer_l_icone(),
             rangee: None,
+            endormie,
+            clics,
             infobulle: String::new(),
         }
     }
@@ -65,17 +120,14 @@ impl ZoneDeNotification {
         };
 
         let mut afficher = false;
-        while let Ok(evenement) = TrayIconEvent::receiver().try_recv() {
-            if let TrayIconEvent::Click {
-                button: MouseButton::Left,
-                button_state: MouseButtonState::Up,
-                ..
-            } = evenement
-            {
-                afficher = true;
-            }
-        }
-        while let Ok(MenuEvent { id }) = MenuEvent::receiver().try_recv() {
+        while let Ok(clic) = self.clics.try_recv() {
+            let id = match clic {
+                Clic::Icone => {
+                    afficher = true;
+                    continue;
+                }
+                Clic::Menu(id) => id,
+            };
             if id == *entrees.afficher.id() {
                 afficher = true;
             } else if id == *entrees.lecture.id() {
@@ -106,6 +158,8 @@ impl ZoneDeNotification {
             None if reduite => self.rangee = Some(ranger(fenetre)),
             _ => {}
         }
+        self.endormie
+            .store(self.rangee.is_some(), Ordering::Relaxed);
         commandes
     }
 

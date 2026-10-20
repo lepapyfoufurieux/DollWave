@@ -165,7 +165,7 @@ impl LecteurApp {
             muet: false,
             visualiseur: Visualiseur::new(),
             tags: TagsConnus::new(ctx),
-            zone: ZoneDeNotification::new(),
+            zone: ZoneDeNotification::new(ctx),
             pochette: None,
             message,
             depots: depot::Depots::default(),
