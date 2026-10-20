@@ -2,6 +2,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod bibliotheque;
+mod depot;
 mod liste;
 mod platine;
 mod raccourcis;
@@ -103,6 +104,20 @@ impl LecteurApp {
     fn ajouter(&mut self, fichiers: Vec<PathBuf>) {
         let a_lancer = self.liste.ajouter(fichiers);
         self.jouer_si_rien_en_cours(a_lancer);
+    }
+
+    /// Ajoute les fichiers et dossiers lâchés dans la fenêtre, s'il y en a.
+    fn recevoir_depot(&mut self, ctx: &egui::Context) {
+        let elements = depot::elements_deposes(ctx);
+        if elements.is_empty() {
+            return;
+        }
+        let fichiers = depot::mp3_deposes(elements);
+        if fichiers.is_empty() {
+            self.message = "Aucun fichier MP3 dans ce qui a été déposé.".to_string();
+        } else {
+            self.ajouter(fichiers);
+        }
     }
 
     /// Après un ajout : si rien ne joue, on lance le morceau choisi par la
@@ -383,6 +398,8 @@ impl eframe::App for LecteurApp {
             self.executer(commande);
         }
 
+        self.recevoir_depot(ctx);
+
         // À gauche, la bibliothèque. Un clic sur un morceau (ou sur « ➕ tout »)
         // l'ajoute à la liste de lecture.
         let a_ajouter = egui::SidePanel::left("bibliotheque")
@@ -525,6 +542,8 @@ impl eframe::App for LecteurApp {
                 self.changer_volume(de);
             }
         }
+
+        depot::dessiner_survol(ctx);
 
         // Le morceau en cours vient de se terminer tout seul : on passe au suivant.
         // (Après un Stop, il n'y a plus de lecteur, donc on ne passe pas ici.)
