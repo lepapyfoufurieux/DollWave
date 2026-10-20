@@ -153,17 +153,24 @@ pub struct Bibliotheque {
     /// correspondent : on ne recalcule que si elle a changé.
     resultats: Vec<usize>,
     recherche_faite: Option<String>,
+    /// Les dossiers et morceaux mis en favori (★) : ils remontent en tête
+    /// de leur dossier.
+    favoris: HashSet<PathBuf>,
 }
 
 impl Bibliotheque {
     /// Reprend le dossier mémorisé la dernière fois, ou à défaut le dossier
     /// Musique de Windows, et commence à le lire.
     pub fn new(ctx: &egui::Context) -> Self {
-        let dossier = fichier_de_reglage()
+        let dossier = fichier_de_reglage(REGLAGE_DOSSIER)
             .and_then(|f| lire_reglage(&f))
             .unwrap_or_else(dossier_par_defaut);
+        let favoris = fichier_de_reglage(REGLAGE_FAVORIS)
+            .map(|f| lire_favoris(&f))
+            .unwrap_or_default();
         let mut bibliotheque = Self {
             dossier,
+            favoris,
             contenu: None,
             en_cours: None,
             recherche: String::new(),
@@ -198,11 +205,7 @@ impl Bibliotheque {
         else {
             return; // l'utilisateur a annulé
         };
-        if let Some(fichier) = fichier_de_reglage() {
-            // Si on n'arrive pas à l'écrire, tant pis : on redemandera
-            // simplement le dossier au prochain lancement.
-            let _ = ecrire_reglage(&fichier, &dossier);
-        }
+        memoriser(REGLAGE_DOSSIER, &dossier.to_string_lossy());
         self.dossier = dossier;
         self.contenu = None;
         self.recherche.clear();
@@ -213,7 +216,6 @@ impl Bibliotheque {
     /// cliqué, à ajouter à la liste de lecture (vide si aucun).
     /// `dans_la_liste` : les morceaux déjà dans la liste, marqués d'un ✔.
     pub fn afficher(&mut self, ui: &mut egui::Ui, dans_la_liste: &HashSet<&Path>) -> Vec<PathBuf> {
-        let mut a_ajouter = Vec::new();
         dater_le_dernier_clic(ui.ctx());
 
         // La lecture en arrière-plan est-elle finie ?
@@ -279,23 +281,52 @@ impl Bibliotheque {
         });
         ui.separator();
 
+        // On met les favoris de côté le temps de dessiner les lignes, qui
+        // en ont besoin pour afficher les étoiles.
+        let favoris = std::mem::take(&mut self.favoris);
+        let mut lignes = Lignes {
+            dans_la_liste,
+            favoris: &favoris,
+            a_ajouter: Vec::new(),
+            etoile: None,
+        };
+        self.afficher_contenu(ui, &mut lignes);
+        let Lignes {
+            a_ajouter, etoile, ..
+        } = lignes;
+        self.favoris = favoris;
+
+        // Un clic sur une étoile : on ajoute ou retire le favori, et on le
+        // mémorise tout de suite.
+        if let Some(chemin) = etoile {
+            if !self.favoris.remove(&chemin) {
+                self.favoris.insert(chemin);
+            }
+            memoriser(REGLAGE_FAVORIS, &texte_des_favoris(&self.favoris));
+        }
+        a_ajouter
+    }
+
+    /// Dessine les morceaux : l'arbre des dossiers, ou les résultats de la
+    /// recherche.
+    fn afficher_contenu(&mut self, ui: &mut egui::Ui, lignes: &mut Lignes) {
         if self.en_cours.is_some() {
             ui.horizontal(|ui| {
                 ui.spinner();
                 ui.label("Lecture du dossier de musique…");
             });
-            return a_ajouter;
+            return;
         }
         let Some(contenu) = &self.contenu else {
-            return a_ajouter;
+            return;
         };
         if !contenu.existe {
             ui.label("Ce dossier est introuvable. Choisis ton dossier de musique avec « 📁 Changer de dossier… ».");
-            return a_ajouter;
+            return;
         }
         if contenu.tous.is_empty() {
             ui.label("Aucun fichier MP3 dans ce dossier.");
-            return a_ajouter;
+            return;
         }
 
         let recherche = self.recherche.trim();
@@ -306,15 +337,15 @@ impl Bibliotheque {
                     .small_button("➕ Tout ajouter")
                     .on_hover_text("Ajouter toute la bibliothèque à la liste de lecture");
                 if clic_simple(ui, &bouton) {
-                    contenu.racine.tous_les_morceaux(&mut a_ajouter);
+                    contenu.racine.tous_les_morceaux(&mut lignes.a_ajouter);
                 }
             });
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
-                    afficher_dossier(ui, &contenu.racine, dans_la_liste, &mut a_ajouter);
+                    afficher_dossier(ui, &contenu.racine, lignes);
                 });
-            return a_ajouter;
+            return;
         }
 
         if self.recherche_faite.as_deref() != Some(recherche) {
@@ -323,7 +354,7 @@ impl Bibliotheque {
         }
         if self.resultats.is_empty() {
             ui.label("Aucun morceau ne correspond à cette recherche.");
-            return a_ajouter;
+            return;
         }
         ui.horizontal(|ui| {
             let nombre = self.resultats.len();
@@ -336,7 +367,9 @@ impl Bibliotheque {
                 .small_button("➕ Tout ajouter")
                 .on_hover_text("Ajouter tous les résultats à la liste de lecture");
             if clic_simple(ui, &bouton) {
-                a_ajouter.extend(
+                // Dans l'ordre de la bibliothèque, sans faire passer les
+                // favoris devant.
+                lignes.a_ajouter.extend(
                     self.resultats
                         .iter()
                         .map(|&n| contenu.tous[n].chemin.clone()),
@@ -346,10 +379,13 @@ impl Bibliotheque {
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                for &n in self.resultats.iter().take(RESULTATS_MAX) {
-                    let entree = &contenu.tous[n];
+                let tous = &contenu.tous;
+                let resultats =
+                    favoris_d_abord(&self.resultats, |&n| &tous[n].chemin, lignes.favoris);
+                for &n in resultats.into_iter().take(RESULTATS_MAX) {
+                    let entree = &tous[n];
                     ui.horizontal(|ui| {
-                        ligne_morceau(ui, &entree.chemin, dans_la_liste, &mut a_ajouter);
+                        ligne_morceau(ui, &entree.chemin, lignes);
                         ui.label(egui::RichText::new(&entree.dossier).small().weak());
                     });
                 }
@@ -360,24 +396,43 @@ impl Bibliotheque {
                     ));
                 }
             });
-        a_ajouter
     }
 }
 
+/// Ce dont les lignes ont besoin pour se dessiner, et ce qu'on y a cliqué.
+struct Lignes<'a> {
+    /// Les morceaux déjà dans la liste de lecture, marqués d'un ✔.
+    dans_la_liste: &'a HashSet<&'a Path>,
+    favoris: &'a HashSet<PathBuf>,
+    /// Les morceaux à ajouter à la liste de lecture.
+    a_ajouter: Vec<PathBuf>,
+    /// Le dossier ou le morceau dont on a cliqué l'étoile.
+    etoile: Option<PathBuf>,
+}
+
+/// Les éléments mis en favori d'abord, puis les autres. Chaque groupe
+/// garde l'ordre de départ (alphabétique).
+fn favoris_d_abord<'a, T>(
+    elements: &'a [T],
+    chemin: impl Fn(&'a T) -> &'a Path,
+    favoris: &HashSet<PathBuf>,
+) -> Vec<&'a T> {
+    let (mut tries, autres): (Vec<&T>, Vec<&T>) =
+        elements.iter().partition(|&e| favoris.contains(chemin(e)));
+    tries.extend(autres);
+    tries
+}
+
 /// Dessine le contenu d'un dossier : ses sous-dossiers, qu'on peut déplier
-/// (fermés au départ), puis ses morceaux.
-fn afficher_dossier(
-    ui: &mut egui::Ui,
-    dossier: &Dossier,
-    dans_la_liste: &HashSet<&Path>,
-    a_ajouter: &mut Vec<PathBuf>,
-) {
-    for sous_dossier in &dossier.sous_dossiers {
+/// (fermés au départ), puis ses morceaux. Les favoris passent en tête.
+fn afficher_dossier(ui: &mut egui::Ui, dossier: &Dossier, lignes: &mut Lignes) {
+    for sous_dossier in favoris_d_abord(&dossier.sous_dossiers, |d| &d.chemin, lignes.favoris) {
         let id = ui.make_persistent_id(&sous_dossier.chemin);
         let mut basculer = false;
         let mut entete =
             egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, false)
                 .show_header(ui, |ui| {
+                    etoile(ui, &sous_dossier.chemin, lignes);
                     // Un clic sur le nom du dossier le déplie ou le replie, comme la flèche.
                     let nom = format!("📁 {} ({})", sous_dossier.nom, sous_dossier.total);
                     let etiquette = ui.add(
@@ -392,27 +447,49 @@ fn afficher_dossier(
                         .small_button("➕ tout")
                         .on_hover_text("Ajouter tout ce dossier à la liste de lecture");
                     if clic_simple(ui, &bouton) {
-                        sous_dossier.tous_les_morceaux(a_ajouter);
+                        // Dans l'ordre alphabétique, sans faire passer les
+                        // favoris devant.
+                        sous_dossier.tous_les_morceaux(&mut lignes.a_ajouter);
                     }
                 });
         if basculer {
             entete.toggle();
         }
-        entete.body(|ui| afficher_dossier(ui, sous_dossier, dans_la_liste, a_ajouter));
+        entete.body(|ui| afficher_dossier(ui, sous_dossier, lignes));
     }
-    for morceau in &dossier.morceaux {
-        ligne_morceau(ui, morceau, dans_la_liste, a_ajouter);
+    for morceau in favoris_d_abord(&dossier.morceaux, PathBuf::as_path, lignes.favoris) {
+        ui.horizontal(|ui| ligne_morceau(ui, morceau, lignes));
     }
 }
 
-/// Une ligne pour un morceau : un clic l'ajoute à la liste de lecture.
-fn ligne_morceau(
-    ui: &mut egui::Ui,
-    chemin: &Path,
-    dans_la_liste: &HashSet<&Path>,
-    a_ajouter: &mut Vec<PathBuf>,
-) {
-    let deja = dans_la_liste.contains(chemin);
+/// L'étoile devant un dossier ou un morceau : ★ s'il est en favori, ☆ sinon.
+/// Un clic la change.
+fn etoile(ui: &mut egui::Ui, chemin: &Path, lignes: &mut Lignes) {
+    let favori = lignes.favoris.contains(chemin);
+    let (texte, aide) = if favori {
+        (
+            egui::RichText::new("★").color(egui::Color32::GOLD),
+            "Retirer des favoris",
+        )
+    } else {
+        (
+            egui::RichText::new("☆").weak(),
+            "Mettre en favori (remonte en tête de son dossier)",
+        )
+    };
+    let bouton = ui
+        .add(egui::Button::new(texte).frame(false))
+        .on_hover_text(aide);
+    if clic_simple(ui, &bouton) {
+        lignes.etoile = Some(chemin.to_path_buf());
+    }
+}
+
+/// Une ligne pour un morceau : son étoile, puis son nom ; un clic sur le
+/// nom l'ajoute à la liste de lecture.
+fn ligne_morceau(ui: &mut egui::Ui, chemin: &Path, lignes: &mut Lignes) {
+    etoile(ui, chemin, lignes);
+    let deja = lignes.dans_la_liste.contains(chemin);
     let texte = format!(
         "{} {}",
         if deja { "✔" } else { "➕" },
@@ -425,7 +502,7 @@ fn ligne_morceau(
     };
     let ligne = ui.selectable_label(false, texte).on_hover_text(aide);
     if clic_simple(ui, &ligne) {
-        a_ajouter.push(chemin.to_path_buf());
+        lignes.a_ajouter.push(chemin.to_path_buf());
     }
 }
 
@@ -498,13 +575,17 @@ fn dossier_par_defaut() -> PathBuf {
         .unwrap_or_default()
 }
 
-/// Le petit fichier où l'on mémorise le dossier de musique choisi :
+/// Les petits fichiers où l'on mémorise nos réglages.
+const REGLAGE_DOSSIER: &str = "dossier_musique.txt";
+const REGLAGE_FAVORIS: &str = "favoris.txt";
+
+/// Un petit fichier de réglage, par exemple
 /// %APPDATA%\lecteur_mp3\dossier_musique.txt.
-fn fichier_de_reglage() -> Option<PathBuf> {
+fn fichier_de_reglage(nom: &str) -> Option<PathBuf> {
     let base = variable("APPDATA")
         .map(PathBuf::from)
         .or_else(|| variable("HOME").map(|h| PathBuf::from(h).join(".config")))?;
-    Some(base.join("lecteur_mp3").join("dossier_musique.txt"))
+    Some(base.join("lecteur_mp3").join(nom))
 }
 
 /// La valeur d'une variable d'environnement de Windows, si elle n'est pas vide.
@@ -519,12 +600,42 @@ fn lire_reglage(fichier: &Path) -> Option<PathBuf> {
     (!dossier.is_empty()).then(|| PathBuf::from(dossier))
 }
 
-/// Mémorise le dossier choisi (en créant le dossier du réglage si besoin).
-fn ecrire_reglage(fichier: &Path, dossier: &Path) -> std::io::Result<()> {
+/// Les favoris mémorisés : un chemin par ligne.
+fn lire_favoris(fichier: &Path) -> HashSet<PathBuf> {
+    std::fs::read_to_string(fichier)
+        .unwrap_or_default()
+        .lines()
+        .map(str::trim)
+        .filter(|ligne| !ligne.is_empty())
+        .map(PathBuf::from)
+        .collect()
+}
+
+/// Les favoris sous forme de texte, un chemin par ligne, triés pour que le
+/// fichier reste lisible.
+fn texte_des_favoris(favoris: &HashSet<PathBuf>) -> String {
+    let mut lignes: Vec<String> = favoris
+        .iter()
+        .map(|f| f.to_string_lossy().into_owned())
+        .collect();
+    lignes.sort();
+    lignes.join("\n")
+}
+
+/// Écrit un réglage (en créant le dossier des réglages si besoin).
+fn ecrire_reglage(fichier: &Path, texte: &str) -> std::io::Result<()> {
     if let Some(parent) = fichier.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(fichier, dossier.to_string_lossy().as_bytes())
+    std::fs::write(fichier, texte)
+}
+
+/// Écrit un réglage dans son fichier. Si on n'y arrive pas, tant pis : il
+/// sera simplement oublié au prochain lancement.
+fn memoriser(nom: &str, texte: &str) {
+    if let Some(fichier) = fichier_de_reglage(nom) {
+        let _ = ecrire_reglage(&fichier, texte);
+    }
 }
 
 #[cfg(test)]
@@ -622,7 +733,7 @@ mod tests {
         let fichier = racine.join("sous dossier").join("dossier_musique.txt");
         assert_eq!(lire_reglage(&fichier), None);
         let dossier = PathBuf::from(r"C:\Users\Luce\Music\Électro");
-        ecrire_reglage(&fichier, &dossier).unwrap();
+        ecrire_reglage(&fichier, &dossier.to_string_lossy()).unwrap();
         assert_eq!(lire_reglage(&fichier), Some(dossier));
         std::fs::write(&fichier, "  \n").unwrap();
         assert_eq!(lire_reglage(&fichier), None);
@@ -731,6 +842,39 @@ mod tests {
         // Un vrai nouveau clic, plus tard, compte bien.
         images.extend(clics(&[(4.0, 0)]));
         assert_eq!(compter_clics(&images), [2, 0]);
+    }
+
+    #[test]
+    fn les_favoris_passent_en_tete_dans_l_ordre() {
+        let chemins: Vec<PathBuf> = ["a", "b", "c", "d"].iter().map(PathBuf::from).collect();
+        let favoris: HashSet<PathBuf> = ["d", "b"].iter().map(PathBuf::from).collect();
+        let tries = favoris_d_abord(&chemins, PathBuf::as_path, &favoris);
+        assert_eq!(
+            noms(&tries.into_iter().cloned().collect::<Vec<_>>()),
+            ["b", "d", "a", "c"]
+        );
+        let aucun = favoris_d_abord(&chemins, PathBuf::as_path, &HashSet::new());
+        assert_eq!(aucun.len(), 4);
+        assert_eq!(aucun[0], &chemins[0]);
+    }
+
+    #[test]
+    fn memorise_les_favoris() {
+        let racine = dossier_de_test("favoris");
+        let fichier = racine.join("favoris.txt");
+        assert!(lire_favoris(&fichier).is_empty());
+        let favoris: HashSet<PathBuf> = [
+            r"C:\Users\Luce\Music\Zebda",
+            r"C:\Users\Luce\Music\Daft Punk\One More Time.mp3",
+        ]
+        .iter()
+        .map(PathBuf::from)
+        .collect();
+        ecrire_reglage(&fichier, &texte_des_favoris(&favoris)).unwrap();
+        assert_eq!(lire_favoris(&fichier), favoris);
+        ecrire_reglage(&fichier, &texte_des_favoris(&HashSet::new())).unwrap();
+        assert!(lire_favoris(&fichier).is_empty());
+        std::fs::remove_dir_all(&racine).unwrap();
     }
 
     #[test]
