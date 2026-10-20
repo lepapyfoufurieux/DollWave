@@ -9,6 +9,7 @@ mod platine;
 mod playlists;
 mod police;
 mod raccourcis;
+mod sortie;
 mod tags;
 mod visualiseur;
 
@@ -17,17 +18,18 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use eframe::egui;
-use rodio::{OutputStream, OutputStreamHandle, Sink};
+use rodio::Sink;
 
 use bibliotheque::Bibliotheque;
 use liste::{Action, ListeDeLecture};
 use morceau::Morceau;
-use platine::Telecommande;
+use platine::{Platine, Telecommande};
 use playlists::{Demande, Playlists};
 use raccourcis::Commande;
+use sortie::{Sortie, Veilleur};
 use tags::TagsConnus;
 use visualiseur::Visualiseur;
 
@@ -45,10 +47,12 @@ fn main() -> eframe::Result {
 
 /// L'état de l'application.
 struct LecteurApp {
-    // La sortie son. Il faut la garder en vie tant que l'application tourne,
-    // sinon le son s'arrête. On ne s'en sert pas directement, d'où le « _ ».
-    _sortie: Option<OutputStream>,
-    sortie_handle: Option<OutputStreamHandle>,
+    // La sortie son (haut-parleurs, casque…). Rien si aucune n'a pu être ouverte.
+    sortie: Option<Sortie>,
+    // Surveille que la sortie tourne toujours (elle meurt pendant la veille).
+    veilleur: Veilleur,
+    // Quand regarder si la sortie par défaut de Windows a changé.
+    prochaine_verification: Instant,
     // Le « lecteur » de rodio : on lui donne la platine, il envoie son son
     // vers les haut-parleurs.
     sink: Option<Sink>,
@@ -133,13 +137,15 @@ impl Etat {
 impl LecteurApp {
     fn new(ctx: &egui::Context) -> Self {
         police::installer(ctx);
-        let (sortie, sortie_handle, message) = match OutputStream::try_default() {
-            Ok((sortie, handle)) => (Some(sortie), Some(handle), String::new()),
-            Err(e) => (None, None, format!("Aucune sortie audio disponible : {e}")),
+        let (sortie, message) = match Sortie::ouvrir() {
+            Ok(sortie) => (Some(sortie), String::new()),
+            Err(e) => (None, format!("Aucune sortie audio disponible : {e}")),
         };
+        let maintenant = Instant::now();
         Self {
-            _sortie: sortie,
-            sortie_handle,
+            sortie,
+            veilleur: Veilleur::new(maintenant),
+            prochaine_verification: maintenant + sortie::VERIFICATION,
             sink: None,
             telecommande: None,
             bibliotheque: Bibliotheque::new(ctx),
@@ -314,16 +320,75 @@ impl LecteurApp {
         // On arrête l'ancien morceau s'il y en avait un.
         self.stop();
 
-        let handle = self.sortie_handle.as_ref().ok_or("pas de sortie audio")?;
         let morceau = self.morceau.clone().ok_or("aucun morceau chargé")?;
-
         let (telecommande, platine) = Telecommande::nouvelle(morceau);
-        let sink = Sink::try_new(handle)?;
+        self.lancer(telecommande, platine)
+    }
+
+    /// Envoie une platine vers la sortie son.
+    fn lancer(
+        &mut self,
+        telecommande: Telecommande,
+        platine: Platine,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let sortie = self.sortie.as_ref().ok_or("pas de sortie audio")?;
+        let sink = Sink::try_new(&sortie.handle)?;
         sink.append(platine);
         self.sink = Some(sink);
         self.appliquer_volume();
         self.telecommande = Some(telecommande);
         Ok(())
+    }
+
+    /// Vérifie que la sortie son marche toujours (la veille ou un casque
+    /// débranché la tuent sans prévenir), et qu'elle est bien celle choisie
+    /// dans Windows. Sinon, on en ouvre une nouvelle.
+    fn surveiller_sortie(&mut self, maintenant: Instant) {
+        let muette = self
+            .sortie
+            .as_ref()
+            .is_some_and(|sortie| self.veilleur.muette(sortie.battements(), maintenant));
+        let mut changee = false;
+        if maintenant >= self.prochaine_verification {
+            self.prochaine_verification = maintenant + sortie::VERIFICATION;
+            changee = match (&self.sortie, sortie::nom_par_defaut()) {
+                (None, _) => true, // pas de sortie : on réessaie
+                (Some(sortie), Some(nom)) => sortie.nom.as_ref() != Some(&nom),
+                (Some(_), None) => false, // rien d'autre vers quoi aller
+            };
+        }
+        if !muette && !changee {
+            return;
+        }
+        match Sortie::ouvrir() {
+            Ok(nouvelle) => self.passer_sur(nouvelle),
+            Err(e) => {
+                // On réessaiera dans un moment (pas à chaque image).
+                self.veilleur = Veilleur::new(maintenant);
+                self.message = format!("Sortie audio indisponible ({e}), nouvel essai…");
+            }
+        }
+    }
+
+    /// Remplace la sortie son. Le morceau en cours reprend au même endroit
+    /// sur la nouvelle, en pause s'il l'était.
+    fn passer_sur(&mut self, sortie: Sortie) {
+        let reprise = self.platine_active().map(Telecommande::reprise);
+        if let Some(sink) = self.sink.take() {
+            sink.stop();
+        }
+        self.telecommande = None;
+        self.message = match &sortie.nom {
+            Some(nom) => format!("Sortie audio : {nom}"),
+            None => String::new(),
+        };
+        self.sortie = Some(sortie);
+        self.veilleur = Veilleur::new(Instant::now());
+        if let Some((telecommande, platine)) = reprise {
+            if let Err(e) = self.lancer(telecommande, platine) {
+                self.message = format!("Impossible de reprendre la lecture : {e}");
+            }
+        }
     }
 
     /// Transmet le volume choisi (ou le silence, si muet) au lecteur rodio.
@@ -909,6 +974,8 @@ impl eframe::App for LecteurApp {
         depot::dessiner_survol(ctx);
         playlists::dessiner_glissement(ctx);
 
+        self.surveiller_sortie(Instant::now());
+
         // Le morceau en cours vient de se terminer tout seul : on passe au suivant.
         // (Après un Stop, il n'y a plus de lecteur, donc on ne passe pas ici.)
         if self.sink.as_ref().is_some_and(|sink| sink.empty()) {
@@ -1027,7 +1094,7 @@ mod tests {
             app.suivre_le_chargement();
         }
         assert_eq!(app.liste.courant(), Some(1));
-        if app.sortie_handle.is_some() {
+        if app.sortie.is_some() {
             // Un PC avec du son : le morceau joue, et on dit lequel a été sauté.
             assert!(app.morceau.is_some());
             assert!(app
@@ -1051,5 +1118,55 @@ mod tests {
         std::thread::sleep(Duration::from_millis(100));
         app.suivre_le_chargement();
         assert!(app.etat() == Etat::Arrete);
+    }
+
+    /// La sortie son meurt (mise en veille, casque débranché) : au bout d'une
+    /// seconde, l'appli en ouvre une nouvelle et le morceau reprend au même
+    /// endroit, en pause s'il l'était. (Seulement sur un PC qui a du son.)
+    #[test]
+    fn une_sortie_morte_est_remplacee_et_le_morceau_reprend() {
+        let ctx = egui::Context::default();
+        let mut app = LecteurApp::new(&ctx);
+        if app.sortie.is_none() {
+            return; // pas de son sur ce PC (machine de test)
+        }
+        let chemin = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/glissando.mp3");
+        app.morceau = Some(Morceau::charger(&chemin, &AtomicBool::new(false)).unwrap());
+        app.demarrer().unwrap();
+        app.pause();
+        app.telecommande.as_ref().unwrap().aller_a(1.0);
+        let avant = app.position();
+
+        // Une sortie qui marche n'est pas remplacée.
+        let debut = Instant::now();
+        app.prochaine_verification = debut + Duration::from_secs(60);
+        app.surveiller_sortie(debut);
+        std::thread::sleep(Duration::from_millis(300));
+        app.surveiller_sortie(debut + Duration::from_secs(2));
+        app.surveiller_sortie(debut + Duration::from_secs(4));
+        assert!(app.sortie.as_ref().unwrap().battements() > 0);
+        let telecommande = app.telecommande.clone().unwrap();
+
+        // La sortie meurt : le compte du témoin ne bouge plus.
+        app.sortie.as_mut().unwrap().figer();
+        app.surveiller_sortie(debut + Duration::from_secs(5));
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(
+            app.sortie.as_ref().unwrap().battements(),
+            0,
+            "remplacée trop tôt"
+        );
+        app.surveiller_sortie(debut + Duration::from_secs(6));
+
+        // Une nouvelle sortie tourne, avec une nouvelle platine au même
+        // endroit, toujours en pause.
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(
+            app.sortie.as_ref().unwrap().battements() > 0,
+            "pas remplacée"
+        );
+        telecommande.aller_a(0.0); // l'ancienne platine ne compte plus
+        assert!(app.etat() == Etat::Pause);
+        assert_eq!(app.position(), avant);
     }
 }
