@@ -10,6 +10,7 @@ use std::thread;
 use eframe::egui;
 use rustfft::{num_complex::Complex, Fft, FftPlanner};
 
+use crate::bibliotheque::{fichier_de_reglage, memoriser};
 use crate::morceau::Morceau;
 
 /// Nombre d'échantillons analysés pour les barres. Plus c'est grand, plus les
@@ -34,6 +35,9 @@ const TRANCHES_PAR_SECONDE: u32 = 100;
 const FENETRE: f32 = 30.0;
 /// Hauteur de la zone de dessin, en points.
 const HAUTEUR: f32 = 150.0;
+/// Le petit fichier où l'on mémorise le style choisi
+/// (%APPDATA%\lecteur_mp3\visualiseur.txt).
+const REGLAGE_STYLE: &str = "visualiseur.txt";
 
 /// Le résumé de la forme d'onde : le plus bas et le plus haut de chaque tranche.
 type Apercu = Vec<(f32, f32)>;
@@ -56,6 +60,28 @@ impl Style {
             Style::FormeOnde => "Forme d'onde",
         }
     }
+
+    /// Le mot écrit dans le fichier de réglage pour ce style.
+    fn code(self) -> &'static str {
+        match self {
+            Style::Barres => "barres",
+            Style::Oscilloscope => "oscilloscope",
+            Style::FormeOnde => "onde",
+        }
+    }
+
+    /// Retrouve un style à partir du mot du fichier de réglage.
+    fn depuis_code(texte: &str) -> Option<Style> {
+        Style::TOUS.into_iter().find(|s| s.code() == texte.trim())
+    }
+
+    /// Le style mémorisé au dernier lancement, ou les barres par défaut.
+    fn memorise() -> Style {
+        fichier_de_reglage(REGLAGE_STYLE)
+            .and_then(|f| std::fs::read_to_string(f).ok())
+            .and_then(|texte| Style::depuis_code(&texte))
+            .unwrap_or(Style::Barres)
+    }
 }
 
 pub struct Visualiseur {
@@ -72,7 +98,7 @@ pub struct Visualiseur {
 impl Visualiseur {
     pub fn new() -> Self {
         Self {
-            style: Style::Barres,
+            style: Style::memorise(),
             fft: FftPlanner::new().plan_fft_forward(TAILLE_FFT),
             barres: [0.0; NB_BARRES],
             apercu: None,
@@ -89,6 +115,7 @@ impl Visualiseur {
         position: f32,
         en_lecture: bool,
     ) {
+        let avant = self.style;
         egui::ComboBox::from_label("Visualiseur")
             .selected_text(self.style.nom())
             .show_ui(ui, |ui| {
@@ -96,6 +123,9 @@ impl Visualiseur {
                     ui.selectable_value(&mut self.style, style, style.nom());
                 }
             });
+        if self.style != avant {
+            memoriser(REGLAGE_STYLE, self.style.code());
+        }
 
         let taille = egui::vec2(ui.available_width(), HAUTEUR);
         let (reponse, peintre) = ui.allocate_painter(taille, egui::Sense::hover());
@@ -292,6 +322,15 @@ fn dessiner_forme_onde(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn chaque_style_se_relit_depuis_son_mot() {
+        for style in Style::TOUS {
+            assert!(Style::depuis_code(style.code()) == Some(style));
+        }
+        assert!(Style::depuis_code("oscilloscope\r\n") == Some(Style::Oscilloscope));
+        assert!(Style::depuis_code("n'importe quoi").is_none());
+    }
 
     #[test]
     fn un_son_a_1000_hz_allume_la_bonne_barre() {
