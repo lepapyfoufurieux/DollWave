@@ -35,7 +35,7 @@ const TOUCHES: [(Key, Commande); 9] = [
 /// La liste affichée dans l'aide « ⌨ Raccourcis ».
 pub const AIDE: &str = "Espace : lecture / pause\n\
     S : stop\n\
-    <- / -> : morceau précédent / suivant\n\
+    ← / → : morceau précédent / suivant\n\
     Q / D : reculer / avancer de 5 secondes\n\
     M : couper / remettre le son\n\
     A : lecture aléatoire\n\

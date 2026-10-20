@@ -7,6 +7,7 @@ mod liste;
 mod morceau;
 mod platine;
 mod playlists;
+mod police;
 mod raccourcis;
 mod tags;
 mod visualiseur;
@@ -80,6 +81,7 @@ struct LecteurApp {
 
 impl LecteurApp {
     fn new(ctx: &egui::Context) -> Self {
+        police::installer(ctx);
         let (sortie, sortie_handle, message) = match OutputStream::try_default() {
             Ok((sortie, handle)) => (Some(sortie), Some(handle), String::new()),
             Err(e) => (None, None, format!("Aucune sortie audio disponible : {e}")),
