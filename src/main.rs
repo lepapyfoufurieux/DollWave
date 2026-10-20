@@ -1121,6 +1121,18 @@ impl eframe::App for LecteurApp {
 mod tests {
     use super::*;
 
+    /// Les tests qui créent un lecteur entier (avec sa sortie son) passent
+    /// un par un : ouvrir et fermer des sorties son dans plusieurs fils à
+    /// la fois fait planter la CI Windows.
+    static UN_LECTEUR_A_LA_FOIS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// À garder tant que le lecteur du test existe.
+    fn mon_tour() -> std::sync::MutexGuard<'static, ()> {
+        UN_LECTEUR_A_LA_FOIS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+    }
+
     /// Une liste de 4 morceaux ; ouvrir réussit seulement pour ceux de `lisibles`.
     fn essayer(
         depart: usize,
@@ -1200,6 +1212,7 @@ mod tests {
     #[test]
     fn le_morceau_s_ouvre_en_arriere_plan_et_saute_les_illisibles() {
         let ctx = egui::Context::default();
+        let _tour = mon_tour();
         let mut app = LecteurApp::new(&ctx);
         let present = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/glissando.mp3");
         app.liste
@@ -1245,6 +1258,7 @@ mod tests {
     #[test]
     fn une_sortie_morte_est_remplacee_et_le_morceau_reprend() {
         let ctx = egui::Context::default();
+        let _tour = mon_tour();
         let mut app = LecteurApp::new(&ctx);
         if app.sortie.is_none() {
             return; // pas de son sur ce PC (machine de test)
@@ -1301,6 +1315,7 @@ mod tests {
     #[test]
     fn le_stop_freine_puis_s_arrete_sans_passer_au_suivant() {
         let ctx = egui::Context::default();
+        let _tour = mon_tour();
         let mut app = LecteurApp::new(&ctx);
         if app.sortie.is_none() {
             return; // pas de son sur ce PC (machine de test)
@@ -1372,6 +1387,7 @@ mod tests {
     #[test]
     fn la_pause_freine_et_la_lecture_accelere() {
         let ctx = egui::Context::default();
+        let _tour = mon_tour();
         let mut app = LecteurApp::new(&ctx);
         if app.sortie.is_none() {
             return; // pas de son sur ce PC (machine de test)
