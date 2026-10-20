@@ -7,6 +7,9 @@ use std::path::{Path, PathBuf};
 
 use eframe::egui;
 
+use crate::format_temps;
+use crate::tags::TagsConnus;
+
 /// Hauteur maximale de la liste à l'écran ; au-delà, on fait défiler.
 const HAUTEUR_MAX: f32 = 160.0;
 
@@ -193,7 +196,9 @@ impl ListeDeLecture {
     }
 
     /// Dessine la liste. Renvoie ce que l'utilisateur a demandé, s'il a cliqué.
-    pub fn afficher(&mut self, ui: &mut egui::Ui) -> Option<Action> {
+    /// Chaque morceau est nommé d'après ses tags (« Artiste – Titre »), avec
+    /// sa durée à droite.
+    pub fn afficher(&mut self, ui: &mut egui::Ui, tags: &TagsConnus) -> Option<Action> {
         let mut action = None;
         // On ne défile que quand le morceau change : entre-temps, on peut
         // faire défiler la liste à la main sans qu'elle revienne toute seule.
@@ -209,8 +214,16 @@ impl ListeDeLecture {
                             action = Some(Action::Retirer(n));
                         }
                         let en_cours = self.courant == Some(n);
-                        let texte = format!("{}. {}", n + 1, nom_du_fichier(fichier));
-                        let ligne = ui.selectable_label(en_cours, texte);
+                        let texte = format!("{}. {}", n + 1, tags.libelle(fichier));
+                        let ligne = ui
+                            .selectable_label(en_cours, texte)
+                            .on_hover_text(tags.infobulle(fichier));
+                        if let Some(duree) = tags.duree(fichier) {
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| ui.weak(format_temps(duree)),
+                            );
+                        }
                         if en_cours && defiler {
                             ligne.scroll_to_me(None);
                         }

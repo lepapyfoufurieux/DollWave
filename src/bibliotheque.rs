@@ -8,6 +8,7 @@ use std::sync::mpsc::{self, Receiver, TryRecvError};
 use eframe::egui;
 
 use crate::liste::nom_du_fichier;
+use crate::tags::TagsConnus;
 
 /// Au-delà de ce nombre de résultats de recherche, on n'affiche que les
 /// premiers (sinon la fenêtre ralentirait) ; « Ajouter » les prend tous.
@@ -132,17 +133,22 @@ impl Contenu {
 }
 
 /// Les numéros des morceaux qui contiennent tous les mots recherchés,
-/// dans leur nom ou dans le nom de leur dossier (sans tenir compte des
-/// majuscules). Par exemple « daft discovery » trouve
-/// « Daft Punk\Discovery\One More Time.mp3 ».
-fn chercher(tous: &[Entree], recherche: &str) -> Vec<usize> {
+/// dans leur nom, le nom de leur dossier ou leurs tags (titre, artiste,
+/// album), sans tenir compte des majuscules. Par exemple « daft discovery »
+/// trouve « Daft Punk\Discovery\One More Time.mp3 ».
+/// `tags` donne le texte des tags d'un morceau, en minuscules.
+fn chercher(tous: &[Entree], recherche: &str, tags: impl Fn(&Path) -> String) -> Vec<usize> {
     let mots: Vec<String> = recherche
         .split_whitespace()
         .map(str::to_lowercase)
         .collect();
     tous.iter()
         .enumerate()
-        .filter(|(_, entree)| mots.iter().all(|mot| entree.texte.contains(mot.as_str())))
+        .filter(|(_, entree)| {
+            let tags = tags(&entree.chemin);
+            mots.iter()
+                .all(|mot| entree.texte.contains(mot.as_str()) || tags.contains(mot.as_str()))
+        })
         .map(|(n, _)| n)
         .collect()
 }
@@ -158,9 +164,10 @@ pub struct Bibliotheque {
     /// Le texte tapé dans le champ de recherche.
     recherche: String,
     /// Les résultats de la recherche, et la recherche à laquelle ils
-    /// correspondent : on ne recalcule que si elle a changé.
+    /// correspondent (avec la version des tags connus à ce moment-là) :
+    /// on ne recalcule que si l'une ou l'autre a changé.
     resultats: Vec<usize>,
-    recherche_faite: Option<String>,
+    recherche_faite: Option<(String, u64)>,
     /// Les dossiers et morceaux mis en favori (★) : ils remontent en tête
     /// de leur dossier.
     favoris: HashSet<PathBuf>,
@@ -223,13 +230,22 @@ impl Bibliotheque {
     /// Dessine la bibliothèque. Renvoie les morceaux sur lesquels on a
     /// cliqué, à ajouter à la liste de lecture (vide si aucun).
     /// `dans_la_liste` : les morceaux déjà dans la liste, marqués d'un ✔.
-    pub fn afficher(&mut self, ui: &mut egui::Ui, dans_la_liste: &HashSet<&Path>) -> Vec<PathBuf> {
+    /// `tags` : les tags des morceaux, pour les nommer et pour la recherche.
+    pub fn afficher(
+        &mut self,
+        ui: &mut egui::Ui,
+        dans_la_liste: &HashSet<&Path>,
+        tags: &TagsConnus,
+    ) -> Vec<PathBuf> {
         dater_le_dernier_clic(ui.ctx());
 
         // La lecture en arrière-plan est-elle finie ?
         if let Some(reception) = &self.en_cours {
             match reception.try_recv() {
                 Ok(contenu) => {
+                    // On lit les tags de toute la bibliothèque en arrière-plan,
+                    // pour que la recherche les trouve.
+                    tags.demander(contenu.tous.iter().map(|e| e.chemin.as_path()));
                     self.contenu = Some(contenu);
                     self.en_cours = None;
                     self.recherche_faite = None; // la recherche est à refaire
@@ -294,6 +310,7 @@ impl Bibliotheque {
         let favoris = std::mem::take(&mut self.favoris);
         let mut lignes = Lignes {
             dans_la_liste,
+            tags,
             favoris: &favoris,
             a_ajouter: Vec::new(),
             etoile: None,
@@ -356,9 +373,12 @@ impl Bibliotheque {
             return;
         }
 
-        if self.recherche_faite.as_deref() != Some(recherche) {
-            self.resultats = chercher(&contenu.tous, recherche);
-            self.recherche_faite = Some(recherche.to_string());
+        // Pendant que les tags arrivent, la recherche se refait de temps en temps.
+        let faite = (recherche.to_string(), lignes.tags.version());
+        if self.recherche_faite.as_ref() != Some(&faite) {
+            let tags = lignes.tags;
+            self.resultats = chercher(&contenu.tous, recherche, |m| tags.texte_a_chercher(m));
+            self.recherche_faite = Some(faite);
         }
         if self.resultats.is_empty() {
             ui.label("Aucun morceau ne correspond à cette recherche.");
@@ -411,6 +431,7 @@ impl Bibliotheque {
 struct Lignes<'a> {
     /// Les morceaux déjà dans la liste de lecture, marqués d'un ✔.
     dans_la_liste: &'a HashSet<&'a Path>,
+    tags: &'a TagsConnus,
     favoris: &'a HashSet<PathBuf>,
     /// Les morceaux à ajouter à la liste de lecture.
     a_ajouter: Vec<PathBuf>,
@@ -493,21 +514,22 @@ fn etoile(ui: &mut egui::Ui, chemin: &Path, lignes: &mut Lignes) {
     }
 }
 
-/// Une ligne pour un morceau : son étoile, puis son nom ; un clic sur le
-/// nom l'ajoute à la liste de lecture.
+/// Une ligne pour un morceau : son étoile, puis son nom (d'après ses tags) ;
+/// un clic sur le nom l'ajoute à la liste de lecture.
 fn ligne_morceau(ui: &mut egui::Ui, chemin: &Path, lignes: &mut Lignes) {
     etoile(ui, chemin, lignes);
     let deja = lignes.dans_la_liste.contains(chemin);
     let texte = format!(
         "{} {}",
         if deja { "✔" } else { "➕" },
-        nom_du_fichier(chemin)
+        lignes.tags.libelle(chemin)
     );
     let aide = if deja {
         "Déjà dans la liste de lecture (cliquer pour l'ajouter encore une fois)"
     } else {
         "Cliquer pour ajouter à la liste de lecture"
     };
+    let aide = format!("{}\n\n{aide}", lignes.tags.infobulle(chemin));
     let ligne = ui.selectable_label(false, texte).on_hover_text(aide);
     if clic_simple(ui, &ligne) {
         lignes.a_ajouter.push(chemin.to_path_buf());
@@ -720,7 +742,7 @@ mod tests {
         }
         let contenu = Contenu::lire(&racine);
         let trouves = |recherche: &str| -> Vec<String> {
-            chercher(&contenu.tous, recherche)
+            chercher(&contenu.tous, recherche, |_| String::new())
                 .into_iter()
                 .map(|n| nom_du_fichier(&contenu.tous[n].chemin))
                 .collect()
@@ -732,6 +754,35 @@ mod tests {
         assert!(trouves("mp3").is_empty());
         // Le nom du dossier de musique lui-même ne compte pas.
         assert!(trouves("lecteur_mp3_test").is_empty());
+        std::fs::remove_dir_all(&racine).unwrap();
+    }
+
+    #[test]
+    fn recherche_aussi_dans_les_tags() {
+        let racine = dossier_de_test("recherche_tags");
+        for f in ["01.mp3", "02.mp3"] {
+            std::fs::write(racine.join(f), b"").unwrap();
+        }
+        let contenu = Contenu::lire(&racine);
+        // Seul 01.mp3 a des tags.
+        let tags = |chemin: &Path| -> String {
+            if chemin.ends_with("01.mp3") {
+                "one more time daft punk discovery".to_string()
+            } else {
+                String::new()
+            }
+        };
+        let trouves = |recherche: &str| -> Vec<String> {
+            chercher(&contenu.tous, recherche, tags)
+                .into_iter()
+                .map(|n| nom_du_fichier(&contenu.tous[n].chemin))
+                .collect()
+        };
+        assert_eq!(trouves("Daft time"), ["01.mp3"]);
+        // Un mot dans le nom du fichier, l'autre dans les tags.
+        assert_eq!(trouves("01 discovery"), ["01.mp3"]);
+        assert_eq!(trouves("0"), ["01.mp3", "02.mp3"]);
+        assert!(trouves("beatles").is_empty());
         std::fs::remove_dir_all(&racine).unwrap();
     }
 
