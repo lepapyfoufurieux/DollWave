@@ -74,6 +74,14 @@ impl Dossier {
     }
 }
 
+/// Tous les MP3 d'un dossier et de ses sous-dossiers, dans l'ordre où la
+/// bibliothèque les affiche (et les ajoute avec « ➕ tout »).
+pub fn mp3_du_dossier(chemin: &Path) -> Vec<PathBuf> {
+    let mut morceaux = Vec::new();
+    Dossier::lire(chemin).tous_les_morceaux(&mut morceaux);
+    morceaux
+}
+
 /// Un morceau tel qu'on le cherche : son chemin, son dossier (par rapport
 /// au dossier de musique) et le texte dans lequel on cherche, en minuscules.
 struct Entree {
@@ -561,7 +569,7 @@ fn clic_simple(ui: &egui::Ui, reponse: &egui::Response) -> bool {
 }
 
 /// Le fichier se termine-t-il par .mp3 (ou .MP3, .Mp3…) ?
-fn est_un_mp3(chemin: &Path) -> bool {
+pub fn est_un_mp3(chemin: &Path) -> bool {
     chemin
         .extension()
         .is_some_and(|e| e.eq_ignore_ascii_case("mp3"))
