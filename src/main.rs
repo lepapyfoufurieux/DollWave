@@ -826,6 +826,10 @@ impl eframe::App for LecteurApp {
             ui.add_space(8.0);
             ui.horizontal(|ui| {
                 ui.strong("Liste de lecture");
+                let compteur = self.liste.compteur(&self.tags);
+                if !compteur.is_empty() {
+                    ui.weak(compteur);
+                }
                 if ui
                     .small_button("📂 Autre fichier…")
                     .on_hover_text("Ajouter un MP3 rangé en dehors de la bibliothèque")

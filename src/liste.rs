@@ -161,6 +161,29 @@ impl ListeDeLecture {
         &self.morceaux
     }
 
+    /// Le compteur affiché à côté de « Liste de lecture » : « Titre 3 / 12 ·
+    /// 47 min », ou « 12 titres · 47 min » si rien n'est en cours. En
+    /// aléatoire, le 3 n'est pas la place du morceau dans la liste mais le
+    /// nombre de titres déjà lus dans ce tour (celui en cours compris). La
+    /// durée n'apparaît que quand on la connaît. Rien si la liste est vide.
+    pub fn compteur(&self, tags: &TagsConnus) -> String {
+        texte_du_compteur(
+            self.rang(),
+            self.morceaux.len(),
+            tags.duree_totale(&self.morceaux),
+        )
+    }
+
+    /// Le « 3 » de « Titre 3 / 12 » (voir `compteur`).
+    fn rang(&self) -> Option<usize> {
+        let courant = self.courant?;
+        if self.aleatoire {
+            Some(self.deja_joue.iter().filter(|&&joue| joue).count())
+        } else {
+            Some(courant + 1)
+        }
+    }
+
     pub fn est_vide(&self) -> bool {
         self.morceaux.is_empty()
     }
@@ -476,6 +499,34 @@ pub fn rangee<R>(
 }
 
 /// Le nom d'un fichier sans son dossier, par exemple « chanson.mp3 ».
+/// Voir `ListeDeLecture::compteur`.
+fn texte_du_compteur(
+    rang: Option<usize>,
+    nombre: usize,
+    duree: Option<std::time::Duration>,
+) -> String {
+    let titres = match (rang, nombre) {
+        (_, 0) => return String::new(),
+        (Some(rang), n) => format!("Titre {rang} / {n}"),
+        (None, 1) => "1 titre".to_string(),
+        (None, n) => format!("{n} titres"),
+    };
+    match duree {
+        Some(duree) => format!("{titres} · {}", format_duree_totale(duree)),
+        None => titres,
+    }
+}
+
+/// Une durée arrondie à la minute : « 47 min », « 1 h 05 min ».
+fn format_duree_totale(duree: std::time::Duration) -> String {
+    let minutes = (duree.as_secs() + 30) / 60;
+    match minutes {
+        0 => "< 1 min".to_string(),
+        1..=59 => format!("{minutes} min"),
+        _ => format!("{} h {:02} min", minutes / 60, minutes % 60),
+    }
+}
+
 pub fn nom_du_fichier(chemin: &Path) -> String {
     chemin
         .file_name()
@@ -491,6 +542,114 @@ mod tests {
         let mut l = ListeDeLecture::default();
         l.ajouter((0..n).map(|i| PathBuf::from(format!("{i}.mp3"))).collect());
         l
+    }
+
+    #[test]
+    fn texte_du_compteur_selon_le_nombre_et_la_duree() {
+        use std::time::Duration;
+        let min = |m: u64| Some(Duration::from_secs(m * 60));
+        let s = |s: u64| Some(Duration::from_secs(s));
+        assert_eq!(texte_du_compteur(None, 0, None), "");
+        assert_eq!(texte_du_compteur(None, 0, min(0)), "");
+        assert_eq!(texte_du_compteur(None, 1, None), "1 titre");
+        assert_eq!(texte_du_compteur(None, 1, min(4)), "1 titre · 4 min");
+        assert_eq!(texte_du_compteur(None, 12, None), "12 titres");
+        assert_eq!(texte_du_compteur(None, 12, min(47)), "12 titres · 47 min");
+        assert_eq!(texte_du_compteur(Some(3), 12, None), "Titre 3 / 12");
+        assert_eq!(
+            texte_du_compteur(Some(3), 12, min(47)),
+            "Titre 3 / 12 · 47 min"
+        );
+        assert_eq!(texte_du_compteur(Some(1), 1, min(4)), "Titre 1 / 1 · 4 min");
+        assert_eq!(
+            texte_du_compteur(None, 20, min(65)),
+            "20 titres · 1 h 05 min"
+        );
+        assert_eq!(
+            texte_du_compteur(None, 300, min(1234)),
+            "300 titres · 20 h 34 min"
+        );
+        assert_eq!(texte_du_compteur(None, 1, s(20)), "1 titre · < 1 min");
+        // Arrondi à la minute la plus proche.
+        assert_eq!(texte_du_compteur(None, 2, s(89)), "2 titres · 1 min");
+        assert_eq!(texte_du_compteur(None, 2, s(90)), "2 titres · 2 min");
+        assert_eq!(texte_du_compteur(None, 9, s(3599)), "9 titres · 1 h 00 min");
+    }
+
+    /// Le compteur sans la durée (les fichiers de ces tests n'existent pas).
+    fn compteur(l: &ListeDeLecture, tags: &TagsConnus) -> String {
+        l.compteur(tags).split(" · ").next().unwrap().to_string()
+    }
+
+    #[test]
+    fn le_compteur_suit_la_liste() {
+        let tags = TagsConnus::new(&egui::Context::default());
+        let mut l = ListeDeLecture::default();
+        assert_eq!(l.compteur(&tags), "");
+        l = liste(3);
+        assert_eq!(compteur(&l, &tags), "3 titres");
+        l.choisir(0);
+        assert_eq!(compteur(&l, &tags), "Titre 1 / 3");
+        let n = l.suivant().unwrap();
+        l.choisir(n);
+        assert_eq!(compteur(&l, &tags), "Titre 2 / 3");
+        l.ajouter(vec![PathBuf::from("3.mp3")]);
+        assert_eq!(compteur(&l, &tags), "Titre 2 / 4");
+        // On retire un morceau avant celui en cours : sa place change.
+        l.retirer(0);
+        assert_eq!(compteur(&l, &tags), "Titre 1 / 3");
+        // On retire celui en cours : plus de « Titre ».
+        l.retirer(0);
+        assert_eq!(compteur(&l, &tags), "2 titres");
+        l.retirer(0);
+        assert_eq!(compteur(&l, &tags), "1 titre");
+        l.vider();
+        assert_eq!(l.compteur(&tags), "");
+    }
+
+    #[test]
+    fn en_aleatoire_le_compteur_donne_les_titres_deja_lus() {
+        let tags = TagsConnus::new(&egui::Context::default());
+        let mut l = liste(10);
+        l.changer_aleatoire(true);
+        // On démarre sur le dernier de la liste : 1 titre lu, pas « 10 / 10 ».
+        l.choisir(9);
+        assert_eq!(compteur(&l, &tags), "Titre 1 / 10");
+        for lus in 2..=10 {
+            let n = l.suivant().unwrap();
+            l.choisir(n);
+            assert_eq!(compteur(&l, &tags), format!("Titre {lus} / 10"));
+        }
+        assert_eq!(l.suivant(), None);
+        // Revenir en arrière ne compte pas un titre de plus.
+        let n = l.precedent().unwrap();
+        l.choisir(n);
+        assert_eq!(compteur(&l, &tags), "Titre 10 / 10");
+        // Avec la répétition, un nouveau tour repart de 1.
+        l.changer_repetition(true);
+        let n = l.suivant().unwrap();
+        l.choisir(n);
+        assert_eq!(compteur(&l, &tags), "Titre 1 / 10");
+        // Réactiver l'aléatoire repart aussi de 1 (le morceau en cours).
+        let n = l.suivant().unwrap();
+        l.choisir(n);
+        assert_eq!(compteur(&l, &tags), "Titre 2 / 10");
+        l.changer_aleatoire(false);
+        assert_eq!(compteur(&l, &tags), format!("Titre {} / 10", n + 1));
+        l.changer_aleatoire(true);
+        assert_eq!(compteur(&l, &tags), "Titre 1 / 10");
+    }
+
+    #[test]
+    fn en_aleatoire_lire_ensuite_compte_aussi() {
+        let tags = TagsConnus::new(&egui::Context::default());
+        let mut l = liste(5);
+        l.changer_aleatoire(true);
+        l.choisir(0);
+        l.lire_ensuite(4);
+        let n = l.suivant().unwrap();
+        l.choisir(n);
+        assert_eq!(compteur(&l, &tags), "Titre 2 / 5");
     }
 
     #[test]

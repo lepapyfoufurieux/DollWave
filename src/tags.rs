@@ -235,6 +235,29 @@ impl TagsConnus {
         self.avec(chemin, |tags| tags.and_then(|t| t.duree))
     }
 
+    /// La durée totale de ces morceaux, une fois qu'ils sont tous lus (rien
+    /// avant, pour ne pas afficher un total faux qui grandit). Un morceau
+    /// dont on n'a pas pu lire la durée compte pour zéro.
+    pub fn duree_totale(&self, chemins: &[PathBuf]) -> Option<Duration> {
+        let mut etat = self.etat();
+        let mut total = Duration::ZERO;
+        let mut tout_lu = true;
+        for chemin in chemins {
+            match etat.lus.get(chemin) {
+                Some(tags) => total += tags.duree.unwrap_or_default(),
+                None => {
+                    tout_lu = false;
+                    // Hors de l'écran, il n'a peut-être pas encore été demandé.
+                    if etat.en_attente.insert(chemin.clone()) {
+                        etat.a_lire.push_back(chemin.clone());
+                        self.partage.1.notify_one();
+                    }
+                }
+            }
+        }
+        tout_lu.then_some(total)
+    }
+
     /// De quoi chercher dans les tags de toute la bibliothèque, en ne prenant
     /// le verrou qu'une fois pour toute la recherche (et pas une fois par
     /// morceau). Pas de `avec` ici : la bibliothèque est déjà demandée en entier.
@@ -457,5 +480,31 @@ pub mod tests {
         connus.demander([chemin.as_path()]);
         assert!(connus.etat().a_lire.is_empty());
         assert!(connus.etat().en_attente.is_empty());
+    }
+
+    #[test]
+    fn duree_totale_une_fois_tout_lu() {
+        // 100 trames ≈ 2,6 s et 50 trames ≈ 1,3 s ; plus un fichier
+        // illisible, qui compte pour zéro sans bloquer le total.
+        let a = ecrire_mp3("total a.mp3", None, None, None, false, 100);
+        let b = ecrire_mp3("total b.mp3", None, None, None, false, 50);
+        let dossier = std::env::temp_dir().join("lecteur_mp3_tests_tags");
+        let illisible = dossier.join("total illisible.mp3");
+        std::fs::write(&illisible, b"bonjour").unwrap();
+        let chemins = vec![a, b, illisible];
+        let connus = TagsConnus::new(&egui::Context::default());
+        assert_eq!(connus.duree_totale(&[]), Some(Duration::ZERO));
+        let debut = Instant::now();
+        let total = loop {
+            if let Some(total) = connus.duree_totale(&chemins) {
+                break total.as_secs_f32();
+            }
+            assert!(
+                debut.elapsed() < Duration::from_secs(5),
+                "durées jamais lues"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        assert!((total - 3.92).abs() < 0.1, "total : {total}");
     }
 }
