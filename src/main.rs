@@ -5,6 +5,7 @@ mod bibliotheque;
 mod depot;
 mod liste;
 mod platine;
+mod playlists;
 mod raccourcis;
 mod visualiseur;
 
@@ -19,6 +20,7 @@ use rodio::{OutputStream, OutputStreamHandle, Sink};
 use bibliotheque::Bibliotheque;
 use liste::{Action, ListeDeLecture};
 use platine::{Morceau, Telecommande};
+use playlists::{Demande, Playlists};
 use raccourcis::Commande;
 use visualiseur::Visualiseur;
 
@@ -47,6 +49,8 @@ struct LecteurApp {
     telecommande: Option<Telecommande>,
     // Tous les MP3 du dossier de musique, à ajouter d'un clic.
     bibliotheque: Bibliotheque,
+    // Les listes de lecture enregistrées, en bas de la bibliothèque.
+    playlists: Playlists,
     // Les morceaux à jouer, et lequel est en cours.
     liste: ListeDeLecture,
     // Le son du morceau en cours, décodé en mémoire.
@@ -77,6 +81,7 @@ impl LecteurApp {
             sink: None,
             telecommande: None,
             bibliotheque: Bibliotheque::new(ctx),
+            playlists: Playlists::new(),
             liste: ListeDeLecture::default(),
             morceau: None,
             position_glissee: None,
@@ -405,19 +410,44 @@ impl eframe::App for LecteurApp {
         self.recevoir_depot(ctx);
 
         // À gauche, la bibliothèque. Un clic sur un morceau (ou sur « ➕ tout »)
-        // l'ajoute à la liste de lecture.
-        let a_ajouter = egui::SidePanel::left("bibliotheque")
+        // l'ajoute à la liste de lecture. En bas, les playlists.
+        let (demandes, demande) = egui::SidePanel::left("bibliotheque")
             .resizable(true)
             .default_width(340.0)
             .width_range(220.0..=600.0)
             .show(ctx, |ui| {
+                // Les playlists d'abord, pour qu'elles se réservent le bas du
+                // panneau ; la bibliothèque prend la place qui reste au-dessus.
+                let demande = egui::TopBottomPanel::bottom("playlists")
+                    .resizable(true)
+                    .default_height(200.0)
+                    .height_range(110.0..=500.0)
+                    .show_inside(ui, |ui| {
+                        ui.add_space(4.0);
+                        self.playlists.afficher(ui, self.liste.morceaux())
+                    })
+                    .inner;
+                let noms = self.playlists.noms();
                 let dans_la_liste: HashSet<&Path> =
                     self.liste.morceaux().iter().map(PathBuf::as_path).collect();
-                self.bibliotheque.afficher(ui, &dans_la_liste)
+                (self.bibliotheque.afficher(ui, &dans_la_liste, &noms), demande)
             })
             .inner;
-        if !a_ajouter.is_empty() {
-            self.ajouter(a_ajouter);
+        if !demandes.a_ajouter.is_empty() {
+            self.ajouter(demandes.a_ajouter);
+        }
+        if let Some((nom, morceaux)) = demandes.vers_playlist {
+            self.playlists.ajouter_a(&nom, &morceaux);
+        }
+        match demande {
+            // Écouter une playlist : elle remplace la liste de lecture.
+            Some(Demande::Charger(fichiers)) => {
+                self.liste.vider();
+                self.oublier_morceau();
+                self.ajouter(fichiers);
+            }
+            Some(Demande::AjouterALaListe(fichiers)) => self.ajouter(fichiers),
+            None => {}
         }
 
         // La zone de la liste de lecture : la molette y fait défiler la liste,
@@ -489,6 +519,9 @@ impl eframe::App for LecteurApp {
             ui.add_space(8.0);
             ui.horizontal(|ui| {
                 ui.strong("Liste de lecture");
+                if let Some(nom) = self.playlists.chargee() {
+                    ui.weak(format!("🎵 {nom}"));
+                }
                 if ui
                     .small_button("📂 Autre fichier…")
                     .on_hover_text("Ajouter un MP3 rangé en dehors de la bibliothèque")
@@ -496,9 +529,19 @@ impl eframe::App for LecteurApp {
                 {
                     self.ajouter_fichiers();
                 }
-                if !self.liste.est_vide() && ui.small_button("Vider").clicked() {
-                    self.liste.vider();
-                    self.oublier_morceau();
+                if !self.liste.est_vide() {
+                    let aide = match self.playlists.chargee() {
+                        Some(nom) => format!("Mettre à jour la playlist « {nom} » avec cette liste"),
+                        None => "Enregistrer cette liste comme nouvelle playlist".to_string(),
+                    };
+                    if ui.small_button("💾 Enregistrer").on_hover_text(aide).clicked() {
+                        self.playlists.enregistrer(self.liste.morceaux());
+                    }
+                    if ui.small_button("Vider").clicked() {
+                        self.liste.vider();
+                        self.playlists.oublier_la_chargee();
+                        self.oublier_morceau();
+                    }
                 }
             });
             let liste = ui.scope(|ui| self.liste.afficher(ui));
