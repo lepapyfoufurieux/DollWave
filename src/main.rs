@@ -4,6 +4,7 @@
 mod bibliotheque;
 mod depot;
 mod liste;
+mod morceau;
 mod platine;
 mod playlists;
 mod raccourcis;
@@ -19,7 +20,8 @@ use rodio::{OutputStream, OutputStreamHandle, Sink};
 
 use bibliotheque::Bibliotheque;
 use liste::{Action, ListeDeLecture};
-use platine::{Morceau, Telecommande};
+use morceau::Morceau;
+use platine::Telecommande;
 use playlists::{Demande, Playlists};
 use raccourcis::Commande;
 use visualiseur::Visualiseur;
@@ -169,14 +171,14 @@ impl LecteurApp {
         self.morceau = None;
     }
 
-    /// Décode tout le fichier en mémoire, puis lance la lecture depuis le début.
+    /// Prépare le fichier (sans tout décoder), puis lance la lecture depuis le début.
     fn charger(&mut self, chemin: &Path) -> Result<(), Box<dyn std::error::Error>> {
-        let morceau = Arc::new(Morceau::charger(chemin)?);
+        let morceau = Morceau::charger(chemin)?;
         self.morceau = Some(morceau);
         self.demarrer()
     }
 
-    /// Pose le morceau déjà décodé sur une nouvelle platine et la lance.
+    /// Pose le morceau chargé sur une nouvelle platine et la lance.
     fn demarrer(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         // On arrête l'ancien morceau s'il y en avait un.
         self.stop();
