@@ -7,6 +7,9 @@ use std::path::{Path, PathBuf};
 
 use eframe::egui;
 
+use crate::format_temps;
+use crate::tags::TagsConnus;
+
 /// Hauteur maximale de la liste à l'écran ; au-delà, on fait défiler.
 const HAUTEUR_MAX: f32 = 160.0;
 
@@ -193,7 +196,9 @@ impl ListeDeLecture {
     }
 
     /// Dessine la liste. Renvoie ce que l'utilisateur a demandé, s'il a cliqué.
-    pub fn afficher(&mut self, ui: &mut egui::Ui) -> Option<Action> {
+    /// Chaque morceau est nommé d'après ses tags (« Artiste – Titre »), avec
+    /// sa durée à droite.
+    pub fn afficher(&mut self, ui: &mut egui::Ui, tags: &TagsConnus) -> Option<Action> {
         let mut action = None;
         // On ne défile que quand le morceau change : entre-temps, on peut
         // faire défiler la liste à la main sans qu'elle revienne toute seule.
@@ -209,10 +214,16 @@ impl ListeDeLecture {
                             action = Some(Action::Retirer(n));
                         }
                         let en_cours = self.courant == Some(n);
-                        let texte = format!("{}. {}", n + 1, nom_du_fichier(fichier));
+                        let texte = format!("{}. {}", n + 1, tags.libelle(fichier));
                         let ligne = ui
                             .selectable_label(en_cours, texte)
-                            .on_hover_text("Cliquer pour jouer ce morceau");
+                            .on_hover_text(tags.infobulle(fichier));
+                        if let Some(duree) = tags.duree(fichier) {
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| ui.weak(format_temps(duree)),
+                            );
+                        }
                         if en_cours && defiler {
                             ligne.scroll_to_me(None);
                         }
@@ -379,7 +390,13 @@ mod tests {
 
     /// Un simple clic (appui puis relâche) à la hauteur y, sur les noms des
     /// morceaux : renvoie le numéro du morceau à jouer, s'il y en a un.
-    fn cliquer_a(l: &mut ListeDeLecture, ctx: &egui::Context, temps: f64, y: f32) -> Option<usize> {
+    fn cliquer_a(
+        l: &mut ListeDeLecture,
+        ctx: &egui::Context,
+        tags: &TagsConnus,
+        temps: f64,
+        y: f32,
+    ) -> Option<usize> {
         let pos = egui::pos2(45.0, y);
         let mut jouer = None;
         for (n, pressed) in [false, true].into_iter().enumerate() {
@@ -394,12 +411,15 @@ mod tests {
                         modifiers: egui::Modifiers::NONE,
                     },
                 ],
-                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(400.0, 300.0))),
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(400.0, 300.0),
+                )),
                 ..Default::default()
             };
             let _ = ctx.run(entree, |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| {
-                    if let Some(Action::Jouer(n)) = l.afficher(ui) {
+                    if let Some(Action::Jouer(n)) = l.afficher(ui, tags) {
                         jouer = Some(n);
                     }
                 });
@@ -412,11 +432,12 @@ mod tests {
     fn un_simple_clic_joue_le_morceau() {
         let mut l = liste(3);
         let ctx = egui::Context::default();
+        let tags = TagsConnus::new(&ctx);
         // On balaie la liste de haut en bas, un clic tous les 2 pixels :
         // chaque morceau doit être lancé, dans l'ordre, d'un seul clic.
         let mut joues = Vec::new();
         for i in 0..100 {
-            if let Some(n) = cliquer_a(&mut l, &ctx, i as f64, i as f32 * 2.0) {
+            if let Some(n) = cliquer_a(&mut l, &ctx, &tags, i as f64, i as f32 * 2.0) {
                 if joues.last() != Some(&n) {
                     joues.push(n);
                 }
