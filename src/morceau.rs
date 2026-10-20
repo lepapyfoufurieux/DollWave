@@ -11,7 +11,7 @@ use std::fs::File;
 use std::ops::Range;
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Condvar, Mutex, Weak};
 use std::thread;
 use std::time::Duration;
 
@@ -33,8 +33,10 @@ const A_PREPARER: usize = 8;
 /// Les blocs plus loin que ça de l'endroit écouté sont oubliés (au plus
 /// 31 blocs gardés, soit environ 5 Mo pour un morceau en stéréo).
 const A_GARDER: usize = 15;
-/// Pause du fil d'arrière-plan entre deux vérifications.
-const PAUSE_PREPARATION: Duration = Duration::from_millis(10);
+/// Quand tout est prêt, le fil d'arrière-plan dort jusqu'à ce que la platine
+/// change de bloc. Il se réveille quand même de temps en temps pour voir si
+/// le morceau sert encore (sinon, il s'arrête).
+const PAUSE_PREPARATION: Duration = Duration::from_secs(1);
 
 /// Ce dont on tire le son.
 enum Contenu {
@@ -62,6 +64,33 @@ pub struct Morceau {
     blocs: Mutex<HashMap<usize, Arc<[i16]>>>,
     /// Le bloc que la platine est en train de jouer.
     centre: AtomicUsize,
+    /// Pour réveiller le fil d'arrière-plan quand la platine change de bloc.
+    reveil: Arc<Reveil>,
+}
+
+/// Le réveil du fil d'arrière-plan : `a_faire` passe à vrai quand il y a
+/// peut-être de nouveaux blocs à préparer.
+#[derive(Default)]
+struct Reveil {
+    a_faire: Mutex<bool>,
+    signal: Condvar,
+}
+
+impl Reveil {
+    fn sonner(&self) {
+        *self.a_faire.lock().unwrap_or_else(|e| e.into_inner()) = true;
+        self.signal.notify_one();
+    }
+
+    /// Attend une sonnerie (au plus `PAUSE_PREPARATION`).
+    fn attendre(&self) {
+        let a_faire = self.a_faire.lock().unwrap_or_else(|e| e.into_inner());
+        let (mut a_faire, _) = self
+            .signal
+            .wait_timeout_while(a_faire, PAUSE_PREPARATION, |a_faire| !*a_faire)
+            .unwrap_or_else(|e| e.into_inner());
+        *a_faire = false;
+    }
 }
 
 impl Morceau {
@@ -69,9 +98,15 @@ impl Morceau {
     /// fil qui décode les blocs à l'avance.
     pub fn charger(chemin: &Path) -> Result<Arc<Self>, Box<dyn std::error::Error>> {
         let morceau = Arc::new(Self::depuis(Box::new(File::open(chemin)?))?);
-        let suivi = Arc::downgrade(&morceau);
-        thread::spawn(move || preparer_en_continu(suivi));
+        morceau.lancer_la_preparation();
         Ok(morceau)
+    }
+
+    /// Lance le fil qui prépare les blocs à l'avance.
+    fn lancer_la_preparation(self: &Arc<Self>) {
+        let suivi = Arc::downgrade(self);
+        let reveil = self.reveil.clone();
+        thread::spawn(move || preparer_en_continu(suivi, &reveil));
     }
 
     /// Lit tous les paquets d'un MP3 et les regroupe en blocs.
@@ -151,6 +186,7 @@ impl Morceau {
             contenu,
             blocs: Mutex::new(HashMap::new()),
             centre: AtomicUsize::new(0),
+            reveil: Arc::default(),
         }
     }
 
@@ -223,7 +259,9 @@ impl Morceau {
     /// Indique quel bloc la platine joue : le fil d'arrière-plan prépare ses
     /// voisins, et les blocs trop loin sont oubliés.
     fn suivre(&self, n: usize) {
-        self.centre.store(n, Ordering::Relaxed);
+        if self.centre.swap(n, Ordering::Relaxed) != n {
+            self.reveil.sonner();
+        }
     }
 
     /// Les échantillons du bloc numéro `n`, décodés si besoin.
@@ -359,7 +397,7 @@ fn decoder_paquets(
 
 /// Le travail du fil d'arrière-plan : préparer les blocs autour de la platine,
 /// jusqu'à ce que le morceau ne serve plus à personne.
-fn preparer_en_continu(suivi: Weak<Morceau>) {
+fn preparer_en_continu(suivi: Weak<Morceau>, reveil: &Reveil) {
     loop {
         let Some(morceau) = suivi.upgrade() else {
             return; // morceau abandonné
@@ -367,7 +405,8 @@ fn preparer_en_continu(suivi: Weak<Morceau>) {
         let travail_fait = morceau.preparer_un_bloc();
         drop(morceau);
         if !travail_fait {
-            thread::sleep(PAUSE_PREPARATION);
+            // Tout est prêt : on dort jusqu'à ce que la platine bouge.
+            reveil.attendre();
         }
     }
 }
@@ -519,5 +558,26 @@ mod tests {
         let attendu = (morceau.duree().as_secs_f64() * 100.0).ceil() as usize;
         assert_eq!(apercu.len(), attendu);
         assert!(apercu.iter().any(|&(bas, haut)| bas < -0.3 && haut > 0.3));
+    }
+
+    /// Le fil d'arrière-plan dort quand tout est prêt, et se réveille dès
+    /// que la platine change de bloc (sans attendre la fin de sa pause).
+    #[test]
+    fn le_fil_d_arriere_plan_se_reveille_quand_la_platine_bouge() {
+        let morceau = Arc::new(Morceau::sinus(440.0, 8000, 60.0));
+        morceau.lancer_la_preparation();
+        let pret = |n: usize| morceau.blocs.lock().unwrap().contains_key(&n);
+        let attendre = |n: usize| {
+            let debut = std::time::Instant::now();
+            while !pret(n) && debut.elapsed() < Duration::from_millis(500) {
+                thread::sleep(Duration::from_millis(5));
+            }
+            pret(n)
+        };
+        assert!(attendre(A_PREPARER), "les voisins du début sont préparés");
+        thread::sleep(Duration::from_millis(50)); // il s'endort
+        morceau.suivre(40);
+        assert!(attendre(40 + A_PREPARER), "réveillé par la platine");
+        assert!(pret(40 - A_PREPARER));
     }
 }
