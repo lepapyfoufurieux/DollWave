@@ -30,6 +30,12 @@ pub struct Tags {
     pub titre: Option<String>,
     pub artiste: Option<String>,
     pub album: Option<String>,
+    /// L'« artiste de l'album », s'il est indiqué : sur un album avec des
+    /// invités (« feat. »), il reste le même pour tous les morceaux.
+    pub artiste_album: Option<String>,
+    /// La place du morceau sur l'album, et le numéro du disque.
+    pub numero: Option<u32>,
+    pub disque: Option<u32>,
     pub duree: Option<Duration>,
     /// Titre, artiste et album en minuscules, préparés une fois pour toutes
     /// pour la recherche (voir `texte_a_chercher`).
@@ -73,10 +79,14 @@ pub fn lire(chemin: &Path) -> Tags {
             let valeur = valeur.trim();
             (!valeur.is_empty()).then(|| valeur.to_string())
         };
+        let nombre = |cle: StandardTagKey| texte(cle).and_then(|t| premier_nombre(&t));
         let mut tags = Tags {
             titre: texte(StandardTagKey::TrackTitle),
             artiste: texte(StandardTagKey::Artist),
             album: texte(StandardTagKey::Album),
+            artiste_album: texte(StandardTagKey::AlbumArtist),
+            numero: nombre(StandardTagKey::TrackNumber),
+            disque: nombre(StandardTagKey::DiscNumber),
             duree,
             recherche: String::new(),
         };
@@ -84,6 +94,16 @@ pub fn lire(chemin: &Path) -> Tags {
         tags
     })
     .unwrap_or_default()
+}
+
+/// Le nombre au début d'un tag : « 3/12 » (piste 3 sur 12) donne 3.
+fn premier_nombre(texte: &str) -> Option<u32> {
+    let chiffres: String = texte
+        .trim()
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect();
+    chiffres.parse().ok()
 }
 
 /// La pochette rangée dans le fichier (de préférence celle marquée « devant »),
@@ -274,6 +294,11 @@ impl TagsConnus {
 pub struct TextesAChercher<'a>(std::sync::MutexGuard<'a, Etat>);
 
 impl TextesAChercher<'_> {
+    /// Les tags du morceau, s'ils sont déjà lus.
+    pub fn tags(&self, chemin: &Path) -> Option<&Tags> {
+        self.0.lus.get(chemin)
+    }
+
     /// Titre, artiste et album en minuscules (vide tant que ce n'est pas lu).
     pub fn de(&self, chemin: &Path) -> &str {
         self.0.lus.get(chemin).map_or("", Tags::texte_a_chercher)
@@ -363,11 +388,24 @@ pub mod tests {
         pochette: bool,
         trames: usize,
     ) -> PathBuf {
+        let textes: Vec<(&str, &str)> = [("TIT2", titre), ("TPE1", artiste), ("TALB", album)]
+            .into_iter()
+            .filter_map(|(cle, valeur)| Some((cle, valeur?)))
+            .collect();
+        ecrire_mp3_avec(nom, &textes, pochette, trames)
+    }
+
+    /// Comme `ecrire_mp3`, avec n'importe quels cadres de texte
+    /// (« TPE2 » pour l'artiste de l'album, « TRCK » pour la piste…).
+    pub fn ecrire_mp3_avec(
+        nom: &str,
+        textes: &[(&str, &str)],
+        pochette: bool,
+        trames: usize,
+    ) -> PathBuf {
         let mut cadres = Vec::new();
-        for (cle, valeur) in [("TIT2", titre), ("TPE1", artiste), ("TALB", album)] {
-            if let Some(valeur) = valeur {
-                cadres.extend(cadre_texte(cle, valeur));
-            }
+        for (cle, valeur) in textes {
+            cadres.extend(cadre_texte(cle, valeur));
         }
         if pochette {
             // Encodage, type d'image, « 3 » = pochette de devant, description vide.
@@ -414,6 +452,41 @@ pub mod tests {
         assert!((duree - 2.61).abs() < 0.1, "durée lue : {duree}");
         assert_eq!(tags.libelle(&chemin), "Daft Punk – One More Time");
         assert_eq!(tags.texte_a_chercher(), "one more time daft punk discovery");
+    }
+
+    #[test]
+    fn lit_l_artiste_de_l_album_la_piste_et_le_disque() {
+        let chemin = ecrire_mp3_avec(
+            "piste.mp3",
+            &[
+                ("TIT2", "Harder"),
+                ("TPE1", "Daft Punk feat. Moi"),
+                ("TPE2", "Daft Punk"),
+                ("TRCK", "4/14"),
+                ("TPOS", "2"),
+            ],
+            false,
+            50,
+        );
+        let tags = lire(&chemin);
+        assert_eq!(tags.artiste_album.as_deref(), Some("Daft Punk"));
+        assert_eq!(tags.numero, Some(4));
+        assert_eq!(tags.disque, Some(2));
+        // Sans ces tags : rien.
+        let chemin = ecrire_mp3("sans piste.mp3", Some("Intro"), None, None, false, 50);
+        let tags = lire(&chemin);
+        assert_eq!(
+            (tags.artiste_album, tags.numero, tags.disque),
+            (None, None, None)
+        );
+    }
+
+    #[test]
+    fn premier_nombre_d_un_tag() {
+        assert_eq!(premier_nombre("3/12"), Some(3));
+        assert_eq!(premier_nombre(" 07 "), Some(7));
+        assert_eq!(premier_nombre("A1"), None);
+        assert_eq!(premier_nombre(""), None);
     }
 
     #[test]
