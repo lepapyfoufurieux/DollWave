@@ -65,7 +65,7 @@ const REGLAGE_FREINAGE: &str = "freinage.txt";
 const REGLAGE_SCRATCH: &str = "scratch.txt";
 /// Durée du fondu enchaîné : la fin d'un morceau se mélange au début du
 /// suivant pendant ce temps (moins si l'un des deux est très court).
-const DUREE_ENCHAINEMENT: Duration = Duration::from_secs(5);
+const DUREE_ENCHAINEMENT: Duration = Duration::from_secs(3);
 /// Combien de temps avant la fin d'un morceau on ouvre le suivant, pour
 /// qu'il soit prêt au moment du fondu enchaîné.
 const AVANCE_OUVERTURE: Duration = Duration::from_secs(20);
@@ -1739,11 +1739,11 @@ mod tests {
     }
 
     #[test]
-    fn le_fondu_dure_5_secondes_sauf_pour_les_morceaux_courts() {
+    fn le_fondu_dure_3_secondes_sauf_pour_les_morceaux_courts() {
         let s = Duration::from_secs;
-        assert_eq!(duree_de_l_enchainement(s(200), s(180)), s(5));
-        assert_eq!(duree_de_l_enchainement(s(6), s(180)), s(3));
-        assert_eq!(duree_de_l_enchainement(s(200), s(4)), s(2));
+        assert_eq!(duree_de_l_enchainement(s(200), s(180)), s(3));
+        assert_eq!(duree_de_l_enchainement(s(4), s(180)), s(2));
+        assert_eq!(duree_de_l_enchainement(s(200), s(2)), s(1));
     }
 
     /// Avec le fondu enchaîné, un peu avant la fin, le morceau suivant est
