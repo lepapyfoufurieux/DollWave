@@ -25,14 +25,14 @@ use std::time::{Duration, Instant};
 use eframe::egui;
 use rodio::Sink;
 
-use bibliotheque::Bibliotheque;
+use bibliotheque::{memoriser, Bibliotheque};
 use liste::{Action, ListeDeLecture};
 use morceau::Morceau;
-use platine::{Platine, Telecommande};
+use platine::{Effet, Platine, Telecommande};
 use playlists::{Demande, Playlists};
 use raccourcis::Commande;
 use sortie::{Sortie, Veilleur};
-use systeme::ZoneDeNotification;
+use systeme::{fichier_de_reglage, ZoneDeNotification};
 use tags::TagsConnus;
 use visualiseur::Visualiseur;
 
@@ -50,6 +50,19 @@ fn main() -> eframe::Result {
 
 /// Le début du message affiché quand aucune sortie son ne marche.
 const SORTIE_INDISPONIBLE: &str = "Sortie audio indisponible";
+
+/// Durée de l'effet platine : le freinage au Stop et à la Pause (un vinyle
+/// arrêté à la main), et le démarrage à la Lecture (la vitesse monte de 0 à 1).
+const DUREE_PLATINE: Duration = Duration::from_secs(1);
+/// Sans l'effet platine : durée du fondu du volume au Stop, à la Pause et à
+/// la Lecture (pas de « clic » quand le son se coupe ou revient).
+const DUREE_FONDU: Duration = Duration::from_millis(300);
+/// Le petit fichier où l'on mémorise si l'effet platine est activé
+/// (freinage.txt dans le dossier de réglages, voir `systeme` : « oui » ou « non »).
+const REGLAGE_FREINAGE: &str = "freinage.txt";
+/// Le petit fichier où l'on mémorise si le scratch s'entend quand on fait
+/// glisser la barre de progression (« oui » ou « non »).
+const REGLAGE_SCRATCH: &str = "scratch.txt";
 
 /// L'état de l'application.
 struct LecteurApp {
@@ -80,6 +93,12 @@ struct LecteurApp {
     // Le son est-il coupé (bouton muet) ? On garde le volume choisi à côté
     // pour le retrouver tel quel quand on remet le son.
     muet: bool,
+    // Au Stop et à la Pause, le son ralentit-il comme un vinyle qu'on arrête
+    // à la main (et accélère-t-il à la Lecture) ?
+    freinage: bool,
+    // Quand on fait glisser la barre de progression, la musique suit-elle
+    // la souris (bruit de scratch) ? Sinon, elle continue et saute au lâcher.
+    scratch: bool,
     // L'image qui bouge avec la musique.
     visualiseur: Visualiseur,
     // Les tags (titre, artiste, album, durée) des morceaux, lus en arrière-plan.
@@ -114,6 +133,9 @@ struct Chargement {
     abandonne: Arc<AtomicBool>,
     /// On a appuyé sur Pause pendant l'ouverture : le morceau démarrera en pause.
     en_pause: bool,
+    /// Le morceau a été lancé par le bouton Lecture : il démarrera en
+    /// accélérant (si le freinage est activé).
+    en_douceur: bool,
 }
 
 impl Drop for Chargement {
@@ -163,6 +185,8 @@ impl LecteurApp {
             position_glissee: None,
             volume: 0.5,
             muet: false,
+            freinage: option_memorisee(REGLAGE_FREINAGE),
+            scratch: option_memorisee(REGLAGE_SCRATCH),
             visualiseur: Visualiseur::new(),
             tags: TagsConnus::new(ctx),
             zone: ZoneDeNotification::new(ctx),
@@ -215,7 +239,7 @@ impl LecteurApp {
     /// liste (le premier ajouté, ou l'un d'eux au hasard en lecture aléatoire).
     fn jouer_si_rien_en_cours(&mut self, a_lancer: Option<usize>) {
         if let Some(n) = a_lancer {
-            if self.platine_active().is_none() && self.chargement.is_none() {
+            if self.etat() == Etat::Arrete {
                 self.jouer(n);
             }
         }
@@ -241,6 +265,7 @@ impl LecteurApp {
         };
         self.liste.choisir(n);
         let en_pause = self.chargement.as_ref().is_some_and(|c| c.en_pause);
+        let en_douceur = self.chargement.as_ref().is_some_and(|c| c.en_douceur);
         let (envoi, reception) = mpsc::channel();
         let abandonne = Arc::new(AtomicBool::new(false));
         let (fichier, ctx, drapeau) = (chemin.clone(), self.ctx.clone(), abandonne.clone());
@@ -255,6 +280,7 @@ impl LecteurApp {
             reception,
             abandonne,
             en_pause,
+            en_douceur,
         });
     }
 
@@ -274,14 +300,15 @@ impl LecteurApp {
         };
         let chemin = chargement.chemin.clone();
         let en_pause = chargement.en_pause;
+        let en_douceur = chargement.en_douceur;
         let mut essais = chargement.essais.clone();
         match resultat {
             Ok(morceau) => {
                 self.morceau = Some(morceau);
-                match self.demarrer() {
+                match self.demarrer(en_douceur) {
                     Ok(()) => {
-                        if en_pause {
-                            self.pause();
+                        if let Some(t) = self.telecommande.as_ref().filter(|_| en_pause) {
+                            t.mettre_en_pause(true);
                         }
                         self.message = essais.message_si_lu();
                     }
@@ -324,13 +351,21 @@ impl LecteurApp {
         self.morceau = None;
     }
 
-    /// Pose le morceau chargé sur une nouvelle platine et la lance.
-    fn demarrer(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+    /// Pose le morceau chargé sur une nouvelle platine et la lance, en
+    /// partant en douceur depuis l'arrêt si `en_douceur` (effet platine ou
+    /// fondu, voir `effet`).
+    fn demarrer(&mut self, en_douceur: bool) -> Result<(), Box<dyn std::error::Error>> {
         // On arrête l'ancien morceau s'il y en avait un.
         self.stop();
 
         let morceau = self.morceau.clone().ok_or("aucun morceau chargé")?;
-        let (telecommande, platine) = Telecommande::nouvelle(morceau);
+        let (telecommande, mut platine) = Telecommande::nouvelle(morceau);
+        if en_douceur {
+            // Avant de lancer : sinon le début partirait d'un coup.
+            let (effet, duree) = self.effet();
+            telecommande.demarrer_en_douceur(effet, duree);
+            platine = platine.depuis_l_arret();
+        }
         self.lancer(telecommande, platine)
     }
 
@@ -382,7 +417,11 @@ impl LecteurApp {
     /// Remplace la sortie son. Le morceau en cours reprend au même endroit
     /// sur la nouvelle, en pause s'il l'était.
     fn passer_sur(&mut self, sortie: Sortie, maintenant: Instant) {
-        let reprise = self.platine_active().map(Telecommande::reprise);
+        // Un morceau en train de freiner est déjà arrêté : on ne le reprend pas.
+        let reprise = self
+            .platine_active()
+            .filter(|t| !t.freine())
+            .map(Telecommande::reprise);
         if let Some(sink) = self.sink.take() {
             sink.stop();
         }
@@ -429,18 +468,27 @@ impl LecteurApp {
             chargement.en_pause = false;
             return;
         }
-        // Le morceau est encore en cours : on reprend là où on en était.
-        if let Some(telecommande) = self.platine_active() {
-            telecommande.mettre_en_pause(false);
+        // Le morceau est encore en cours : on reprend là où on en était, en
+        // douceur (le disque se relance, ou le volume remonte).
+        // (S'il s'arrête après un Stop, il est arrêté : on le relance plus bas.)
+        let effet = self.effet();
+        if let Some(telecommande) = self.platine_active().filter(|t| !t.freine()) {
+            // (Déjà en lecture, ou en train de repartir : rien à faire.)
+            if telecommande.en_pause() {
+                telecommande.demarrer_en_douceur(effet.0, effet.1);
+            }
             return;
         }
         // Aucun morceau chargé : on lance celui en cours dans la liste, ou le premier.
         if self.morceau.is_none() {
             self.jouer(self.liste.courant().unwrap_or(0));
+            if let Some(chargement) = &mut self.chargement {
+                chargement.en_douceur = true;
+            }
             return;
         }
         // Le morceau a été arrêté ou est terminé : on le relance depuis le début.
-        if let Err(e) = self.demarrer() {
+        if let Err(e) = self.demarrer(true) {
             self.message = format!("Impossible de lancer la lecture : {e}");
         }
     }
@@ -450,7 +498,69 @@ impl LecteurApp {
             chargement.en_pause = true; // il démarrera en pause
         }
         if let Some(telecommande) = &self.telecommande {
-            telecommande.mettre_en_pause(true);
+            // (Déjà en train de s'arrêter après un Stop : on le laisse finir.)
+            if !telecommande.freine() {
+                // Le disque ralentit (ou le volume baisse), puis se fige au
+                // même endroit.
+                let (effet, duree) = self.effet();
+                telecommande.freiner_jusqu_a_la_pause(effet, duree);
+            }
+        }
+    }
+
+    /// Le bouton Stop et la touche S : si un morceau joue, il s'arrête en
+    /// douceur (voir `Telecommande::freiner`) ; sinon (en pause, ou au
+    /// second appui), on coupe net.
+    fn arreter(&mut self) {
+        let (effet, duree) = self.effet();
+        match self.platine_active() {
+            Some(t) if !t.en_pause() && !t.freine() => t.freiner(effet, duree),
+            _ => self.stop(),
+        }
+    }
+
+    /// Comment le son s'arrête et repart : effet platine (option du menu
+    /// Options), ou simple fondu du volume.
+    fn effet(&self) -> (Effet, Duration) {
+        if self.freinage {
+            (Effet::Platine, DUREE_PLATINE)
+        } else {
+            (Effet::Fondu, DUREE_FONDU)
+        }
+    }
+
+    /// On fait glisser la barre de progression jusqu'à `secondes` : la
+    /// musique suit la souris (scratch), ou continue sans bouger si le son du
+    /// scratch est coupé. Dans les deux cas, elle saute là au lâcher.
+    fn glisser(&mut self, telecommande: &Telecommande, secondes: f32) {
+        self.position_glissee = Some(secondes);
+        if self.scratch {
+            telecommande.scratcher(secondes);
+        }
+    }
+
+    /// Le menu Options : effet platine et son du scratch, mémorisés.
+    fn menu_options(&mut self, ui: &mut egui::Ui) {
+        if ui
+            .checkbox(&mut self.freinage, "Effet platine")
+            .on_hover_text(
+                "Au Stop et à la Pause, le son ralentit et descend dans les graves, \
+                 comme un vinyle qu'on arrête à la main ; à la Lecture, il accélère. \
+                 Sinon, le volume baisse ou monte en une fraction de seconde.",
+            )
+            .changed()
+        {
+            memoriser_option(REGLAGE_FREINAGE, self.freinage);
+        }
+        if ui
+            .checkbox(&mut self.scratch, "Son du scratch")
+            .on_hover_text(
+                "Quand on fait glisser la barre de progression, la musique suit la \
+                 souris comme un vinyle. Sinon, elle continue et saute au lâcher.",
+            )
+            .changed()
+        {
+            memoriser_option(REGLAGE_SCRATCH, self.scratch);
         }
     }
 
@@ -470,6 +580,19 @@ impl LecteurApp {
             .unwrap_or_default()
     }
 
+    /// Le morceau en cours vient de se terminer tout seul : on passe au
+    /// suivant. Sauf si c'est la fin d'un freinage : on reste arrêté.
+    /// (Après un Stop sans freinage, il n'y a plus de lecteur : rien à faire.)
+    fn suivre_la_fin(&mut self) {
+        if self.sink.as_ref().is_some_and(|sink| sink.empty()) {
+            if self.telecommande.as_ref().is_some_and(|t| t.freine()) {
+                self.stop();
+            } else {
+                self.suivant();
+            }
+        }
+    }
+
     /// Où en est la lecture (en lecture, en pause, arrêté…).
     fn etat(&self) -> Etat {
         if self.chargement.is_some() {
@@ -477,6 +600,7 @@ impl LecteurApp {
         }
         match self.platine_active() {
             None => Etat::Arrete,
+            Some(t) if t.freine() => Etat::Arrete, // Stop pendant le freinage
             Some(t) if t.en_pause() => Etat::Pause,
             Some(_) => Etat::Lecture,
         }
@@ -489,11 +613,11 @@ impl LecteurApp {
         match commande {
             Commande::LecturePause => match self.platine_active() {
                 None if self.chargement.as_ref().is_some_and(|c| !c.en_pause) => self.pause(),
-                Some(t) if !t.en_pause() => self.pause(),
+                Some(t) if !t.en_pause() && !t.freine() => self.pause(),
                 _ if !self.liste.est_vide() => self.lecture(),
                 _ => {}
             },
-            Commande::Stop => self.stop(),
+            Commande::Stop => self.arreter(),
             Commande::Precedent if !self.liste.est_vide() => self.precedent(),
             Commande::Suivant if !self.liste.est_vide() => self.suivant(),
             Commande::Precedent | Commande::Suivant => {}
@@ -542,7 +666,8 @@ impl LecteurApp {
             .min(duree_s);
 
         // Le curseur n'est utilisable que si un morceau est en lecture ou en pause.
-        let telecommande = self.platine_active().cloned();
+        // (Pas pendant le freinage : le morceau est déjà arrêté.)
+        let telecommande = self.platine_active().filter(|t| !t.freine()).cloned();
 
         ui.add_enabled_ui(telecommande.is_some(), |ui| {
             ui.horizontal(|ui| {
@@ -555,9 +680,7 @@ impl LecteurApp {
 
                 if let Some(telecommande) = &telecommande {
                     if reponse.dragged() {
-                        // On glisse : la musique suit la souris (scratch).
-                        self.position_glissee = Some(secondes);
-                        telecommande.scratcher(secondes);
+                        self.glisser(telecommande, secondes);
                     } else if self.position_glissee.take().is_some() || reponse.changed() {
                         // Relâchement après un glissement, ou simple clic : on s'y rend
                         // et la lecture reprend normalement.
@@ -753,6 +876,24 @@ impl LecteurApp {
     }
 }
 
+/// Une option du menu Options est-elle activée ? Oui, sauf si on l'a
+/// désactivée (« non » dans son fichier de réglage).
+fn option_memorisee(fichier: &str) -> bool {
+    let texte = fichier_de_reglage(fichier).and_then(|f| std::fs::read_to_string(f).ok());
+    option_depuis(texte.as_deref())
+}
+
+/// Lit le fichier d'une option : activée par défaut (pas de fichier, ou
+/// fichier illisible).
+fn option_depuis(texte: Option<&str>) -> bool {
+    texte.is_none_or(|t| t.trim() != "non")
+}
+
+/// Mémorise une option du menu Options.
+fn memoriser_option(fichier: &str, activee: bool) {
+    memoriser(fichier, if activee { "oui" } else { "non" });
+}
+
 /// Écrit une durée sous la forme « minutes:secondes », par exemple 3:07.
 fn format_temps(d: Duration) -> String {
     let s = d.as_secs();
@@ -869,7 +1010,7 @@ impl eframe::App for LecteurApp {
                         self.pause();
                     }
                     if ui.button("⏹ Stop").clicked() {
-                        self.stop();
+                        self.arreter();
                     }
                     if ui.button("⏭").on_hover_text("Morceau suivant").clicked() {
                         self.suivant();
@@ -955,7 +1096,8 @@ impl eframe::App for LecteurApp {
             let position = self
                 .position_glissee
                 .unwrap_or_else(|| self.position().as_secs_f32());
-            let en_lecture = self.etat() == Etat::Lecture;
+            // (Pendant le freinage aussi : le son continue de sortir.)
+            let en_lecture = self.platine_active().is_some_and(Telecommande::tourne);
             self.visualiseur
                 .afficher(ui, self.morceau.as_ref(), position, en_lecture);
             self.afficher_pochette(ui);
@@ -973,7 +1115,10 @@ impl eframe::App for LecteurApp {
             }
 
             ui.add_space(8.0);
-            ui.weak("⌨ Raccourcis").on_hover_text(raccourcis::AIDE);
+            ui.horizontal(|ui| {
+                ui.menu_button("⚙ Options", |ui| self.menu_options(ui));
+                ui.weak("⌨ Raccourcis").on_hover_text(raccourcis::AIDE);
+            });
         });
 
         // La molette change le volume dans la partie lecteur de la fenêtre (pas sur la
@@ -991,18 +1136,14 @@ impl eframe::App for LecteurApp {
 
         self.surveiller_sortie(Instant::now());
 
-        // Le morceau en cours vient de se terminer tout seul : on passe au suivant.
-        // (Après un Stop, il n'y a plus de lecteur, donc on ne passe pas ici.)
-        if self.sink.as_ref().is_some_and(|sink| sink.empty()) {
-            self.suivant();
-        }
+        self.suivre_la_fin();
 
         // Pendant la lecture (ou en pause, le temps que les barres retombent),
         // on redessine à chaque image de l'écran pour que le visualiseur soit fluide.
         // Sinon (en pause, à l'arrêt, ou fenêtre réduite : rien ne bouge à
         // l'écran), de temps en temps suffit pour voir l'état changer et
         // passer au morceau suivant.
-        let en_lecture = self.platine_active().is_some_and(|t| !t.en_pause());
+        let en_lecture = self.platine_active().is_some_and(Telecommande::tourne);
         let reduite = ctx.input(|i| i.viewport().minimized == Some(true));
         let anime = en_lecture || !self.visualiseur.au_repos() || self.position_glissee.is_some();
         if anime && !reduite {
@@ -1016,6 +1157,18 @@ impl eframe::App for LecteurApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Les tests qui créent un lecteur entier (avec sa sortie son) passent
+    /// un par un : ouvrir et fermer des sorties son dans plusieurs fils à
+    /// la fois fait planter la CI Windows.
+    static UN_LECTEUR_A_LA_FOIS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// À garder tant que le lecteur du test existe.
+    fn mon_tour() -> std::sync::MutexGuard<'static, ()> {
+        UN_LECTEUR_A_LA_FOIS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+    }
 
     /// Une liste de 4 morceaux ; ouvrir réussit seulement pour ceux de `lisibles`.
     fn essayer(
@@ -1096,6 +1249,7 @@ mod tests {
     #[test]
     fn le_morceau_s_ouvre_en_arriere_plan_et_saute_les_illisibles() {
         let ctx = egui::Context::default();
+        let _tour = mon_tour();
         let mut app = LecteurApp::new(&ctx);
         let present = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/glissando.mp3");
         app.liste
@@ -1141,13 +1295,15 @@ mod tests {
     #[test]
     fn une_sortie_morte_est_remplacee_et_le_morceau_reprend() {
         let ctx = egui::Context::default();
+        let _tour = mon_tour();
         let mut app = LecteurApp::new(&ctx);
         if app.sortie.is_none() {
             return; // pas de son sur ce PC (machine de test)
         }
         let chemin = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/glissando.mp3");
         app.morceau = Some(Morceau::charger(&chemin, &AtomicBool::new(false)).unwrap());
-        app.demarrer().unwrap();
+        app.freinage = false; // pause immédiate
+        app.demarrer(false).unwrap();
         app.pause();
         app.telecommande.as_ref().unwrap().aller_a(1.0);
         let avant = app.position();
@@ -1180,5 +1336,197 @@ mod tests {
         assert!(app.sortie.as_ref().unwrap().battements() > 0);
         assert!(app.etat() == Etat::Pause);
         assert_eq!(app.position(), avant);
+    }
+
+    #[test]
+    fn une_option_est_activee_sauf_si_on_l_a_desactivee() {
+        assert!(option_depuis(None));
+        assert!(option_depuis(Some("oui\n")));
+        assert!(!option_depuis(Some("non\n")));
+    }
+
+    /// Stop avec le freinage : le morceau est tout de suite « Arrêté », le
+    /// son ralentit pendant environ 1 s puis tout s'arrête, sans passer au
+    /// morceau suivant. Sans freinage, en pause ou au second Stop : on coupe
+    /// net. (Seulement sur un PC qui a du son.)
+    #[test]
+    fn le_stop_freine_puis_s_arrete_sans_passer_au_suivant() {
+        let ctx = egui::Context::default();
+        let _tour = mon_tour();
+        let mut app = LecteurApp::new(&ctx);
+        if app.sortie.is_none() {
+            return; // pas de son sur ce PC (machine de test)
+        }
+        let chemin = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/glissando.mp3");
+        app.liste.ajouter(vec![chemin.clone(), chemin.clone()]);
+        app.liste.choisir(0);
+        app.morceau = Some(Morceau::charger(&chemin, &AtomicBool::new(false)).unwrap());
+        app.freinage = true;
+
+        // Le morceau freine : arrêté pour l'interface, mais le son continue.
+        app.demarrer(false).unwrap();
+        let telecommande = app.telecommande.clone().unwrap();
+        telecommande.aller_a(1.0);
+        app.arreter();
+        assert!(app.etat() == Etat::Arrete);
+        assert!(app.platine_active().is_some_and(|t| t.freine()));
+        // Puis il s'arrête pour de bon, et on reste sur le même morceau.
+        let debut = Instant::now();
+        while app.sink.is_some() {
+            assert!(
+                debut.elapsed() < Duration::from_secs(3),
+                "ne s'arrête jamais"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+            app.suivre_la_fin();
+        }
+        assert!(app.telecommande.is_none());
+        assert!(app.chargement.is_none());
+        assert_eq!(app.liste.courant(), Some(0));
+        assert!(app.etat() == Etat::Arrete);
+        // Le disque a tourné d'environ une demi-seconde de musique en
+        // freinant (et pas jusqu'à la fin du morceau). La durée exacte du
+        // freinage est vérifiée dans les tests de la platine.
+        let position = telecommande.position().as_secs_f64();
+        assert!((1.45..1.7).contains(&position), "position {position}");
+
+        // Lecture pendant le freinage : le morceau repart du début, normalement.
+        app.demarrer(false).unwrap();
+        app.telecommande.as_ref().unwrap().aller_a(2.0);
+        app.arreter();
+        app.lecture();
+        let t = app.telecommande.as_ref().unwrap();
+        assert!(!t.freine());
+        assert!(t.position() < Duration::from_millis(500));
+        assert!(app.etat() == Etat::Lecture);
+
+        // Second Stop pendant le freinage : on coupe net.
+        app.arreter();
+        app.arreter();
+        assert!(app.sink.is_none());
+
+        // En pause : on coupe net.
+        app.demarrer(false).unwrap();
+        app.pause();
+        app.arreter();
+        assert!(app.sink.is_none());
+        // Sans l'effet platine : le volume baisse en fondu, puis arrêt.
+        app.freinage = false;
+        app.demarrer(false).unwrap();
+        app.arreter();
+        let t = app.telecommande.clone().unwrap();
+        assert_eq!(t.effet_en_cours(), Some(Effet::Fondu));
+        assert!(t.freine());
+        assert!(app.etat() == Etat::Arrete);
+    }
+
+    /// Pause avec l'effet platine : « En pause » tout de suite, le son
+    /// ralentit puis se fige au même endroit. Lecture : le disque repart en
+    /// accélérant, depuis la pause comme depuis l'arrêt. Sans l'effet, tout
+    /// est immédiat. (Seulement sur un PC qui a du son.)
+    #[test]
+    fn la_pause_freine_et_la_lecture_accelere() {
+        let ctx = egui::Context::default();
+        let _tour = mon_tour();
+        let mut app = LecteurApp::new(&ctx);
+        if app.sortie.is_none() {
+            return; // pas de son sur ce PC (machine de test)
+        }
+        let chemin = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/glissando.mp3");
+        app.liste.ajouter(vec![chemin.clone()]);
+        app.liste.choisir(0);
+        app.morceau = Some(Morceau::charger(&chemin, &AtomicBool::new(false)).unwrap());
+        app.freinage = true;
+
+        // Pause : le disque ralentit, puis s'arrête au même endroit, en pause.
+        app.demarrer(false).unwrap();
+        let t = app.telecommande.clone().unwrap();
+        t.aller_a(1.0);
+        app.pause();
+        assert!(app.etat() == Etat::Pause);
+        let debut = Instant::now();
+        while t.tourne() {
+            assert!(
+                debut.elapsed() < Duration::from_secs(3),
+                "ne se fige jamais"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+            app.suivre_la_fin();
+        }
+        let position = t.position().as_secs_f64();
+        assert!((1.45..1.7).contains(&position), "position {position}");
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(t.position().as_secs_f64(), position);
+        assert!(app.etat() == Etat::Pause);
+        assert!(app.sink.is_some());
+
+        // Lecture : le disque repart en accélérant, du même endroit.
+        app.lecture();
+        assert!(app.etat() == Etat::Lecture);
+        assert!(t.accelere());
+        // Pause pendant un Stop qui freine : le Stop va jusqu'au bout.
+        app.arreter();
+        assert!(t.freine());
+        app.pause();
+        assert!(t.freine());
+        // Lecture après l'arrêt : le morceau repart du début en accélérant.
+        app.stop();
+        app.lecture();
+        let t = app.telecommande.clone().unwrap();
+        assert!(t.accelere());
+        assert!(t.position() < Duration::from_millis(500));
+        // Lecture sans morceau ouvert : il démarrera en accélérant.
+        app.oublier_morceau();
+        app.lecture();
+        assert!(app.chargement.as_ref().unwrap().en_douceur);
+        app.stop();
+        app.morceau = Some(Morceau::charger(&chemin, &AtomicBool::new(false)).unwrap());
+
+        // Sans l'effet platine : pause et lecture en fondu du volume.
+        app.freinage = false;
+        app.demarrer(false).unwrap();
+        let t = app.telecommande.clone().unwrap();
+        app.pause();
+        assert!(t.en_pause() && t.tourne());
+        assert_eq!(t.effet_en_cours(), Some(Effet::Fondu));
+        app.lecture();
+        assert!(!t.en_pause() && t.accelere());
+        assert_eq!(t.effet_en_cours(), Some(Effet::Fondu));
+        app.stop();
+        app.lecture();
+        let t = app.telecommande.as_ref().unwrap();
+        assert_eq!(t.effet_en_cours(), Some(Effet::Fondu));
+    }
+
+    /// Son du scratch coupé : pendant le glissement de la barre, la musique
+    /// continue normalement ; activé, elle suit la souris.
+    #[test]
+    fn le_son_du_scratch_peut_etre_coupe() {
+        let ctx = egui::Context::default();
+        let _tour = mon_tour();
+        let mut app = LecteurApp::new(&ctx);
+        let morceau = Arc::new(Morceau::brut(
+            (0..10_000).map(|i| i as i16).collect(),
+            1,
+            1000,
+        ));
+        let (telecommande, mut platine) = Telecommande::nouvelle(morceau);
+        telecommande.aller_a(5.0);
+
+        app.scratch = false;
+        app.glisser(&telecommande, 2.0);
+        for _ in 0..500 {
+            platine.next();
+        }
+        assert_eq!(app.position_glissee, Some(2.0));
+        assert_eq!(telecommande.position(), Duration::from_millis(5500));
+
+        app.scratch = true;
+        app.glisser(&telecommande, 2.0);
+        for _ in 0..1000 {
+            platine.next();
+        }
+        let position = telecommande.position().as_secs_f64();
+        assert!((position - 2.0).abs() < 0.01, "position {position}");
     }
 }
