@@ -14,6 +14,8 @@ mod visualiseur;
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -77,6 +79,55 @@ struct LecteurApp {
     pochette: Option<(PathBuf, Option<egui::TextureHandle>)>,
     // Un message affiché en bas de la fenêtre (erreurs, infos).
     message: String,
+    // Les dossiers lâchés dans la fenêtre, en train d'être parcourus.
+    depots: depot::Depots,
+    // Le morceau qu'on est en train d'ouvrir, en arrière-plan.
+    chargement: Option<Chargement>,
+    // La pochette du morceau qu'on est en train de lire, en arrière-plan.
+    pochette_en_cours: Option<(PathBuf, Receiver<Option<egui::ColorImage>>)>,
+    // Pour redessiner la fenêtre quand un travail en arrière-plan est fini.
+    ctx: egui::Context,
+}
+
+/// Un morceau en train d'être ouvert. Lire tout le fichier prend un moment
+/// (surtout pour un long mix) : on le fait en arrière-plan pour que la
+/// fenêtre ne se fige pas.
+struct Chargement {
+    chemin: PathBuf,
+    essais: Essais,
+    reception: Receiver<Result<Arc<Morceau>, String>>,
+    /// Mis à vrai quand on n'attend plus ce morceau (Stop, autre morceau
+    /// demandé) : la lecture du fichier s'arrête en route. Sinon, appuyer
+    /// longtemps sur → lancerait des dizaines de lectures à la fois.
+    abandonne: Arc<AtomicBool>,
+    /// On a appuyé sur Pause pendant l'ouverture : le morceau démarrera en pause.
+    en_pause: bool,
+}
+
+impl Drop for Chargement {
+    fn drop(&mut self) {
+        self.abandonne.store(true, Ordering::Relaxed);
+    }
+}
+
+/// Où en est la lecture.
+#[derive(Clone, Copy, PartialEq)]
+enum Etat {
+    Arrete,
+    Chargement,
+    Pause,
+    Lecture,
+}
+
+impl Etat {
+    fn texte(self) -> &'static str {
+        match self {
+            Etat::Arrete => "Arrêté",
+            Etat::Chargement => "Chargement…",
+            Etat::Pause => "En pause",
+            Etat::Lecture => "En lecture",
+        }
+    }
 }
 
 impl LecteurApp {
@@ -102,6 +153,10 @@ impl LecteurApp {
             tags: TagsConnus::new(ctx),
             pochette: None,
             message,
+            depots: depot::Depots::default(),
+            chargement: None,
+            pochette_en_cours: None,
+            ctx: ctx.clone(),
         }
     }
 
@@ -125,16 +180,19 @@ impl LecteurApp {
     }
 
     /// Ajoute les fichiers et dossiers lâchés dans la fenêtre, s'il y en a.
+    /// Les dossiers sont parcourus en arrière-plan : leurs morceaux arrivent
+    /// dans la liste quand c'est fini.
     fn recevoir_depot(&mut self, ctx: &egui::Context) {
         let elements = depot::elements_deposes(ctx);
-        if elements.is_empty() {
-            return;
+        if !elements.is_empty() {
+            self.depots.lancer(ctx, elements);
         }
-        let fichiers = depot::mp3_deposes(elements);
-        if fichiers.is_empty() {
-            self.message = "Aucun fichier MP3 dans ce qui a été déposé.".to_string();
-        } else {
-            self.ajouter(fichiers);
+        if let Some(fichiers) = self.depots.recu() {
+            if fichiers.is_empty() {
+                self.message = "Aucun fichier MP3 dans ce qui a été déposé.".to_string();
+            } else {
+                self.ajouter(fichiers);
+            }
         }
     }
 
@@ -142,34 +200,93 @@ impl LecteurApp {
     /// liste (le premier ajouté, ou l'un d'eux au hasard en lecture aléatoire).
     fn jouer_si_rien_en_cours(&mut self, a_lancer: Option<usize>) {
         if let Some(n) = a_lancer {
-            if self.platine_active().is_none() {
+            if self.platine_active().is_none() && self.chargement.is_none() {
                 self.jouer(n);
             }
         }
     }
 
-    /// Lance le morceau numéro n de la liste, depuis le début.
-    /// Si ce fichier est illisible (abîmé, déplacé, supprimé), on passe au
-    /// suivant au lieu d'arrêter toute la liste.
+    /// Lance le morceau numéro n de la liste, depuis le début. Le fichier
+    /// est ouvert en arrière-plan (voir `suivre_le_chargement`) ; s'il est
+    /// illisible (abîmé, déplacé, supprimé), on passe au suivant au lieu
+    /// d'arrêter toute la liste.
     fn jouer(&mut self, n: usize) {
         if self.liste.fichier(n).is_none() {
             return;
         }
-        match ouvrir_un_lisible(&mut self.liste, n, Morceau::charger) {
-            Ok((morceau, saute)) => {
+        self.oublier_morceau();
+        let essais = Essais::pour(&self.liste);
+        self.essayer(n, essais);
+    }
+
+    /// Commence à ouvrir le morceau numéro n, en arrière-plan.
+    fn essayer(&mut self, n: usize, essais: Essais) {
+        let Some(chemin) = self.liste.fichier(n).map(Path::to_path_buf) else {
+            return;
+        };
+        self.liste.choisir(n);
+        let en_pause = self.chargement.as_ref().is_some_and(|c| c.en_pause);
+        let (envoi, reception) = mpsc::channel();
+        let abandonne = Arc::new(AtomicBool::new(false));
+        let (fichier, ctx, drapeau) = (chemin.clone(), self.ctx.clone(), abandonne.clone());
+        std::thread::spawn(move || {
+            let resultat = Morceau::charger(&fichier, &drapeau).map_err(|e| e.to_string());
+            let _ = envoi.send(resultat);
+            ctx.request_repaint();
+        });
+        self.chargement = Some(Chargement {
+            chemin,
+            essais,
+            reception,
+            abandonne,
+            en_pause,
+        });
+    }
+
+    /// Le morceau qu'on ouvrait est-il prêt ? On le lance, ou on essaie le
+    /// suivant s'il est illisible.
+    fn suivre_le_chargement(&mut self) {
+        let Some(chargement) = &self.chargement else {
+            return;
+        };
+        let resultat = match chargement.reception.try_recv() {
+            Ok(resultat) => resultat,
+            Err(TryRecvError::Empty) => return,
+            Err(TryRecvError::Disconnected) => Err("lecture interrompue".to_string()),
+        };
+        let Some(chargement) = self.chargement.take() else {
+            return;
+        };
+        let chemin = chargement.chemin.clone();
+        let en_pause = chargement.en_pause;
+        let mut essais = chargement.essais.clone();
+        match resultat {
+            Ok(morceau) => {
                 self.morceau = Some(morceau);
                 match self.demarrer() {
-                    Ok(()) => self.message = saute,
+                    Ok(()) => {
+                        if en_pause {
+                            self.pause();
+                        }
+                        self.message = essais.message_si_lu();
+                    }
                     Err(e) => {
                         self.oublier_morceau();
-                        self.message = format!("Impossible de lire ce fichier : {e}");
+                        self.message = format!("Impossible de lancer la lecture : {e}");
                     }
                 }
             }
-            Err(message) => {
-                self.oublier_morceau();
-                self.message = message;
-            }
+            Err(e) => match essais.echec(&mut self.liste, &chemin, &e) {
+                Some(suivant) => {
+                    // On garde la pause demandée pour le morceau suivant.
+                    self.chargement = Some(chargement);
+                    self.essayer(suivant, essais);
+                }
+                None => {
+                    self.oublier_morceau();
+                    self.message = essais.message_si_rien_de_lu();
+                }
+            },
         }
     }
 
@@ -233,6 +350,11 @@ impl LecteurApp {
     }
 
     fn lecture(&mut self) {
+        // Le morceau est en train de s'ouvrir : il se lancera tout seul.
+        if let Some(chargement) = &mut self.chargement {
+            chargement.en_pause = false;
+            return;
+        }
         // Le morceau est encore en cours : on reprend là où on en était.
         if let Some(telecommande) = self.platine_active() {
             telecommande.mettre_en_pause(false);
@@ -245,17 +367,22 @@ impl LecteurApp {
         }
         // Le morceau a été arrêté ou est terminé : on le relance depuis le début.
         if let Err(e) = self.demarrer() {
-            self.message = format!("Impossible de lire ce fichier : {e}");
+            self.message = format!("Impossible de lancer la lecture : {e}");
         }
     }
 
-    fn pause(&self) {
+    fn pause(&mut self) {
+        if let Some(chargement) = &mut self.chargement {
+            chargement.en_pause = true; // il démarrera en pause
+        }
         if let Some(telecommande) = &self.telecommande {
             telecommande.mettre_en_pause(true);
         }
     }
 
+    /// Arrête la lecture (et le morceau qu'on était peut-être en train d'ouvrir).
     fn stop(&mut self) {
+        self.chargement = None;
         if let Some(sink) = self.sink.take() {
             sink.stop();
         }
@@ -269,12 +396,15 @@ impl LecteurApp {
             .unwrap_or_default()
     }
 
-    /// Texte décrivant l'état actuel (en lecture, en pause, arrêté).
-    fn etat(&self) -> &'static str {
+    /// Où en est la lecture (en lecture, en pause, arrêté…).
+    fn etat(&self) -> Etat {
+        if self.chargement.is_some() {
+            return Etat::Chargement;
+        }
         match self.platine_active() {
-            None => "Arrêté",
-            Some(t) if t.en_pause() => "En pause",
-            Some(_) => "En lecture",
+            None => Etat::Arrete,
+            Some(t) if t.en_pause() => Etat::Pause,
+            Some(_) => Etat::Lecture,
         }
     }
 }
@@ -284,6 +414,7 @@ impl LecteurApp {
     fn executer(&mut self, commande: Commande) {
         match commande {
             Commande::LecturePause => match self.platine_active() {
+                None if self.chargement.as_ref().is_some_and(|c| !c.en_pause) => self.pause(),
                 Some(t) if !t.en_pause() => self.pause(),
                 _ if !self.liste.est_vide() => self.lecture(),
                 _ => {}
@@ -409,41 +540,77 @@ impl LecteurApp {
     }
 }
 
-/// Choisit le morceau numéro `n` de la liste et l'ouvre avec `ouvrir`. S'il
-/// est illisible, on essaie les suivants, chacun une fois au plus (sinon une
-/// liste où rien n'est lisible tournerait en rond avec la répétition).
-/// Renvoie le morceau ouvert, avec le message du dernier fichier sauté (vide
-/// si aucun) ; ou, si rien n'a pu être ouvert, le message à afficher.
+/// Les essais pour trouver un morceau lisible, à partir de celui demandé :
+/// chaque morceau est essayé une fois au plus (sinon une liste où rien
+/// n'est lisible tournerait en rond avec la répétition).
+#[derive(Clone)]
+struct Essais {
+    restants: usize,
+    /// Le dernier fichier sauté, et pourquoi.
+    erreur: Option<String>,
+}
+
+impl Essais {
+    fn pour(liste: &ListeDeLecture) -> Self {
+        Self {
+            restants: liste.morceaux().len(),
+            erreur: None,
+        }
+    }
+
+    /// Le morceau `chemin` n'a pas pu être ouvert : renvoie le numéro du
+    /// suivant à essayer, ou rien s'il faut abandonner.
+    fn echec(&mut self, liste: &mut ListeDeLecture, chemin: &Path, erreur: &str) -> Option<usize> {
+        self.erreur = Some(format!(
+            "Impossible de lire « {} » ({erreur})",
+            liste::nom_du_fichier(chemin)
+        ));
+        self.restants = self.restants.saturating_sub(1);
+        if self.restants == 0 {
+            return None;
+        }
+        liste.suivant()
+    }
+
+    /// Le message à afficher une fois un morceau ouvert (vide si aucun n'a été sauté).
+    fn message_si_lu(&self) -> String {
+        self.erreur
+            .as_ref()
+            .map_or(String::new(), |e| format!("{e}, morceau suivant."))
+    }
+
+    /// Le message à afficher si rien n'a pu être ouvert.
+    fn message_si_rien_de_lu(&self) -> String {
+        self.erreur
+            .as_ref()
+            .map_or(String::new(), |e| format!("{e}."))
+    }
+}
+
+/// Comme l'appli, mais d'un coup (sans arrière-plan) : choisit le morceau
+/// numéro `n`, l'ouvre avec `ouvrir`, et passe aux suivants s'il est
+/// illisible. Pour tester `Essais`.
+#[cfg(test)]
 fn ouvrir_un_lisible<T>(
     liste: &mut ListeDeLecture,
     n: usize,
     mut ouvrir: impl FnMut(&Path) -> Result<T, Box<dyn std::error::Error>>,
 ) -> Result<(T, String), String> {
+    let mut essais = Essais::pour(liste);
     let mut n = n;
-    let mut erreur = None;
-    for _ in 0..liste.morceaux().len() {
+    loop {
         let Some(chemin) = liste.fichier(n).map(Path::to_path_buf) else {
-            break;
+            return Err(essais.message_si_rien_de_lu());
         };
         liste.choisir(n);
         match ouvrir(&chemin) {
-            Ok(morceau) => {
-                let saute = erreur.map_or(String::new(), |e| format!("{e}, morceau suivant."));
-                return Ok((morceau, saute));
-            }
-            Err(e) => {
-                erreur = Some(format!(
-                    "Impossible de lire « {} » ({e})",
-                    liste::nom_du_fichier(&chemin)
-                ));
-            }
-        }
-        match liste.suivant() {
-            Some(suivant) => n = suivant,
-            None => break,
+            Ok(morceau) => return Ok((morceau, essais.message_si_lu())),
+            Err(e) => match essais.echec(liste, &chemin, &e.to_string()) {
+                Some(suivant) => n = suivant,
+                None => return Err(essais.message_si_rien_de_lu()),
+            },
         }
     }
-    Err(erreur.map_or(String::new(), |e| format!("{e}.")))
 }
 
 /// Côté de la pochette affichée sous le visualiseur, en points : la plus
@@ -452,18 +619,48 @@ const POCHETTE_MIN: f32 = 200.0;
 const POCHETTE_MAX: f32 = 600.0;
 
 impl LecteurApp {
-    /// Lit la pochette du morceau en cours quand il change (rien à faire sinon).
+    /// Lit la pochette du morceau en cours quand il change (rien à faire
+    /// sinon). Décoder l'image prend un moment : on le fait en arrière-plan.
     fn charger_pochette(&mut self, ctx: &egui::Context, en_cours: Option<&Path>) {
         let Some(chemin) = en_cours else {
             self.pochette = None;
+            self.pochette_en_cours = None;
             return;
         };
+        // La pochette demandée est prête : on l'envoie à la carte graphique.
+        if let Some((demandee, reception)) = &self.pochette_en_cours {
+            if demandee == chemin {
+                match reception.try_recv() {
+                    Ok(image) => {
+                        let texture = image.map(|image| {
+                            ctx.load_texture("pochette", image, egui::TextureOptions::LINEAR)
+                        });
+                        self.pochette = Some((chemin.to_path_buf(), texture));
+                        self.pochette_en_cours = None;
+                    }
+                    Err(TryRecvError::Empty) => {}
+                    Err(TryRecvError::Disconnected) => {
+                        // La lecture de la pochette a échoué : pas de pochette,
+                        // sans réessayer à chaque image.
+                        self.pochette = Some((chemin.to_path_buf(), None));
+                        self.pochette_en_cours = None;
+                    }
+                }
+                return;
+            }
+        }
         if self.pochette.as_ref().is_some_and(|(p, _)| p == chemin) {
             return;
         }
-        let texture = tags::lire_pochette(chemin)
-            .map(|image| ctx.load_texture("pochette", image, egui::TextureOptions::LINEAR));
-        self.pochette = Some((chemin.to_path_buf(), texture));
+        // Nouveau morceau : on oublie l'ancienne pochette et on lit la sienne.
+        self.pochette = None;
+        let (envoi, reception) = mpsc::channel();
+        let (fichier, ctx) = (chemin.to_path_buf(), ctx.clone());
+        std::thread::spawn(move || {
+            let _ = envoi.send(tags::lire_pochette(&fichier));
+            ctx.request_repaint();
+        });
+        self.pochette_en_cours = Some((chemin.to_path_buf(), reception));
     }
 
     /// La pochette du morceau en cours, centrée sous le visualiseur.
@@ -497,6 +694,7 @@ impl eframe::App for LecteurApp {
         }
 
         self.recevoir_depot(ctx);
+        self.suivre_le_chargement();
 
         // À gauche, la bibliothèque. Un clic sur un morceau (ou sur « ➕ tout »)
         // l'ajoute à la liste de lecture. En bas, les playlists.
@@ -562,6 +760,8 @@ impl eframe::App for LecteurApp {
                 _ => None,
             };
             self.charger_pochette(ui.ctx(), en_cours.as_deref());
+            // Pendant l'ouverture, on montre déjà le nom du morceau.
+            let en_cours = en_cours.or_else(|| self.chargement.as_ref().map(|c| c.chemin.clone()));
             let nom = match &en_cours {
                 Some(chemin) => self.tags.libelle(chemin),
                 None => "Aucun fichier".to_string(),
@@ -570,7 +770,7 @@ impl eframe::App for LecteurApp {
             if let Some(album) = en_cours.as_deref().and_then(|c| self.tags.album(c)) {
                 ui.label(format!("Album : {album}"));
             }
-            ui.label(format!("État : {}", self.etat()));
+            ui.label(format!("État : {}", self.etat().texte()));
 
             ui.add_space(8.0);
             self.barre_de_progression(ui);
@@ -649,13 +849,14 @@ impl eframe::App for LecteurApp {
                 Some(Action::Jouer(n)) if self.liste.courant() == Some(n) => self.lecture(),
                 Some(Action::Jouer(n)) => self.jouer(n),
                 Some(Action::Retirer(n)) => {
-                    // Si c'était le morceau en cours, on joue celui qui a pris sa
-                    // place (le suivant). Au bout de la liste, on s'arrête.
+                    // Si c'était le morceau en cours et qu'il jouait, on passe au
+                    // suivant (au hasard en lecture aléatoire). En pause ou à
+                    // l'arrêt, on s'arrête simplement.
+                    let jouait = matches!(self.etat(), Etat::Lecture | Etat::Chargement);
                     if self.liste.retirer(n) {
-                        if self.liste.fichier(n).is_some() {
-                            self.jouer(n);
-                        } else {
-                            self.oublier_morceau();
+                        match jouait.then(|| self.liste.apres_retrait(n)).flatten() {
+                            Some(suivant) => self.jouer(suivant),
+                            None => self.oublier_morceau(),
                         }
                     }
                 }
@@ -670,7 +871,7 @@ impl eframe::App for LecteurApp {
             let position = self
                 .position_glissee
                 .unwrap_or_else(|| self.position().as_secs_f32());
-            let en_lecture = self.etat() == "En lecture";
+            let en_lecture = self.etat() == Etat::Lecture;
             self.visualiseur
                 .afficher(ui, self.morceau.as_ref(), position, en_lecture);
             self.afficher_pochette(ui);
@@ -678,6 +879,13 @@ impl eframe::App for LecteurApp {
             if !self.message.is_empty() {
                 ui.add_space(8.0);
                 ui.colored_label(egui::Color32::LIGHT_RED, &self.message);
+            }
+            if self.depots.en_cours() {
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label("Lecture des fichiers déposés…");
+                });
             }
 
             ui.add_space(8.0);
@@ -795,5 +1003,49 @@ mod tests {
         let (resultat, essayes) = essayer(1, &[], true);
         assert!(resultat.is_err());
         assert_eq!(essayes, [1, 2, 3, 0]);
+    }
+
+    /// Le morceau s'ouvre en arrière-plan ; un fichier introuvable est sauté
+    /// et c'est le suivant qui s'ouvre.
+    #[test]
+    fn le_morceau_s_ouvre_en_arriere_plan_et_saute_les_illisibles() {
+        let ctx = egui::Context::default();
+        let mut app = LecteurApp::new(&ctx);
+        let present = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/glissando.mp3");
+        app.liste
+            .ajouter(vec![PathBuf::from("introuvable.mp3"), present]);
+        app.jouer(0);
+        assert!(app.etat() == Etat::Chargement);
+        let debut = std::time::Instant::now();
+        while app.chargement.is_some() {
+            assert!(debut.elapsed() < Duration::from_secs(5), "jamais ouvert");
+            std::thread::sleep(Duration::from_millis(5));
+            app.suivre_le_chargement();
+        }
+        assert_eq!(app.liste.courant(), Some(1));
+        if app.sortie_handle.is_some() {
+            // Un PC avec du son : le morceau joue, et on dit lequel a été sauté.
+            assert!(app.morceau.is_some());
+            assert!(app
+                .message
+                .starts_with("Impossible de lire « introuvable.mp3 »"));
+        }
+        // Pause pendant l'ouverture : retenue pour le démarrage (et Lecture l'annule).
+        app.jouer(1);
+        app.pause();
+        assert!(app.chargement.as_ref().unwrap().en_pause);
+        app.lecture();
+        assert!(!app.chargement.as_ref().unwrap().en_pause);
+        // Un autre morceau demandé : la lecture du précédent est abandonnée.
+        let abandonne = app.chargement.as_ref().unwrap().abandonne.clone();
+        app.jouer(1);
+        assert!(abandonne.load(Ordering::Relaxed));
+        // Stop pendant l'ouverture : rien ne se lance ensuite.
+        let abandonne = app.chargement.as_ref().unwrap().abandonne.clone();
+        app.stop();
+        assert!(abandonne.load(Ordering::Relaxed));
+        std::thread::sleep(Duration::from_millis(100));
+        app.suivre_le_chargement();
+        assert!(app.etat() == Etat::Arrete);
     }
 }

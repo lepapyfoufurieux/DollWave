@@ -10,8 +10,8 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::ops::Range;
 use std::path::Path;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Condvar, Mutex, Weak};
 use std::thread;
 use std::time::Duration;
 
@@ -33,8 +33,10 @@ const A_PREPARER: usize = 8;
 /// Les blocs plus loin que ça de l'endroit écouté sont oubliés (au plus
 /// 31 blocs gardés, soit environ 5 Mo pour un morceau en stéréo).
 const A_GARDER: usize = 15;
-/// Pause du fil d'arrière-plan entre deux vérifications.
-const PAUSE_PREPARATION: Duration = Duration::from_millis(10);
+/// Quand tout est prêt, le fil d'arrière-plan dort jusqu'à ce que la platine
+/// change de bloc. Il se réveille quand même de temps en temps pour voir si
+/// le morceau sert encore (sinon, il s'arrête).
+const PAUSE_PREPARATION: Duration = Duration::from_secs(1);
 
 /// Ce dont on tire le son.
 enum Contenu {
@@ -62,20 +64,71 @@ pub struct Morceau {
     blocs: Mutex<HashMap<usize, Arc<[i16]>>>,
     /// Le bloc que la platine est en train de jouer.
     centre: AtomicUsize,
+    /// Pour réveiller le fil d'arrière-plan quand la platine change de bloc.
+    reveil: Arc<Reveil>,
+}
+
+/// Le réveil du fil d'arrière-plan : `a_faire` passe à vrai quand il y a
+/// peut-être de nouveaux blocs à préparer.
+#[derive(Default)]
+struct Reveil {
+    a_faire: Mutex<bool>,
+    signal: Condvar,
+}
+
+impl Reveil {
+    fn sonner(&self) {
+        *self.a_faire.lock().unwrap_or_else(|e| e.into_inner()) = true;
+        self.signal.notify_one();
+    }
+
+    /// Attend une sonnerie (au plus `PAUSE_PREPARATION`).
+    fn attendre(&self) {
+        let a_faire = self.a_faire.lock().unwrap_or_else(|e| e.into_inner());
+        let (mut a_faire, _) = self
+            .signal
+            .wait_timeout_while(a_faire, PAUSE_PREPARATION, |a_faire| !*a_faire)
+            .unwrap_or_else(|e| e.into_inner());
+        *a_faire = false;
+    }
 }
 
 impl Morceau {
     /// Prépare un fichier MP3 : lit ses paquets (sans les décoder) et lance le
     /// fil qui décode les blocs à l'avance.
-    pub fn charger(chemin: &Path) -> Result<Arc<Self>, Box<dyn std::error::Error>> {
-        let morceau = Arc::new(Self::depuis(Box::new(File::open(chemin)?))?);
-        let suivi = Arc::downgrade(&morceau);
-        thread::spawn(move || preparer_en_continu(suivi));
+    /// `abandonne` permet d'arrêter en route (on a demandé un autre morceau
+    /// entre-temps) : inutile de lire tout un long fichier pour rien.
+    pub fn charger(
+        chemin: &Path,
+        abandonne: &AtomicBool,
+    ) -> Result<Arc<Self>, Box<dyn std::error::Error>> {
+        let source = Box::new(File::open(chemin)?);
+        let morceau = Arc::new(Self::depuis_tant_que(source, || {
+            !abandonne.load(Ordering::Relaxed)
+        })?);
+        morceau.lancer_la_preparation();
         Ok(morceau)
     }
 
+    /// Lance le fil qui prépare les blocs à l'avance.
+    fn lancer_la_preparation(self: &Arc<Self>) {
+        let suivi = Arc::downgrade(self);
+        let reveil = self.reveil.clone();
+        thread::spawn(move || preparer_en_continu(suivi, &reveil));
+    }
+
     /// Lit tous les paquets d'un MP3 et les regroupe en blocs.
+    #[cfg(test)]
     fn depuis(source: Box<dyn MediaSource>) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::depuis_tant_que(source, || true)
+    }
+
+    /// Comme `depuis`, mais s'arrête (avec une erreur) dès que `continuer`
+    /// renvoie faux.
+    fn depuis_tant_que(
+        source: Box<dyn MediaSource>,
+        continuer: impl Fn() -> bool,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let flux = MediaSourceStream::new(source, Default::default());
         let options = FormatOptions {
             enable_gapless: true,
@@ -95,6 +148,9 @@ impl Morceau {
 
         let mut paquets = Vec::new();
         loop {
+            if !continuer() {
+                return Err("lecture abandonnée".into());
+            }
             match lecteur.next_packet() {
                 Ok(paquet) => paquets.push(paquet),
                 // Fin du fichier (ou fichier abîmé à la fin) : on garde ce qu'on a.
@@ -151,6 +207,7 @@ impl Morceau {
             contenu,
             blocs: Mutex::new(HashMap::new()),
             centre: AtomicUsize::new(0),
+            reveil: Arc::default(),
         }
     }
 
@@ -223,7 +280,9 @@ impl Morceau {
     /// Indique quel bloc la platine joue : le fil d'arrière-plan prépare ses
     /// voisins, et les blocs trop loin sont oubliés.
     fn suivre(&self, n: usize) {
-        self.centre.store(n, Ordering::Relaxed);
+        if self.centre.swap(n, Ordering::Relaxed) != n {
+            self.reveil.sonner();
+        }
     }
 
     /// Les échantillons du bloc numéro `n`, décodés si besoin.
@@ -304,24 +363,51 @@ impl Morceau {
     /// seconde : pour chaque tranche, l'échantillon le plus bas et le plus haut
     /// (entre -1 et 1). Décode tout le morceau, mais un bloc à la fois, sans
     /// garder les blocs : à lancer en arrière-plan.
+    #[cfg(test)]
     pub fn apercu(&self, par_seconde: u32) -> Vec<(f32, f32)> {
-        let par_tranche = (self.frequence / par_seconde).max(1) as usize * self.canaux;
-        let mut apercu = Vec::new();
-        let mut tranche = (0i16, 0i16, 0usize); // plus bas, plus haut, nombre d'échantillons
-        for n in 0..self.debuts.len() {
-            for e in self.decoder(n) {
-                tranche = (tranche.0.min(e), tranche.1.max(e), tranche.2 + 1);
-                if tranche.2 == par_tranche {
-                    apercu.push((tranche.0 as f32 / 32768.0, tranche.1 as f32 / 32768.0));
-                    tranche = (0, 0, 0);
-                }
+        resumer(self.par_tranche(par_seconde), self.debuts.len(), |n| {
+            Some(self.decoder(n))
+        })
+        .unwrap_or_default()
+    }
+
+    /// Comme `apercu`, mais s'arrête (et ne renvoie rien) dès que le morceau
+    /// ne sert plus : on a changé de morceau, inutile de finir le calcul.
+    pub fn apercu_tant_qu_utile(suivi: &Weak<Self>, par_seconde: u32) -> Option<Vec<(f32, f32)>> {
+        let (par_tranche, nb_blocs) = {
+            let morceau = suivi.upgrade()?;
+            (morceau.par_tranche(par_seconde), morceau.debuts.len())
+        };
+        resumer(par_tranche, nb_blocs, |n| Some(suivi.upgrade()?.decoder(n)))
+    }
+
+    fn par_tranche(&self, par_seconde: u32) -> usize {
+        (self.frequence / par_seconde).max(1) as usize * self.canaux
+    }
+}
+
+/// Le résumé (plus bas, plus haut) de chaque tranche de `par_tranche`
+/// échantillons, bloc après bloc. Rien si `bloc` ne donne pas un bloc.
+fn resumer(
+    par_tranche: usize,
+    nb_blocs: usize,
+    mut bloc: impl FnMut(usize) -> Option<Vec<i16>>,
+) -> Option<Vec<(f32, f32)>> {
+    let mut apercu = Vec::new();
+    let mut tranche = (0i16, 0i16, 0usize); // plus bas, plus haut, nombre d'échantillons
+    for n in 0..nb_blocs {
+        for e in bloc(n)? {
+            tranche = (tranche.0.min(e), tranche.1.max(e), tranche.2 + 1);
+            if tranche.2 == par_tranche {
+                apercu.push((tranche.0 as f32 / 32768.0, tranche.1 as f32 / 32768.0));
+                tranche = (0, 0, 0);
             }
         }
-        if tranche.2 > 0 {
-            apercu.push((tranche.0 as f32 / 32768.0, tranche.1 as f32 / 32768.0));
-        }
-        apercu
     }
+    if tranche.2 > 0 {
+        apercu.push((tranche.0 as f32 / 32768.0, tranche.1 as f32 / 32768.0));
+    }
+    Some(apercu)
 }
 
 /// Décode les paquets d'un bloc, en commençant un peu avant pour « amorcer »
@@ -359,7 +445,7 @@ fn decoder_paquets(
 
 /// Le travail du fil d'arrière-plan : préparer les blocs autour de la platine,
 /// jusqu'à ce que le morceau ne serve plus à personne.
-fn preparer_en_continu(suivi: Weak<Morceau>) {
+fn preparer_en_continu(suivi: Weak<Morceau>, reveil: &Reveil) {
     loop {
         let Some(morceau) = suivi.upgrade() else {
             return; // morceau abandonné
@@ -367,7 +453,8 @@ fn preparer_en_continu(suivi: Weak<Morceau>) {
         let travail_fait = morceau.preparer_un_bloc();
         drop(morceau);
         if !travail_fait {
-            thread::sleep(PAUSE_PREPARATION);
+            // Tout est prêt : on dort jusqu'à ce que la platine bouge.
+            reveil.attendre();
         }
     }
 }
@@ -519,5 +606,47 @@ mod tests {
         let attendu = (morceau.duree().as_secs_f64() * 100.0).ceil() as usize;
         assert_eq!(apercu.len(), attendu);
         assert!(apercu.iter().any(|&(bas, haut)| bas < -0.3 && haut > 0.3));
+    }
+
+    /// Le fil d'arrière-plan dort quand tout est prêt, et se réveille dès
+    /// que la platine change de bloc (sans attendre la fin de sa pause).
+    #[test]
+    fn le_fil_d_arriere_plan_se_reveille_quand_la_platine_bouge() {
+        let morceau = Arc::new(Morceau::sinus(440.0, 8000, 60.0));
+        morceau.lancer_la_preparation();
+        let pret = |n: usize| morceau.blocs.lock().unwrap().contains_key(&n);
+        let attendre = |n: usize| {
+            let debut = std::time::Instant::now();
+            while !pret(n) && debut.elapsed() < Duration::from_millis(500) {
+                thread::sleep(Duration::from_millis(5));
+            }
+            pret(n)
+        };
+        assert!(attendre(A_PREPARER), "les voisins du début sont préparés");
+        thread::sleep(Duration::from_millis(50)); // il s'endort
+        morceau.suivre(40);
+        assert!(attendre(40 + A_PREPARER), "réveillé par la platine");
+        assert!(pret(40 - A_PREPARER));
+    }
+
+    /// On a changé de morceau : le calcul de la forme d'onde de l'ancien
+    /// s'arrête au lieu de décoder tout le fichier pour rien.
+    #[test]
+    fn l_apercu_s_arrete_si_le_morceau_ne_sert_plus() {
+        let morceau = Arc::new(Morceau::sinus(440.0, 8000, 5.0));
+        let suivi = Arc::downgrade(&morceau);
+        assert_eq!(
+            Morceau::apercu_tant_qu_utile(&suivi, 100),
+            Some(morceau.apercu(100))
+        );
+        drop(morceau);
+        assert_eq!(Morceau::apercu_tant_qu_utile(&suivi, 100), None);
+    }
+
+    #[test]
+    fn une_lecture_abandonnee_s_arrete() {
+        let source = || Box::new(Cursor::new(GLISSANDO.to_vec()));
+        assert!(Morceau::depuis_tant_que(source(), || false).is_err());
+        assert!(Morceau::depuis_tant_que(source(), || true).is_ok());
     }
 }

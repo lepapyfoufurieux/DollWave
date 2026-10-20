@@ -4,7 +4,7 @@
 //! - l'oscilloscope (la vibration du son, en direct) ;
 //! - la forme d'onde (le dessin des 30 secondes autour de l'endroit écouté).
 
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, OnceLock, Weak};
 use std::thread;
 
 use eframe::egui;
@@ -86,13 +86,19 @@ impl Style {
 
 pub struct Visualiseur {
     style: Style,
-    /// L'outil qui découpe le son en fréquences (préparé une seule fois).
+    /// L'outil qui découpe le son en fréquences (préparé une seule fois),
+    /// avec sa fenêtre de Hann et ses tableaux de travail, réutilisés à
+    /// chaque image au lieu d'être refaits.
     fft: Arc<dyn Fft<f32>>,
+    fenetre: Vec<f32>,
+    spectre: Vec<Complex<f32>>,
+    brouillon: Vec<Complex<f32>>,
     /// Hauteur actuelle de chaque barre (entre 0 et 1).
     barres: [f32; NB_BARRES],
     /// Le résumé de la forme d'onde, calculé en arrière-plan une fois par
-    /// morceau (vide tant que le calcul n'est pas fini).
-    apercu: Option<(Arc<Morceau>, Arc<OnceLock<Apercu>>)>,
+    /// morceau (vide tant que le calcul n'est pas fini). On ne garde pas le
+    /// morceau lui-même (`Weak`) : une fois fini, il peut libérer sa mémoire.
+    apercu: Option<(Weak<Morceau>, Arc<OnceLock<Apercu>>)>,
 }
 
 impl Visualiseur {
@@ -100,6 +106,11 @@ impl Visualiseur {
         Self {
             style: Style::memorise(),
             fft: FftPlanner::new().plan_fft_forward(TAILLE_FFT),
+            fenetre: (0..TAILLE_FFT)
+                .map(|i| 0.5 - 0.5 * (std::f32::consts::TAU * i as f32 / TAILLE_FFT as f32).cos())
+                .collect(),
+            spectre: Vec::with_capacity(TAILLE_FFT),
+            brouillon: Vec::new(),
             barres: [0.0; NB_BARRES],
             apercu: None,
         }
@@ -139,6 +150,9 @@ impl Visualiseur {
         peintre.rect_filled(zone, 4.0, ui.visuals().extreme_bg_color);
         let couleur = ui.visuals().selection.bg_fill;
         let dt = ui.input(|i| i.stable_dt);
+        if morceau.is_none() {
+            self.apercu = None; // plus de morceau (arrêt, liste vidée)
+        }
 
         match self.style {
             Style::Barres => {
@@ -172,34 +186,42 @@ impl Visualiseur {
     /// Le résumé de la forme d'onde du morceau. La première fois, on lance son
     /// calcul en arrière-plan (il faut décoder tout le morceau) : en attendant,
     /// il n'y a rien à dessiner.
+    /// Si on change de morceau avant la fin, le calcul de l'ancien s'arrête.
     fn apercu_de(&mut self, morceau: &Arc<Morceau>) -> Option<&[(f32, f32)]> {
-        let deja_lance = matches!(&self.apercu, Some((m, _)) if Arc::ptr_eq(m, morceau));
+        let deja_lance =
+            matches!(&self.apercu, Some((m, _)) if std::ptr::eq(m.as_ptr(), Arc::as_ptr(morceau)));
         if !deja_lance {
             let resultat = Arc::new(OnceLock::new());
-            let (m, r) = (morceau.clone(), resultat.clone());
-            thread::spawn(move || r.set(m.apercu(TRANCHES_PAR_SECONDE)));
-            self.apercu = Some((morceau.clone(), resultat));
+            let (m, r) = (Arc::downgrade(morceau), resultat.clone());
+            thread::spawn(move || {
+                if let Some(apercu) = Morceau::apercu_tant_qu_utile(&m, TRANCHES_PAR_SECONDE) {
+                    let _ = r.set(apercu);
+                }
+            });
+            self.apercu = Some((Arc::downgrade(morceau), resultat));
         }
         self.apercu.as_ref().unwrap().1.get().map(Vec::as_slice)
     }
 
     /// Analyse le son à partir de `position` et renvoie la hauteur de chaque
     /// barre (entre 0 et 1), des graves aux aigus.
-    fn hauteurs_des_barres(&self, morceau: &Morceau, position: f32) -> [f32; NB_BARRES] {
+    fn hauteurs_des_barres(&mut self, morceau: &Morceau, position: f32) -> [f32; NB_BARRES] {
         let echantillons = morceau.extrait_mono(position, TAILLE_FFT);
 
         // On adoucit les deux bouts de l'extrait (fenêtre de Hann) : sinon la
         // coupure brutale ajouterait des fréquences qui n'existent pas.
-        let mut spectre: Vec<Complex<f32>> = echantillons
-            .iter()
-            .enumerate()
-            .map(|(i, &e)| {
-                let fenetre =
-                    0.5 - 0.5 * (std::f32::consts::TAU * i as f32 / TAILLE_FFT as f32).cos();
-                Complex::new(e * fenetre, 0.0)
-            })
-            .collect();
-        self.fft.process(&mut spectre);
+        self.spectre.clear();
+        self.spectre.extend(
+            echantillons
+                .iter()
+                .zip(&self.fenetre)
+                .map(|(&e, &f)| Complex::new(e * f, 0.0)),
+        );
+        self.brouillon
+            .resize(self.fft.get_inplace_scratch_len(), Complex::default());
+        self.fft
+            .process_with_scratch(&mut self.spectre, &mut self.brouillon);
+        let spectre = &self.spectre;
 
         // Chaque case du spectre couvre une petite plage de fréquences.
         let largeur_case = morceau.frequence() as f32 / TAILLE_FFT as f32;
@@ -342,7 +364,7 @@ mod tests {
     fn un_son_a_1000_hz_allume_la_bonne_barre() {
         // Un son pur à 1000 Hz, au volume maximum, pendant 1 seconde.
         let morceau = Morceau::sinus(1000.0, 44_100, 1.0);
-        let visualiseur = Visualiseur::new();
+        let mut visualiseur = Visualiseur::new();
         let hauteurs = visualiseur.hauteurs_des_barres(&morceau, 0.0);
 
         // La barre qui contient 1000 Hz est pleine…
@@ -382,5 +404,35 @@ mod tests {
             images += 1;
         }
         assert!(images <= 60, "{images} images pour retomber");
+    }
+
+    /// La forme d'onde ne garde pas le morceau en mémoire : une fois le
+    /// calcul fini, seul le lecteur le tient encore.
+    #[test]
+    fn la_forme_d_onde_ne_garde_pas_le_morceau() {
+        let morceau = Arc::new(Morceau::sinus(440.0, 8000, 2.0));
+        let mut visualiseur = Visualiseur::new();
+        visualiseur.style = Style::FormeOnde;
+        let ctx = egui::Context::default();
+        let image = |visualiseur: &mut Visualiseur, morceau: Option<&Arc<Morceau>>| {
+            let _ = ctx.run(egui::RawInput::default(), |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    visualiseur.afficher(ui, morceau, 0.0, true);
+                });
+            });
+        };
+        image(&mut visualiseur, Some(&morceau));
+        let debut = std::time::Instant::now();
+        while visualiseur.apercu.as_ref().unwrap().1.get().is_none()
+            && debut.elapsed() < std::time::Duration::from_secs(2)
+        {
+            thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(visualiseur.apercu.as_ref().unwrap().1.get().is_some());
+        // Le temps que le fil de calcul lâche le morceau.
+        thread::sleep(std::time::Duration::from_millis(20));
+        assert_eq!(Arc::strong_count(&morceau), 1);
+        image(&mut visualiseur, None);
+        assert!(visualiseur.apercu.is_none());
     }
 }

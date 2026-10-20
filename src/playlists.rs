@@ -8,8 +8,8 @@ use std::path::{Path, PathBuf};
 
 use eframe::egui;
 
-use crate::bibliotheque::{clic_simple, fichier_de_reglage};
-use crate::liste::{nom_du_fichier, MorceauGlisse};
+use crate::bibliotheque::{clic_simple, ecrire_sans_risque, fichier_de_reglage};
+use crate::liste::{nom_du_fichier, place_sous_la_souris, MorceauGlisse};
 use crate::tags::TagsConnus;
 
 /// Les caractères que Windows refuse dans un nom de fichier.
@@ -598,11 +598,9 @@ fn deposer_un_titre(ui: &egui::Ui, nom: &str, lignes: &[egui::Rect]) -> Option<(
     if !zone.expand2(egui::vec2(0.0, 6.0)).contains(souris) {
         return None;
     }
-    // On l'insère avant la première ligne dont le milieu est sous la souris.
-    let vers = lignes
-        .iter()
-        .position(|r| souris.y < r.center().y)
-        .unwrap_or(lignes.len());
+    // Comme dans la liste de lecture : avant la première ligne dont le
+    // milieu est sous la souris.
+    let vers = place_sous_la_souris(lignes, souris.y);
     let y = match lignes.get(vers) {
         Some(r) => r.top() - ui.spacing().item_spacing.y / 2.0,
         None => zone.bottom() + ui.spacing().item_spacing.y / 2.0,
@@ -640,13 +638,34 @@ fn nom_valide(texte: &str) -> Result<String, String> {
     if nom.is_empty() {
         return Err("Donne un nom à la playlist.".to_string());
     }
-    if nom.contains(INTERDITS) || nom.ends_with('.') {
+    if nom.contains(INTERDITS) || nom.contains(char::is_control) || nom.ends_with('.') {
         return Err(
             "Un nom de playlist ne peut pas contenir \\ / : * ? \" < > | ni finir par un point."
                 .to_string(),
         );
     }
+    if est_reserve_par_windows(nom) {
+        return Err(format!(
+            "« {nom} » est un nom réservé par Windows, choisis-en un autre."
+        ));
+    }
     Ok(nom.to_string())
+}
+
+/// Windows réserve ces noms à ses appareils (CON = l'écran, NUL = nulle
+/// part…), même suivis d'une extension : « nul.m3u » n'enregistrerait rien.
+fn est_reserve_par_windows(nom: &str) -> bool {
+    let base = nom
+        .split('.')
+        .next()
+        .unwrap_or(nom)
+        .trim_end()
+        .to_uppercase();
+    matches!(base.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || ((base.starts_with("COM") || base.starts_with("LPT"))
+            && base.len() == 4
+            && base.as_bytes()[3].is_ascii_digit()
+            && base.as_bytes()[3] != b'0')
 }
 
 /// Les playlists du dossier, triées par nom sans tenir compte des majuscules.
@@ -668,7 +687,7 @@ fn lister(dossier: &Path) -> Vec<Playlist> {
             Some(Playlist { nom, morceaux })
         })
         .collect();
-    toutes.sort_by_key(|p| p.nom.to_lowercase());
+    toutes.sort_by_cached_key(|p| p.nom.to_lowercase());
     toutes
 }
 
@@ -697,10 +716,32 @@ fn lignes_de_morceaux(texte: &str) -> impl Iterator<Item = &str> {
 /// Les morceaux d'une playlist, dans l'ordre. Un chemin relatif (écrit
 /// par un autre logiciel) part du dossier des playlists.
 fn lire(dossier: &Path, nom: &str) -> io::Result<Vec<PathBuf>> {
-    let texte = std::fs::read_to_string(chemin_de(dossier, nom))?;
+    let texte = texte_du_m3u(std::fs::read(chemin_de(dossier, nom))?);
     Ok(lignes_de_morceaux(&texte)
         .map(|ligne| dossier.join(ligne))
         .collect())
+}
+
+/// Le texte d'un .m3u. Nous l'écrivons en UTF-8, mais Winamp ou le Lecteur
+/// Windows Media l'écrivent souvent en « ANSI » (Windows-1252) : si ce
+/// n'est pas de l'UTF-8 valide, on le lit comme tel, accents compris.
+fn texte_du_m3u(octets: Vec<u8>) -> String {
+    String::from_utf8(octets)
+        .unwrap_or_else(|e| e.into_bytes().iter().map(|&o| windows_1252(o)).collect())
+}
+
+/// Le caractère d'un octet en Windows-1252. C'est le Latin-1 (é = 0xE9…),
+/// sauf de 0x80 à 0x9F, où Windows a placé €, les guillemets, œ, etc.
+fn windows_1252(octet: u8) -> char {
+    const DE_80_A_9F: [char; 32] = [
+        '€', '\u{81}', '‚', 'ƒ', '„', '…', '†', '‡', 'ˆ', '‰', 'Š', '‹', 'Œ', '\u{8d}', 'Ž',
+        '\u{8f}', '\u{90}', '‘', '’', '“', '”', '•', '–', '—', '˜', '™', 'š', '›', 'œ', '\u{9d}',
+        'ž', 'Ÿ',
+    ];
+    match octet {
+        0x80..=0x9f => DE_80_A_9F[usize::from(octet - 0x80)],
+        _ => char::from(octet),
+    }
 }
 
 /// Écrit (ou réécrit) une playlist.
@@ -711,7 +752,7 @@ fn ecrire(dossier: &Path, nom: &str, morceaux: &[PathBuf]) -> io::Result<()> {
         texte.push_str(&morceau.to_string_lossy());
         texte.push_str("\r\n");
     }
-    std::fs::write(chemin_de(dossier, nom), texte)
+    ecrire_sans_risque(&chemin_de(dossier, nom), texte.as_bytes())
 }
 
 /// Crée une playlist, sans écraser une playlist du même nom.
@@ -1010,6 +1051,64 @@ mod tests {
         }
         assert_eq!(playlists.noms(), vec!["b".to_string()]);
         assert!(playlists.a_supprimer.is_none());
+        std::fs::remove_dir_all(&dossier).unwrap();
+    }
+
+    #[test]
+    fn lit_un_m3u_ecrit_en_ansi_par_windows() {
+        let dossier = dossier_de_test("ansi");
+        std::fs::create_dir_all(&dossier).unwrap();
+        // « Café – 5 €.mp3 » écrit en Windows-1252 par Winamp.
+        let mut octets = b"#EXTM3U\r\nC:\\Musique\\Caf\xe9 \x96 5 \x80.mp3\r\n".to_vec();
+        octets.extend_from_slice(b"C:\\Musique\\\x9cuvre.mp3\r\n");
+        std::fs::write(chemin_de(&dossier, "Winamp"), octets).unwrap();
+        let morceaux = lire(&dossier, "Winamp").unwrap();
+        let noms: Vec<String> = morceaux
+            .iter()
+            .map(|m| m.to_string_lossy().rsplit('\\').next().unwrap().to_string())
+            .collect();
+        assert_eq!(noms, ["Café – 5 €.mp3", "œuvre.mp3"]);
+        // Et un .m3u en UTF-8 (le nôtre) se lit toujours pareil.
+        creer(&dossier, "Nôtre", &[PathBuf::from("Été.mp3")]).unwrap();
+        assert_eq!(lire(&dossier, "Nôtre").unwrap(), [dossier.join("Été.mp3")]);
+        std::fs::remove_dir_all(&dossier).unwrap();
+    }
+
+    #[test]
+    fn refuse_les_noms_reserves_par_windows() {
+        for nom in ["CON", "nul", "Aux", "prn.txt", "COM1", "lpt9", "NUL "] {
+            assert!(nom_valide(nom).is_err(), "{nom} devrait être refusé");
+        }
+        for nom in [
+            "Console",
+            "COM",
+            "COM10",
+            "LPT0",
+            "Nul part",
+            "Auxerre",
+            "Con Funk Shun",
+        ] {
+            assert!(nom_valide(nom).is_ok(), "{nom} devrait être accepté");
+        }
+        assert!(nom_valide("A\tB").is_err());
+    }
+
+    #[test]
+    fn ecrire_remplace_sans_laisser_de_copie() {
+        let dossier = dossier_de_test("sans_risque");
+        creer(&dossier, "Soirée", &[PathBuf::from("a.mp3")]).unwrap();
+        ecrire(
+            &dossier,
+            "Soirée",
+            &[PathBuf::from("b.mp3"), PathBuf::from("c.mp3")],
+        )
+        .unwrap();
+        assert_eq!(lire(&dossier, "Soirée").unwrap().len(), 2);
+        let fichiers: Vec<_> = std::fs::read_dir(&dossier)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(fichiers, ["Soirée.m3u"]);
         std::fs::remove_dir_all(&dossier).unwrap();
     }
 }
