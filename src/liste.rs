@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use eframe::egui;
 
 use crate::format_temps;
-use crate::playlists::{menu_d_un_morceau, ChoixDuMenu};
+use crate::playlists::{menu_clic_droit, ChoixDuMenu};
 use crate::tags::TagsConnus;
 
 /// Hauteur maximale de la liste à l'écran ; au-delà, on fait défiler.
@@ -418,7 +418,7 @@ impl ListeDeLecture {
                                 },
                             );
                         }
-                        match menu_d_un_morceau(&ligne, playlists) {
+                        match menu_clic_droit(&ligne, playlists, "✏ Modifier les tags…") {
                             Some(ChoixDuMenu::Playlist(nom)) => {
                                 action = Some(Action::AjouterAPlaylist {
                                     nom,
