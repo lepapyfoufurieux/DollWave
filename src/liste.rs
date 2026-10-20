@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use eframe::egui;
 
 use crate::format_temps;
+use crate::playlists::menu_ajouter_a_une_playlist;
 use crate::tags::TagsConnus;
 
 /// Hauteur maximale de la liste à l'écran ; au-delà, on fait défiler.
@@ -19,6 +20,8 @@ pub enum Action {
     Jouer(usize),
     /// Retirer le morceau numéro n de la liste (bouton ✖).
     Retirer(usize),
+    /// Ajouter ce morceau à la playlist `nom` (clic droit).
+    AjouterAPlaylist { nom: String, fichier: PathBuf },
 }
 
 #[derive(Default)]
@@ -44,8 +47,13 @@ pub struct ListeDeLecture {
     prochain: Option<usize>,
 }
 
-/// Ce qu'on transporte quand on glisse un morceau dans la liste : son numéro.
-struct MorceauGlisse(usize);
+/// Ce qu'on transporte quand on glisse un morceau de la liste : son numéro,
+/// pour le lâcher ailleurs dans la liste, et son fichier, pour le lâcher
+/// sur une playlist.
+pub struct MorceauGlisse {
+    n: usize,
+    pub fichier: PathBuf,
+}
 
 impl ListeDeLecture {
     /// Ajoute des fichiers à la fin de la liste. Renvoie le numéro du morceau
@@ -270,12 +278,18 @@ impl ListeDeLecture {
     /// Dessine la liste. Renvoie ce que l'utilisateur a demandé, s'il a cliqué.
     /// Chaque morceau est nommé d'après ses tags (« Artiste – Titre »), avec
     /// sa durée à droite.
-    pub fn afficher(&mut self, ui: &mut egui::Ui, tags: &TagsConnus) -> Option<Action> {
+    /// `playlists` : les noms des playlists, pour le menu du clic droit.
+    pub fn afficher(
+        &mut self,
+        ui: &mut egui::Ui,
+        tags: &TagsConnus,
+        playlists: &[String],
+    ) -> Option<Action> {
         let mut action = None;
         let mut a_lire_ensuite = None;
         // Les rectangles des lignes, pour savoir où lâcher un morceau glissé.
         let mut lignes: Vec<egui::Rect> = Vec::with_capacity(self.morceaux.len());
-        let glisse = egui::DragAndDrop::payload::<MorceauGlisse>(ui.ctx()).map(|m| m.0);
+        let glisse = egui::DragAndDrop::payload::<MorceauGlisse>(ui.ctx()).map(|m| m.n);
         // On ne défile que quand le morceau change : entre-temps, on peut
         // faire défiler la liste à la main sans qu'elle revienne toute seule.
         let defiler = self.courant != self.courant_affiche;
@@ -310,7 +324,19 @@ impl ListeDeLecture {
                             .selectable_label(en_cours, texte)
                             .interact(egui::Sense::drag());
                         if ligne.drag_started() {
-                            egui::DragAndDrop::set_payload(ui.ctx(), MorceauGlisse(n));
+                            egui::DragAndDrop::set_payload(
+                                ui.ctx(),
+                                MorceauGlisse {
+                                    n,
+                                    fichier: fichier.clone(),
+                                },
+                            );
+                        }
+                        if let Some(nom) = menu_ajouter_a_une_playlist(&ligne, playlists) {
+                            action = Some(Action::AjouterAPlaylist {
+                                nom,
+                                fichier: fichier.clone(),
+                            });
                         }
                         let ligne = if glisse.is_some() {
                             ligne
@@ -374,12 +400,11 @@ impl ListeDeLecture {
                 );
             }
         }
-        if ui.input(|i| i.pointer.any_released()) {
+        // Lâché hors de la liste, on ne déplace rien : il a pu être lâché
+        // sur une playlist, qui s'en occupe.
+        if dans_la_liste && ui.input(|i| i.pointer.any_released()) {
             egui::DragAndDrop::clear_payload(ui.ctx());
-            // Lâché hors de la liste : on ne déplace rien.
-            if dans_la_liste {
-                self.deplacer(de, vers);
-            }
+            self.deplacer(de, vers);
         }
     }
 }
@@ -572,7 +597,7 @@ mod tests {
             };
             let _ = ctx.run(entree, |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| {
-                    if let Some(Action::Jouer(n)) = l.afficher(ui, tags) {
+                    if let Some(Action::Jouer(n)) = l.afficher(ui, tags, &[]) {
                         jouer = Some(n);
                     }
                 });
@@ -694,7 +719,7 @@ mod tests {
         let mut action = None;
         let _ = ctx.run(entree, |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
-                action = l.afficher(ui, tags);
+                action = l.afficher(ui, tags, &[]);
             });
         });
         action
@@ -754,5 +779,29 @@ mod tests {
         let mut l = liste(4);
         glisser_de(&mut l, 15.0, egui::pos2(70.0, 290.0));
         assert_eq!(noms(&l), ["0.mp3", "1.mp3", "2.mp3", "3.mp3"]);
+    }
+
+    #[test]
+    fn un_morceau_glisse_hors_de_la_liste_emporte_son_fichier() {
+        // Hors de la liste, c'est une playlist qui pourra le recevoir : le
+        // morceau glissé doit donc transporter son fichier.
+        let mut l = liste(3);
+        let ctx = egui::Context::default();
+        let tags = TagsConnus::new(&ctx);
+        let depart = egui::pos2(70.0, 36.0); // le 2e morceau
+        image(&mut l, &ctx, &tags, 0.0, vec![]);
+        image(&mut l, &ctx, &tags, 0.02, bouton(depart, true));
+        for i in 1..=10 {
+            let p = depart + egui::vec2(0.0, 25.0 * i as f32);
+            image(
+                &mut l,
+                &ctx,
+                &tags,
+                0.02 + 0.02 * i as f64,
+                vec![egui::Event::PointerMoved(p)],
+            );
+        }
+        let fichier = egui::DragAndDrop::payload::<MorceauGlisse>(&ctx).map(|m| m.fichier.clone());
+        assert_eq!(fichier, Some(PathBuf::from("1.mp3")));
     }
 }
