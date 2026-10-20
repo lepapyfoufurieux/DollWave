@@ -386,27 +386,32 @@ impl EditeurTags {
                     );
                 }
             }
-            ui.horizontal(|ui| {
-                if ui
-                    .small_button("🖼 Changer…")
-                    .on_hover_text("Choisir une image JPEG ou PNG")
+            // Les boutons l'un sous l'autre, de la largeur de l'aperçu : côte
+            // à côte, ils dépassaient du bord de la fenêtre.
+            let bouton = |texte| {
+                egui::Button::new(texte)
+                    .small()
+                    .min_size(egui::vec2(APERCU, 0.0))
+            };
+            if ui
+                .add(bouton("🖼 Changer…"))
+                .on_hover_text("Choisir une image JPEG ou PNG")
+                .clicked()
+            {
+                self.choisir_une_image(ui.ctx());
+            }
+            // Pour plusieurs morceaux, on peut retirer leurs pochettes
+            // même sans les voir.
+            let peut_retirer =
+                a_montrer.is_some() || (self.plusieurs() && self.pochette == Pochette::Garder);
+            if peut_retirer
+                && ui
+                    .add(bouton("Retirer"))
+                    .on_hover_text("Plus de pochette dans le fichier")
                     .clicked()
-                {
-                    self.choisir_une_image(ui.ctx());
-                }
-                // Pour plusieurs morceaux, on peut retirer leurs pochettes
-                // même sans les voir.
-                let peut_retirer =
-                    a_montrer.is_some() || (self.plusieurs() && self.pochette == Pochette::Garder);
-                if peut_retirer
-                    && ui
-                        .small_button("Retirer")
-                        .on_hover_text("Plus de pochette dans le fichier")
-                        .clicked()
-                {
-                    self.pochette = Pochette::Retirer;
-                }
-            });
+            {
+                self.pochette = Pochette::Retirer;
+            }
         });
     }
 
