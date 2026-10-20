@@ -646,7 +646,7 @@ const REGLAGE_FAVORIS: &str = "favoris.txt";
 
 /// Un petit fichier de réglage, par exemple
 /// %APPDATA%\lecteur_mp3\dossier_musique.txt.
-pub fn fichier_de_reglage(nom: &str) -> Option<PathBuf> {
+pub(crate) fn fichier_de_reglage(nom: &str) -> Option<PathBuf> {
     let base = variable("APPDATA")
         .map(PathBuf::from)
         .or_else(|| variable("HOME").map(|h| PathBuf::from(h).join(".config")))?;
@@ -697,7 +697,7 @@ fn ecrire_reglage(fichier: &Path, texte: &str) -> std::io::Result<()> {
 
 /// Écrit un réglage dans son fichier. Si on n'y arrive pas, tant pis : il
 /// sera simplement oublié au prochain lancement.
-fn memoriser(nom: &str, texte: &str) {
+pub(crate) fn memoriser(nom: &str, texte: &str) {
     if let Some(fichier) = fichier_de_reglage(nom) {
         let _ = ecrire_reglage(&fichier, texte);
     }
