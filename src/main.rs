@@ -14,6 +14,7 @@ mod visualiseur;
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::sync::Arc;
 use std::time::Duration;
@@ -95,6 +96,18 @@ struct Chargement {
     chemin: PathBuf,
     essais: Essais,
     reception: Receiver<Result<Arc<Morceau>, String>>,
+    /// Mis à vrai quand on n'attend plus ce morceau (Stop, autre morceau
+    /// demandé) : la lecture du fichier s'arrête en route. Sinon, appuyer
+    /// longtemps sur → lancerait des dizaines de lectures à la fois.
+    abandonne: Arc<AtomicBool>,
+    /// On a appuyé sur Pause pendant l'ouverture : le morceau démarrera en pause.
+    en_pause: bool,
+}
+
+impl Drop for Chargement {
+    fn drop(&mut self) {
+        self.abandonne.store(true, Ordering::Relaxed);
+    }
 }
 
 /// Où en est la lecture.
@@ -212,16 +225,21 @@ impl LecteurApp {
             return;
         };
         self.liste.choisir(n);
+        let en_pause = self.chargement.as_ref().is_some_and(|c| c.en_pause);
         let (envoi, reception) = mpsc::channel();
-        let (fichier, ctx) = (chemin.clone(), self.ctx.clone());
+        let abandonne = Arc::new(AtomicBool::new(false));
+        let (fichier, ctx, drapeau) = (chemin.clone(), self.ctx.clone(), abandonne.clone());
         std::thread::spawn(move || {
-            let _ = envoi.send(Morceau::charger(&fichier).map_err(|e| e.to_string()));
+            let resultat = Morceau::charger(&fichier, &drapeau).map_err(|e| e.to_string());
+            let _ = envoi.send(resultat);
             ctx.request_repaint();
         });
         self.chargement = Some(Chargement {
             chemin,
             essais,
             reception,
+            abandonne,
+            en_pause,
         });
     }
 
@@ -236,17 +254,22 @@ impl LecteurApp {
             Err(TryRecvError::Empty) => return,
             Err(TryRecvError::Disconnected) => Err("lecture interrompue".to_string()),
         };
-        let Some(Chargement {
-            chemin, mut essais, ..
-        }) = self.chargement.take()
-        else {
+        let Some(chargement) = self.chargement.take() else {
             return;
         };
+        let chemin = chargement.chemin.clone();
+        let en_pause = chargement.en_pause;
+        let mut essais = chargement.essais.clone();
         match resultat {
             Ok(morceau) => {
                 self.morceau = Some(morceau);
                 match self.demarrer() {
-                    Ok(()) => self.message = essais.message_si_lu(),
+                    Ok(()) => {
+                        if en_pause {
+                            self.pause();
+                        }
+                        self.message = essais.message_si_lu();
+                    }
                     Err(e) => {
                         self.oublier_morceau();
                         self.message = format!("Impossible de lancer la lecture : {e}");
@@ -254,7 +277,11 @@ impl LecteurApp {
                 }
             }
             Err(e) => match essais.echec(&mut self.liste, &chemin, &e) {
-                Some(suivant) => self.essayer(suivant, essais),
+                Some(suivant) => {
+                    // On garde la pause demandée pour le morceau suivant.
+                    self.chargement = Some(chargement);
+                    self.essayer(suivant, essais);
+                }
                 None => {
                     self.oublier_morceau();
                     self.message = essais.message_si_rien_de_lu();
@@ -324,7 +351,8 @@ impl LecteurApp {
 
     fn lecture(&mut self) {
         // Le morceau est en train de s'ouvrir : il se lancera tout seul.
-        if self.chargement.is_some() {
+        if let Some(chargement) = &mut self.chargement {
+            chargement.en_pause = false;
             return;
         }
         // Le morceau est encore en cours : on reprend là où on en était.
@@ -343,7 +371,10 @@ impl LecteurApp {
         }
     }
 
-    fn pause(&self) {
+    fn pause(&mut self) {
+        if let Some(chargement) = &mut self.chargement {
+            chargement.en_pause = true; // il démarrera en pause
+        }
         if let Some(telecommande) = &self.telecommande {
             telecommande.mettre_en_pause(true);
         }
@@ -383,6 +414,7 @@ impl LecteurApp {
     fn executer(&mut self, commande: Commande) {
         match commande {
             Commande::LecturePause => match self.platine_active() {
+                None if self.chargement.as_ref().is_some_and(|c| !c.en_pause) => self.pause(),
                 Some(t) if !t.en_pause() => self.pause(),
                 _ if !self.liste.est_vide() => self.lecture(),
                 _ => {}
@@ -511,6 +543,7 @@ impl LecteurApp {
 /// Les essais pour trouver un morceau lisible, à partir de celui demandé :
 /// chaque morceau est essayé une fois au plus (sinon une liste où rien
 /// n'est lisible tournerait en rond avec la répétition).
+#[derive(Clone)]
 struct Essais {
     restants: usize,
     /// Le dernier fichier sauté, et pourquoi.
@@ -606,7 +639,12 @@ impl LecteurApp {
                         self.pochette_en_cours = None;
                     }
                     Err(TryRecvError::Empty) => {}
-                    Err(TryRecvError::Disconnected) => self.pochette_en_cours = None,
+                    Err(TryRecvError::Disconnected) => {
+                        // La lecture de la pochette a échoué : pas de pochette,
+                        // sans réessayer à chaque image.
+                        self.pochette = Some((chemin.to_path_buf(), None));
+                        self.pochette_en_cours = None;
+                    }
                 }
                 return;
             }
@@ -722,6 +760,8 @@ impl eframe::App for LecteurApp {
                 _ => None,
             };
             self.charger_pochette(ui.ctx(), en_cours.as_deref());
+            // Pendant l'ouverture, on montre déjà le nom du morceau.
+            let en_cours = en_cours.or_else(|| self.chargement.as_ref().map(|c| c.chemin.clone()));
             let nom = match &en_cours {
                 Some(chemin) => self.tags.libelle(chemin),
                 None => "Aucun fichier".to_string(),
@@ -814,9 +854,9 @@ impl eframe::App for LecteurApp {
                     // l'arrêt, on s'arrête simplement.
                     let jouait = matches!(self.etat(), Etat::Lecture | Etat::Chargement);
                     if self.liste.retirer(n) {
-                        match self.liste.apres_retrait(n) {
-                            Some(suivant) if jouait => self.jouer(suivant),
-                            _ => self.oublier_morceau(),
+                        match jouait.then(|| self.liste.apres_retrait(n)).flatten() {
+                            Some(suivant) => self.jouer(suivant),
+                            None => self.oublier_morceau(),
                         }
                     }
                 }
@@ -990,9 +1030,20 @@ mod tests {
                 .message
                 .starts_with("Impossible de lire « introuvable.mp3 »"));
         }
-        // Stop pendant l'ouverture : rien ne se lance ensuite.
+        // Pause pendant l'ouverture : retenue pour le démarrage (et Lecture l'annule).
         app.jouer(1);
+        app.pause();
+        assert!(app.chargement.as_ref().unwrap().en_pause);
+        app.lecture();
+        assert!(!app.chargement.as_ref().unwrap().en_pause);
+        // Un autre morceau demandé : la lecture du précédent est abandonnée.
+        let abandonne = app.chargement.as_ref().unwrap().abandonne.clone();
+        app.jouer(1);
+        assert!(abandonne.load(Ordering::Relaxed));
+        // Stop pendant l'ouverture : rien ne se lance ensuite.
+        let abandonne = app.chargement.as_ref().unwrap().abandonne.clone();
         app.stop();
+        assert!(abandonne.load(Ordering::Relaxed));
         std::thread::sleep(Duration::from_millis(100));
         app.suivre_le_chargement();
         assert!(app.etat() == Etat::Arrete);

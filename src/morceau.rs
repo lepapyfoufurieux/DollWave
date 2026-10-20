@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::ops::Range;
 use std::path::Path;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, Weak};
 use std::thread;
 use std::time::Duration;
@@ -96,8 +96,16 @@ impl Reveil {
 impl Morceau {
     /// Prépare un fichier MP3 : lit ses paquets (sans les décoder) et lance le
     /// fil qui décode les blocs à l'avance.
-    pub fn charger(chemin: &Path) -> Result<Arc<Self>, Box<dyn std::error::Error>> {
-        let morceau = Arc::new(Self::depuis(Box::new(File::open(chemin)?))?);
+    /// `abandonne` permet d'arrêter en route (on a demandé un autre morceau
+    /// entre-temps) : inutile de lire tout un long fichier pour rien.
+    pub fn charger(
+        chemin: &Path,
+        abandonne: &AtomicBool,
+    ) -> Result<Arc<Self>, Box<dyn std::error::Error>> {
+        let source = Box::new(File::open(chemin)?);
+        let morceau = Arc::new(Self::depuis_tant_que(source, || {
+            !abandonne.load(Ordering::Relaxed)
+        })?);
         morceau.lancer_la_preparation();
         Ok(morceau)
     }
@@ -110,7 +118,17 @@ impl Morceau {
     }
 
     /// Lit tous les paquets d'un MP3 et les regroupe en blocs.
+    #[cfg(test)]
     fn depuis(source: Box<dyn MediaSource>) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::depuis_tant_que(source, || true)
+    }
+
+    /// Comme `depuis`, mais s'arrête (avec une erreur) dès que `continuer`
+    /// renvoie faux.
+    fn depuis_tant_que(
+        source: Box<dyn MediaSource>,
+        continuer: impl Fn() -> bool,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let flux = MediaSourceStream::new(source, Default::default());
         let options = FormatOptions {
             enable_gapless: true,
@@ -130,6 +148,9 @@ impl Morceau {
 
         let mut paquets = Vec::new();
         loop {
+            if !continuer() {
+                return Err("lecture abandonnée".into());
+            }
             match lecteur.next_packet() {
                 Ok(paquet) => paquets.push(paquet),
                 // Fin du fichier (ou fichier abîmé à la fin) : on garde ce qu'on a.
@@ -620,5 +641,12 @@ mod tests {
         );
         drop(morceau);
         assert_eq!(Morceau::apercu_tant_qu_utile(&suivi, 100), None);
+    }
+
+    #[test]
+    fn une_lecture_abandonnee_s_arrete() {
+        let source = || Box::new(Cursor::new(GLISSANDO.to_vec()));
+        assert!(Morceau::depuis_tant_que(source(), || false).is_err());
+        assert!(Morceau::depuis_tant_que(source(), || true).is_ok());
     }
 }
