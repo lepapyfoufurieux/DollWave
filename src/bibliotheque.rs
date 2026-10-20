@@ -57,10 +57,13 @@ impl Dossier {
                 }
             }
         }
-        dossier.sous_dossiers.sort_by_key(|d| d.nom.to_lowercase());
+        // « cached » : chaque nom n'est mis en minuscules qu'une fois.
+        dossier
+            .sous_dossiers
+            .sort_by_cached_key(|d| d.nom.to_lowercase());
         dossier
             .morceaux
-            .sort_by_key(|m| nom_du_fichier(m).to_lowercase());
+            .sort_by_cached_key(|m| nom_du_fichier(m).to_lowercase());
         dossier.total =
             dossier.morceaux.len() + dossier.sous_dossiers.iter().map(|d| d.total).sum::<usize>();
         dossier
@@ -733,7 +736,22 @@ fn ecrire_reglage(fichier: &Path, texte: &str) -> std::io::Result<()> {
     if let Some(parent) = fichier.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(fichier, texte)
+    ecrire_sans_risque(fichier, texte.as_bytes())
+}
+
+/// Écrit un fichier sans risquer de le perdre : on écrit d'abord une copie
+/// à côté (« favoris.txt.tmp »), puis elle prend la place de l'ancien. Si
+/// l'appli ou le PC s'arrête en plein milieu, l'ancien fichier reste entier.
+pub(crate) fn ecrire_sans_risque(fichier: &Path, contenu: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut nom = fichier.as_os_str().to_owned();
+    nom.push(".tmp");
+    let copie = PathBuf::from(nom);
+    let mut f = std::fs::File::create(&copie)?;
+    f.write_all(contenu)?;
+    f.sync_all()?;
+    drop(f);
+    std::fs::rename(&copie, fichier)
 }
 
 /// Écrit un réglage dans son fichier. Si on n'y arrive pas, tant pis : il
