@@ -4,7 +4,7 @@
 //! - l'oscilloscope (la vibration du son, en direct) ;
 //! - la forme d'onde (le dessin des 30 secondes autour de l'endroit écouté).
 
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, OnceLock, Weak};
 use std::thread;
 
 use eframe::egui;
@@ -91,8 +91,9 @@ pub struct Visualiseur {
     /// Hauteur actuelle de chaque barre (entre 0 et 1).
     barres: [f32; NB_BARRES],
     /// Le résumé de la forme d'onde, calculé en arrière-plan une fois par
-    /// morceau (vide tant que le calcul n'est pas fini).
-    apercu: Option<(Arc<Morceau>, Arc<OnceLock<Apercu>>)>,
+    /// morceau (vide tant que le calcul n'est pas fini). On ne garde pas le
+    /// morceau lui-même (`Weak`) : une fois fini, il peut libérer sa mémoire.
+    apercu: Option<(Weak<Morceau>, Arc<OnceLock<Apercu>>)>,
 }
 
 impl Visualiseur {
@@ -139,6 +140,9 @@ impl Visualiseur {
         peintre.rect_filled(zone, 4.0, ui.visuals().extreme_bg_color);
         let couleur = ui.visuals().selection.bg_fill;
         let dt = ui.input(|i| i.stable_dt);
+        if morceau.is_none() {
+            self.apercu = None; // plus de morceau (arrêt, liste vidée)
+        }
 
         match self.style {
             Style::Barres => {
@@ -172,13 +176,19 @@ impl Visualiseur {
     /// Le résumé de la forme d'onde du morceau. La première fois, on lance son
     /// calcul en arrière-plan (il faut décoder tout le morceau) : en attendant,
     /// il n'y a rien à dessiner.
+    /// Si on change de morceau avant la fin, le calcul de l'ancien s'arrête.
     fn apercu_de(&mut self, morceau: &Arc<Morceau>) -> Option<&[(f32, f32)]> {
-        let deja_lance = matches!(&self.apercu, Some((m, _)) if Arc::ptr_eq(m, morceau));
+        let deja_lance =
+            matches!(&self.apercu, Some((m, _)) if std::ptr::eq(m.as_ptr(), Arc::as_ptr(morceau)));
         if !deja_lance {
             let resultat = Arc::new(OnceLock::new());
-            let (m, r) = (morceau.clone(), resultat.clone());
-            thread::spawn(move || r.set(m.apercu(TRANCHES_PAR_SECONDE)));
-            self.apercu = Some((morceau.clone(), resultat));
+            let (m, r) = (Arc::downgrade(morceau), resultat.clone());
+            thread::spawn(move || {
+                if let Some(apercu) = Morceau::apercu_tant_qu_utile(&m, TRANCHES_PAR_SECONDE) {
+                    let _ = r.set(apercu);
+                }
+            });
+            self.apercu = Some((Arc::downgrade(morceau), resultat));
         }
         self.apercu.as_ref().unwrap().1.get().map(Vec::as_slice)
     }
@@ -382,5 +392,35 @@ mod tests {
             images += 1;
         }
         assert!(images <= 60, "{images} images pour retomber");
+    }
+
+    /// La forme d'onde ne garde pas le morceau en mémoire : une fois le
+    /// calcul fini, seul le lecteur le tient encore.
+    #[test]
+    fn la_forme_d_onde_ne_garde_pas_le_morceau() {
+        let morceau = Arc::new(Morceau::sinus(440.0, 8000, 2.0));
+        let mut visualiseur = Visualiseur::new();
+        visualiseur.style = Style::FormeOnde;
+        let ctx = egui::Context::default();
+        let image = |visualiseur: &mut Visualiseur, morceau: Option<&Arc<Morceau>>| {
+            let _ = ctx.run(egui::RawInput::default(), |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    visualiseur.afficher(ui, morceau, 0.0, true);
+                });
+            });
+        };
+        image(&mut visualiseur, Some(&morceau));
+        let debut = std::time::Instant::now();
+        while visualiseur.apercu.as_ref().unwrap().1.get().is_none()
+            && debut.elapsed() < std::time::Duration::from_secs(2)
+        {
+            thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(visualiseur.apercu.as_ref().unwrap().1.get().is_some());
+        // Le temps que le fil de calcul lâche le morceau.
+        thread::sleep(std::time::Duration::from_millis(20));
+        assert_eq!(Arc::strong_count(&morceau), 1);
+        image(&mut visualiseur, None);
+        assert!(visualiseur.apercu.is_none());
     }
 }

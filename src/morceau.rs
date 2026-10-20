@@ -342,24 +342,51 @@ impl Morceau {
     /// seconde : pour chaque tranche, l'échantillon le plus bas et le plus haut
     /// (entre -1 et 1). Décode tout le morceau, mais un bloc à la fois, sans
     /// garder les blocs : à lancer en arrière-plan.
+    #[cfg(test)]
     pub fn apercu(&self, par_seconde: u32) -> Vec<(f32, f32)> {
-        let par_tranche = (self.frequence / par_seconde).max(1) as usize * self.canaux;
-        let mut apercu = Vec::new();
-        let mut tranche = (0i16, 0i16, 0usize); // plus bas, plus haut, nombre d'échantillons
-        for n in 0..self.debuts.len() {
-            for e in self.decoder(n) {
-                tranche = (tranche.0.min(e), tranche.1.max(e), tranche.2 + 1);
-                if tranche.2 == par_tranche {
-                    apercu.push((tranche.0 as f32 / 32768.0, tranche.1 as f32 / 32768.0));
-                    tranche = (0, 0, 0);
-                }
+        resumer(self.par_tranche(par_seconde), self.debuts.len(), |n| {
+            Some(self.decoder(n))
+        })
+        .unwrap_or_default()
+    }
+
+    /// Comme `apercu`, mais s'arrête (et ne renvoie rien) dès que le morceau
+    /// ne sert plus : on a changé de morceau, inutile de finir le calcul.
+    pub fn apercu_tant_qu_utile(suivi: &Weak<Self>, par_seconde: u32) -> Option<Vec<(f32, f32)>> {
+        let (par_tranche, nb_blocs) = {
+            let morceau = suivi.upgrade()?;
+            (morceau.par_tranche(par_seconde), morceau.debuts.len())
+        };
+        resumer(par_tranche, nb_blocs, |n| Some(suivi.upgrade()?.decoder(n)))
+    }
+
+    fn par_tranche(&self, par_seconde: u32) -> usize {
+        (self.frequence / par_seconde).max(1) as usize * self.canaux
+    }
+}
+
+/// Le résumé (plus bas, plus haut) de chaque tranche de `par_tranche`
+/// échantillons, bloc après bloc. Rien si `bloc` ne donne pas un bloc.
+fn resumer(
+    par_tranche: usize,
+    nb_blocs: usize,
+    mut bloc: impl FnMut(usize) -> Option<Vec<i16>>,
+) -> Option<Vec<(f32, f32)>> {
+    let mut apercu = Vec::new();
+    let mut tranche = (0i16, 0i16, 0usize); // plus bas, plus haut, nombre d'échantillons
+    for n in 0..nb_blocs {
+        for e in bloc(n)? {
+            tranche = (tranche.0.min(e), tranche.1.max(e), tranche.2 + 1);
+            if tranche.2 == par_tranche {
+                apercu.push((tranche.0 as f32 / 32768.0, tranche.1 as f32 / 32768.0));
+                tranche = (0, 0, 0);
             }
         }
-        if tranche.2 > 0 {
-            apercu.push((tranche.0 as f32 / 32768.0, tranche.1 as f32 / 32768.0));
-        }
-        apercu
     }
+    if tranche.2 > 0 {
+        apercu.push((tranche.0 as f32 / 32768.0, tranche.1 as f32 / 32768.0));
+    }
+    Some(apercu)
 }
 
 /// Décode les paquets d'un bloc, en commençant un peu avant pour « amorcer »
@@ -579,5 +606,19 @@ mod tests {
         morceau.suivre(40);
         assert!(attendre(40 + A_PREPARER), "réveillé par la platine");
         assert!(pret(40 - A_PREPARER));
+    }
+
+    /// On a changé de morceau : le calcul de la forme d'onde de l'ancien
+    /// s'arrête au lieu de décoder tout le fichier pour rien.
+    #[test]
+    fn l_apercu_s_arrete_si_le_morceau_ne_sert_plus() {
+        let morceau = Arc::new(Morceau::sinus(440.0, 8000, 5.0));
+        let suivi = Arc::downgrade(&morceau);
+        assert_eq!(
+            Morceau::apercu_tant_qu_utile(&suivi, 100),
+            Some(morceau.apercu(100))
+        );
+        drop(morceau);
+        assert_eq!(Morceau::apercu_tant_qu_utile(&suivi, 100), None);
     }
 }
