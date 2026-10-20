@@ -19,6 +19,22 @@ Pour une version optimisée, sans fenêtre de console :
 cargo run --release
 ```
 
+## Créer le .exe
+
+Pour obtenir un `lecteur_mp3.exe` autonome (qui se lance sans Rust) :
+
+```
+cargo build --release
+```
+
+Le fichier se trouve ensuite dans `target\release\lecteur_mp3.exe`. On peut le
+copier où on veut et le partager : la police est intégrée dedans, et les
+réglages sont rangés dans `%APPDATA%\lecteur_mp3`.
+
+Le .exe est aussi compilé automatiquement par GitHub : pour chaque version
+(étiquette `v0.1.0`, `v0.2.0`…), il est téléchargeable sur la page
+« Releases » du dépôt.
+
 ## Avancement
 
 - [x] Étape 1 : ouvrir et lire un MP3 (Lecture / Pause / Stop)

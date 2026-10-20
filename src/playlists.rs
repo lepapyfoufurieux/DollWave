@@ -850,43 +850,41 @@ mod tests {
         assert_eq!(playlists.noms(), vec!["C".to_string()]);
     }
 
+    /// Un chemin absolu sur toutes les machines : « /m/1.mp3 » n'en est
+    /// pas un pour Windows, qui le rattache au disque C:.
+    fn absolu(chemin: &str) -> PathBuf {
+        if cfg!(windows) {
+            PathBuf::from(format!("C:{chemin}"))
+        } else {
+            PathBuf::from(chemin)
+        }
+    }
+
     #[test]
     fn ajoute_a_la_fin() {
         let dossier = dossier_de_test("ajoute");
-        creer(&dossier, "p", &[PathBuf::from("/m/1.mp3")]).unwrap();
+        creer(&dossier, "p", &[absolu("/m/1.mp3")]).unwrap();
         let mut playlists = Playlists::dans(Some(dossier.clone()));
-        playlists.ajouter_a("p", &[PathBuf::from("/m/2.mp3"), PathBuf::from("/m/3.mp3")]);
+        playlists.ajouter_a("p", &[absolu("/m/2.mp3"), absolu("/m/3.mp3")]);
         assert_eq!(
             lire(&dossier, "p").unwrap(),
-            vec![
-                PathBuf::from("/m/1.mp3"),
-                PathBuf::from("/m/2.mp3"),
-                PathBuf::from("/m/3.mp3")
-            ]
+            vec![absolu("/m/1.mp3"), absolu("/m/2.mp3"), absolu("/m/3.mp3")]
         );
         assert_eq!(playlists.toutes[0].morceaux.len(), 3);
         // Un morceau déjà présent n'est pas ajouté une deuxième fois, même
         // glissé deux fois de suite.
         playlists.ajouter_a(
             "p",
-            &[
-                PathBuf::from("/m/2.mp3"),
-                PathBuf::from("/m/4.mp3"),
-                PathBuf::from("/m/4.mp3"),
-            ],
+            &[absolu("/m/2.mp3"), absolu("/m/4.mp3"), absolu("/m/4.mp3")],
         );
         assert_eq!(playlists.toutes[0].morceaux.len(), 4);
-        playlists.ajouter_a("p", &[PathBuf::from("/M/1.MP3")]);
+        playlists.ajouter_a("p", &[absolu("/M/1.MP3")]);
         assert_eq!(playlists.toutes[0].morceaux.len(), 4);
         // Retirer un morceau.
         playlists.retirer_de("p", 0);
         assert_eq!(
             lire(&dossier, "p").unwrap(),
-            vec![
-                PathBuf::from("/m/2.mp3"),
-                PathBuf::from("/m/3.mp3"),
-                PathBuf::from("/m/4.mp3")
-            ]
+            vec![absolu("/m/2.mp3"), absolu("/m/3.mp3"), absolu("/m/4.mp3")]
         );
     }
 
@@ -914,15 +912,15 @@ mod tests {
         std::fs::create_dir_all(&dossier).unwrap();
         std::fs::write(
             dossier.join("vlc.m3u"),
-            "\u{feff}#EXTM3U\n#EXTINF:123,Artiste - Titre\nsous/dossier/1.mp3\n\n/absolu/2.mp3\n",
+            format!(
+                "\u{feff}#EXTM3U\n#EXTINF:123,Artiste - Titre\nsous/dossier/1.mp3\n\n{}\n",
+                absolu("/absolu/2.mp3").display()
+            ),
         )
         .unwrap();
         assert_eq!(
             lire(&dossier, "vlc").unwrap(),
-            vec![
-                dossier.join("sous/dossier/1.mp3"),
-                PathBuf::from("/absolu/2.mp3")
-            ]
+            vec![dossier.join("sous/dossier/1.mp3"), absolu("/absolu/2.mp3")]
         );
     }
 
