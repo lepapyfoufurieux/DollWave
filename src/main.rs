@@ -149,16 +149,26 @@ impl LecteurApp {
     }
 
     /// Lance le morceau numéro n de la liste, depuis le début.
+    /// Si ce fichier est illisible (abîmé, déplacé, supprimé), on passe au
+    /// suivant au lieu d'arrêter toute la liste.
     fn jouer(&mut self, n: usize) {
-        let Some(chemin) = self.liste.fichier(n).map(Path::to_path_buf) else {
+        if self.liste.fichier(n).is_none() {
             return;
-        };
-        self.liste.choisir(n);
-        match self.charger(&chemin) {
-            Ok(()) => self.message.clear(),
-            Err(e) => {
+        }
+        match ouvrir_un_lisible(&mut self.liste, n, Morceau::charger) {
+            Ok((morceau, saute)) => {
+                self.morceau = Some(morceau);
+                match self.demarrer() {
+                    Ok(()) => self.message = saute,
+                    Err(e) => {
+                        self.oublier_morceau();
+                        self.message = format!("Impossible de lire ce fichier : {e}");
+                    }
+                }
+            }
+            Err(message) => {
                 self.oublier_morceau();
-                self.message = format!("Impossible de lire ce fichier : {e}");
+                self.message = message;
             }
         }
     }
@@ -180,13 +190,6 @@ impl LecteurApp {
     fn oublier_morceau(&mut self) {
         self.stop();
         self.morceau = None;
-    }
-
-    /// Prépare le fichier (sans tout décoder), puis lance la lecture depuis le début.
-    fn charger(&mut self, chemin: &Path) -> Result<(), Box<dyn std::error::Error>> {
-        let morceau = Morceau::charger(chemin)?;
-        self.morceau = Some(morceau);
-        self.demarrer()
     }
 
     /// Pose le morceau chargé sur une nouvelle platine et la lance.
@@ -404,6 +407,43 @@ impl LecteurApp {
             }
         });
     }
+}
+
+/// Choisit le morceau numéro `n` de la liste et l'ouvre avec `ouvrir`. S'il
+/// est illisible, on essaie les suivants, chacun une fois au plus (sinon une
+/// liste où rien n'est lisible tournerait en rond avec la répétition).
+/// Renvoie le morceau ouvert, avec le message du dernier fichier sauté (vide
+/// si aucun) ; ou, si rien n'a pu être ouvert, le message à afficher.
+fn ouvrir_un_lisible<T>(
+    liste: &mut ListeDeLecture,
+    n: usize,
+    mut ouvrir: impl FnMut(&Path) -> Result<T, Box<dyn std::error::Error>>,
+) -> Result<(T, String), String> {
+    let mut n = n;
+    let mut erreur = None;
+    for _ in 0..liste.morceaux().len() {
+        let Some(chemin) = liste.fichier(n).map(Path::to_path_buf) else {
+            break;
+        };
+        liste.choisir(n);
+        match ouvrir(&chemin) {
+            Ok(morceau) => {
+                let saute = erreur.map_or(String::new(), |e| format!("{e}, morceau suivant."));
+                return Ok((morceau, saute));
+            }
+            Err(e) => {
+                erreur = Some(format!(
+                    "Impossible de lire « {} » ({e})",
+                    liste::nom_du_fichier(&chemin)
+                ));
+            }
+        }
+        match liste.suivant() {
+            Some(suivant) => n = suivant,
+            None => break,
+        }
+    }
+    Err(erreur.map_or(String::new(), |e| format!("{e}.")))
 }
 
 /// Côté de la pochette affichée sous le visualiseur, en points : la plus
@@ -671,5 +711,84 @@ impl eframe::App for LecteurApp {
         } else {
             ctx.request_repaint_after(Duration::from_millis(200));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Une liste de 4 morceaux ; ouvrir réussit seulement pour ceux de `lisibles`.
+    fn essayer(
+        depart: usize,
+        lisibles: &[usize],
+        repetition: bool,
+    ) -> (Result<(usize, String), String>, Vec<usize>) {
+        let mut liste = ListeDeLecture::default();
+        liste.ajouter((0..4).map(|i| PathBuf::from(format!("{i}.mp3"))).collect());
+        liste.changer_repetition(repetition);
+        let mut essayes = Vec::new();
+        let resultat = ouvrir_un_lisible(&mut liste, depart, |chemin| {
+            let i: usize = chemin
+                .file_stem()
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .parse()
+                .unwrap();
+            essayes.push(i);
+            if lisibles.contains(&i) {
+                Ok(i)
+            } else {
+                Err("fichier introuvable".into())
+            }
+        });
+        if let Ok((i, _)) = &resultat {
+            assert_eq!(liste.courant(), Some(*i));
+        }
+        (resultat, essayes)
+    }
+
+    #[test]
+    fn un_fichier_illisible_passe_au_suivant() {
+        let (resultat, essayes) = essayer(1, &[0, 3], false);
+        let (ouvert, message) = resultat.unwrap();
+        assert_eq!(ouvert, 3);
+        assert_eq!(essayes, [1, 2, 3]);
+        assert_eq!(
+            message,
+            "Impossible de lire « 2.mp3 » (fichier introuvable), morceau suivant."
+        );
+    }
+
+    #[test]
+    fn un_fichier_lisible_ne_laisse_pas_de_message() {
+        let (resultat, essayes) = essayer(2, &[2], false);
+        assert_eq!(resultat.unwrap(), (2, String::new()));
+        assert_eq!(essayes, [2]);
+    }
+
+    #[test]
+    fn au_bout_de_la_liste_on_s_arrete() {
+        let (resultat, essayes) = essayer(2, &[0], false);
+        assert_eq!(
+            resultat.unwrap_err(),
+            "Impossible de lire « 3.mp3 » (fichier introuvable)."
+        );
+        assert_eq!(essayes, [2, 3]);
+    }
+
+    #[test]
+    fn avec_la_repetition_on_repart_du_debut() {
+        let (resultat, essayes) = essayer(2, &[0], true);
+        assert_eq!(resultat.unwrap().0, 0);
+        assert_eq!(essayes, [2, 3, 0]);
+    }
+
+    #[test]
+    fn rien_de_lisible_avec_la_repetition_ne_tourne_pas_en_rond() {
+        let (resultat, essayes) = essayer(1, &[], true);
+        assert!(resultat.is_err());
+        assert_eq!(essayes, [1, 2, 3, 0]);
     }
 }
