@@ -1,30 +1,33 @@
 // En version finale (release), on cache la fenêtre de console noire sous Windows.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod bibliotheque;
 mod liste;
 mod platine;
 mod visualiseur;
 
-use std::path::Path;
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
 use eframe::egui;
 use rodio::{OutputStream, OutputStreamHandle, Sink};
 
+use bibliotheque::Bibliotheque;
 use liste::{Action, ListeDeLecture};
 use platine::{Morceau, Telecommande};
 use visualiseur::Visualiseur;
 
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_inner_size([520.0, 680.0]),
+        viewport: egui::ViewportBuilder::default().with_inner_size([920.0, 680.0]),
         ..Default::default()
     };
     eframe::run_native(
         "Lecteur MP3",
         options,
-        Box::new(|_cc| Ok(Box::new(LecteurApp::new()))),
+        Box::new(|cc| Ok(Box::new(LecteurApp::new(&cc.egui_ctx)))),
     )
 }
 
@@ -39,6 +42,8 @@ struct LecteurApp {
     sink: Option<Sink>,
     // La télécommande de la platine en cours (pause, position, scratch).
     telecommande: Option<Telecommande>,
+    // Tous les MP3 du dossier de musique, à ajouter d'un clic.
+    bibliotheque: Bibliotheque,
     // Les morceaux à jouer, et lequel est en cours.
     liste: ListeDeLecture,
     // Le son du morceau en cours, décodé en mémoire.
@@ -58,7 +63,7 @@ struct LecteurApp {
 }
 
 impl LecteurApp {
-    fn new() -> Self {
+    fn new(ctx: &egui::Context) -> Self {
         let (sortie, sortie_handle, message) = match OutputStream::try_default() {
             Ok((sortie, handle)) => (Some(sortie), Some(handle), String::new()),
             Err(e) => (None, None, format!("Aucune sortie audio disponible : {e}")),
@@ -68,6 +73,7 @@ impl LecteurApp {
             sortie_handle,
             sink: None,
             telecommande: None,
+            bibliotheque: Bibliotheque::new(ctx),
             liste: ListeDeLecture::default(),
             morceau: None,
             position_glissee: None,
@@ -79,7 +85,8 @@ impl LecteurApp {
     }
 
     /// Ouvre la fenêtre Windows de choix de fichiers (on peut en prendre
-    /// plusieurs) et les ajoute à la liste.
+    /// plusieurs) et les ajoute à la liste. Pratique pour un MP3 rangé en
+    /// dehors du dossier de musique.
     fn ajouter_fichiers(&mut self) {
         let Some(fichiers) = rfd::FileDialog::new()
             .add_filter("Fichiers MP3", &["mp3"])
@@ -87,19 +94,13 @@ impl LecteurApp {
         else {
             return; // l'utilisateur a annulé
         };
-        let a_lancer = self.liste.ajouter(fichiers);
-        self.jouer_si_rien_en_cours(a_lancer);
+        self.ajouter(fichiers);
     }
 
-    /// Ouvre la fenêtre Windows de choix de dossier et ajoute tous ses MP3.
-    fn ajouter_dossier(&mut self) {
-        let Some(dossier) = rfd::FileDialog::new().pick_folder() else {
-            return; // l'utilisateur a annulé
-        };
-        match self.liste.ajouter_dossier(&dossier) {
-            Some(a_lancer) => self.jouer_si_rien_en_cours(Some(a_lancer)),
-            None => self.message = "Aucun fichier MP3 dans ce dossier.".to_string(),
-        }
+    /// Ajoute des morceaux à la fin de la liste, et lance la lecture si rien ne joue.
+    fn ajouter(&mut self, fichiers: Vec<PathBuf>) {
+        let a_lancer = self.liste.ajouter(fichiers);
+        self.jouer_si_rien_en_cours(a_lancer);
     }
 
     /// Après un ajout : si rien ne joue, on lance le morceau choisi par la
@@ -335,18 +336,23 @@ fn format_temps(d: Duration) -> String {
 impl eframe::App for LecteurApp {
     // Appelée à chaque image : on (re)dessine toute l'interface.
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // À gauche, la bibliothèque. Un clic sur un morceau (ou sur « ➕ tout »)
+        // l'ajoute à la liste de lecture.
+        let a_ajouter = egui::SidePanel::left("bibliotheque")
+            .resizable(true)
+            .default_width(340.0)
+            .width_range(220.0..=600.0)
+            .show(ctx, |ui| {
+                let dans_la_liste: HashSet<&Path> =
+                    self.liste.morceaux().iter().map(PathBuf::as_path).collect();
+                self.bibliotheque.afficher(ui, &dans_la_liste)
+            })
+            .inner;
+        if !a_ajouter.is_empty() {
+            self.ajouter(a_ajouter);
+        }
+
         egui::CentralPanel::default().show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                if ui.button("📂 Ajouter des MP3…").clicked() {
-                    self.ajouter_fichiers();
-                }
-                if ui.button("📁 Ajouter un dossier…").clicked() {
-                    self.ajouter_dossier();
-                }
-            });
-
-            ui.add_space(8.0);
-
             let nom = match (&self.morceau, self.liste.courant()) {
                 (Some(_), Some(n)) => self
                     .liste
@@ -401,6 +407,13 @@ impl eframe::App for LecteurApp {
             ui.add_space(8.0);
             ui.horizontal(|ui| {
                 ui.strong("Liste de lecture");
+                if ui
+                    .small_button("📂 Autre fichier…")
+                    .on_hover_text("Ajouter un MP3 rangé en dehors de la bibliothèque")
+                    .clicked()
+                {
+                    self.ajouter_fichiers();
+                }
                 if !self.liste.est_vide() && ui.small_button("Vider").clicked() {
                     self.liste.vider();
                     self.oublier_morceau();
