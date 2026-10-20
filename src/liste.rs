@@ -109,6 +109,20 @@ impl ListeDeLecture {
         }
     }
 
+    /// Après avoir retiré le morceau en cours, qui était à la place `n` :
+    /// le morceau à jouer à sa place. En aléatoire, un autre au hasard ;
+    /// sinon celui qui a pris sa place, ou le premier avec la répétition.
+    pub fn apres_retrait(&mut self, n: usize) -> Option<usize> {
+        if self.aleatoire {
+            return self.suivant();
+        }
+        if n < self.morceaux.len() {
+            Some(n)
+        } else {
+            (self.repetition && !self.morceaux.is_empty()).then_some(0)
+        }
+    }
+
     pub fn vider(&mut self) {
         self.morceaux.clear();
         self.deja_joue.clear();
@@ -593,6 +607,29 @@ mod tests {
         assert_eq!(l.courant(), Some(1));
         assert!(l.retirer(1));
         assert_eq!(l.courant(), None);
+    }
+
+    #[test]
+    fn apres_le_retrait_du_morceau_en_cours() {
+        // Sans aléatoire : celui qui a pris sa place, rien au bout de la liste…
+        let mut l = liste(3);
+        l.choisir(1);
+        assert!(l.retirer(1));
+        assert_eq!(l.apres_retrait(1), Some(1));
+        l.choisir(1);
+        assert!(l.retirer(1));
+        assert_eq!(l.apres_retrait(1), None);
+        // …sauf avec la répétition : on repart du début.
+        l.changer_repetition(true);
+        assert_eq!(l.apres_retrait(1), Some(0));
+        // En aléatoire : un morceau pas encore joué, au hasard.
+        let mut l = liste(5);
+        l.changer_aleatoire(true);
+        l.choisir(0);
+        l.choisir(4);
+        assert!(l.retirer(4));
+        let suivant = l.apres_retrait(4).unwrap();
+        assert!((1..=3).contains(&suivant), "{suivant}");
     }
 
     #[test]
