@@ -28,6 +28,8 @@ pub struct ListeDeLecture {
     /// En lecture aléatoire : pour chaque morceau, a-t-il déjà été joué ?
     /// Chaque morceau passe une fois avant que la lecture s'arrête.
     deja_joue: Vec<bool>,
+    /// Répétition activée ? Au bout de la liste, on repart pour un tour.
+    repetition: bool,
     /// En lecture aléatoire : les morceaux joués, dans l'ordre, pour que
     /// « précédent » revienne vraiment au morceau d'avant.
     historique: Vec<usize>,
@@ -113,6 +115,14 @@ impl ListeDeLecture {
         }
     }
 
+    pub fn repetition(&self) -> bool {
+        self.repetition
+    }
+
+    pub fn changer_repetition(&mut self, actif: bool) {
+        self.repetition = actif;
+    }
+
     pub fn est_vide(&self) -> bool {
         self.morceaux.is_empty()
     }
@@ -137,19 +147,36 @@ impl ListeDeLecture {
     }
 
     /// Le numéro du morceau suivant, ou rien si on est au bout de la liste
-    /// (en aléatoire : quand tous les morceaux ont été joués).
-    pub fn suivant(&self) -> Option<usize> {
+    /// (en aléatoire : quand tous les morceaux ont été joués). Avec la
+    /// répétition, au bout de la liste on repart du premier ; en aléatoire,
+    /// on remélange pour un nouveau tour.
+    pub fn suivant(&mut self) -> Option<usize> {
+        if self.morceaux.is_empty() {
+            return None;
+        }
         if self.aleatoire {
-            let restants: Vec<usize> = (0..self.morceaux.len())
+            let mut restants: Vec<usize> = (0..self.morceaux.len())
                 .filter(|&i| !self.deja_joue[i])
                 .collect();
             if restants.is_empty() {
-                return None;
+                if !self.repetition {
+                    return None;
+                }
+                // Nouveau tour : tout le monde peut repasser, sauf le morceau
+                // qui vient de jouer (pour ne pas l'entendre deux fois de suite).
+                self.deja_joue.fill(false);
+                restants = (0..self.morceaux.len())
+                    .filter(|&i| self.morceaux.len() == 1 || Some(i) != self.courant)
+                    .collect();
             }
             return Some(restants[hasard(restants.len())]);
         }
         let n = self.courant.map_or(0, |c| c + 1);
-        (n < self.morceaux.len()).then_some(n)
+        if n < self.morceaux.len() {
+            Some(n)
+        } else {
+            self.repetition.then_some(0)
+        }
     }
 
     /// Le numéro du morceau précédent. Au début de la liste, on reste sur le
@@ -285,6 +312,49 @@ mod tests {
         l.choisir(a);
         // Au premier morceau de l'historique, on le relance.
         assert_eq!(l.precedent(), Some(a));
+    }
+
+    #[test]
+    fn repetition_repart_du_debut() {
+        let mut l = liste(3);
+        l.changer_repetition(true);
+        l.choisir(2);
+        assert_eq!(l.suivant(), Some(0));
+        l.changer_repetition(false);
+        assert_eq!(l.suivant(), None);
+        assert_eq!(liste(0).suivant(), None);
+        let mut vide = liste(0);
+        vide.changer_repetition(true);
+        assert_eq!(vide.suivant(), None);
+    }
+
+    #[test]
+    fn repetition_aleatoire_refait_des_tours_complets() {
+        let mut l = liste(4);
+        l.changer_aleatoire(true);
+        l.changer_repetition(true);
+        let mut joues = Vec::new();
+        for _ in 0..12 {
+            let n = l.suivant().unwrap();
+            assert_ne!(Some(n), l.courant(), "même morceau deux fois de suite");
+            l.choisir(n);
+            joues.push(n);
+        }
+        // Trois tours de 4 : chaque tour contient chaque morceau une fois.
+        for tour in joues.chunks(4) {
+            let mut tour = tour.to_vec();
+            tour.sort();
+            assert_eq!(tour, [0, 1, 2, 3]);
+        }
+    }
+
+    #[test]
+    fn repetition_un_seul_morceau() {
+        let mut l = liste(1);
+        l.changer_aleatoire(true);
+        l.changer_repetition(true);
+        l.choisir(0);
+        assert_eq!(l.suivant(), Some(0));
     }
 
     #[test]

@@ -393,6 +393,17 @@ impl eframe::App for LecteurApp {
                 if bouton.clicked() {
                     self.liste.changer_aleatoire(!aleatoire);
                 }
+                let repetition = self.liste.repetition();
+                let bouton = ui
+                    .selectable_label(repetition, "🔁")
+                    .on_hover_text(if repetition {
+                        "Répétition de la liste : activée"
+                    } else {
+                        "Répétition de la liste : désactivée"
+                    });
+                if bouton.clicked() {
+                    self.liste.changer_repetition(!repetition);
+                }
             });
 
             ui.add_space(8.0);
