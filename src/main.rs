@@ -58,6 +58,9 @@ const DUREE_DEMARRAGE: Duration = Duration::from_secs(1);
 /// Le petit fichier où l'on mémorise si le freinage (et le démarrage) est activé
 /// (freinage.txt dans le dossier de réglages, voir `systeme` : « oui » ou « non »).
 const REGLAGE_FREINAGE: &str = "freinage.txt";
+/// Le petit fichier où l'on mémorise si le scratch s'entend quand on fait
+/// glisser la barre de progression (« oui » ou « non »).
+const REGLAGE_SCRATCH: &str = "scratch.txt";
 
 /// L'état de l'application.
 struct LecteurApp {
@@ -91,6 +94,9 @@ struct LecteurApp {
     // Au Stop et à la Pause, le son ralentit-il comme un vinyle qu'on arrête
     // à la main (et accélère-t-il à la Lecture) ?
     freinage: bool,
+    // Quand on fait glisser la barre de progression, la musique suit-elle
+    // la souris (bruit de scratch) ? Sinon, elle continue et saute au lâcher.
+    scratch: bool,
     // L'image qui bouge avec la musique.
     visualiseur: Visualiseur,
     // Les tags (titre, artiste, album, durée) des morceaux, lus en arrière-plan.
@@ -177,7 +183,8 @@ impl LecteurApp {
             position_glissee: None,
             volume: 0.5,
             muet: false,
-            freinage: freinage_memorise(),
+            freinage: option_memorisee(REGLAGE_FREINAGE),
+            scratch: option_memorisee(REGLAGE_SCRATCH),
             visualiseur: Visualiseur::new(),
             tags: TagsConnus::new(ctx),
             zone: ZoneDeNotification::new(ctx),
@@ -510,11 +517,38 @@ impl LecteurApp {
         }
     }
 
-    /// Active ou désactive le freinage (Stop, Pause) et le démarrage en
-    /// douceur (Lecture), et s'en souvient.
-    fn changer_freinage(&mut self, freinage: bool) {
-        self.freinage = freinage;
-        memoriser(REGLAGE_FREINAGE, if freinage { "oui" } else { "non" });
+    /// On fait glisser la barre de progression jusqu'à `secondes` : la
+    /// musique suit la souris (scratch), ou continue sans bouger si le son du
+    /// scratch est coupé. Dans les deux cas, elle saute là au lâcher.
+    fn glisser(&mut self, telecommande: &Telecommande, secondes: f32) {
+        self.position_glissee = Some(secondes);
+        if self.scratch {
+            telecommande.scratcher(secondes);
+        }
+    }
+
+    /// Le menu Options : effet platine et son du scratch, mémorisés.
+    fn menu_options(&mut self, ui: &mut egui::Ui) {
+        if ui
+            .checkbox(&mut self.freinage, "Effet platine")
+            .on_hover_text(
+                "Au Stop et à la Pause, le son ralentit et descend dans les graves, \
+                 comme un vinyle qu'on arrête à la main ; à la Lecture, il accélère",
+            )
+            .changed()
+        {
+            memoriser_option(REGLAGE_FREINAGE, self.freinage);
+        }
+        if ui
+            .checkbox(&mut self.scratch, "Son du scratch")
+            .on_hover_text(
+                "Quand on fait glisser la barre de progression, la musique suit la \
+                 souris comme un vinyle. Sinon, elle continue et saute au lâcher.",
+            )
+            .changed()
+        {
+            memoriser_option(REGLAGE_SCRATCH, self.scratch);
+        }
     }
 
     /// Arrête la lecture (et le morceau qu'on était peut-être en train d'ouvrir).
@@ -633,9 +667,7 @@ impl LecteurApp {
 
                 if let Some(telecommande) = &telecommande {
                     if reponse.dragged() {
-                        // On glisse : la musique suit la souris (scratch).
-                        self.position_glissee = Some(secondes);
-                        telecommande.scratcher(secondes);
+                        self.glisser(telecommande, secondes);
                     } else if self.position_glissee.take().is_some() || reponse.changed() {
                         // Relâchement après un glissement, ou simple clic : on s'y rend
                         // et la lecture reprend normalement.
@@ -831,20 +863,25 @@ impl LecteurApp {
     }
 }
 
-/// Écrit une durée sous la forme « minutes:secondes », par exemple 3:07.
-/// Le freinage est-il activé ? Oui, sauf si on l'a désactivé (« non »
-/// dans le fichier de réglage).
-fn freinage_memorise() -> bool {
-    let texte = fichier_de_reglage(REGLAGE_FREINAGE).and_then(|f| std::fs::read_to_string(f).ok());
-    freinage_depuis(texte.as_deref())
+/// Une option du menu Options est-elle activée ? Oui, sauf si on l'a
+/// désactivée (« non » dans son fichier de réglage).
+fn option_memorisee(fichier: &str) -> bool {
+    let texte = fichier_de_reglage(fichier).and_then(|f| std::fs::read_to_string(f).ok());
+    option_depuis(texte.as_deref())
 }
 
-/// Lit le réglage du freinage : activé par défaut (pas de fichier, ou
+/// Lit le fichier d'une option : activée par défaut (pas de fichier, ou
 /// fichier illisible).
-fn freinage_depuis(texte: Option<&str>) -> bool {
+fn option_depuis(texte: Option<&str>) -> bool {
     texte.is_none_or(|t| t.trim() != "non")
 }
 
+/// Mémorise une option du menu Options.
+fn memoriser_option(fichier: &str, activee: bool) {
+    memoriser(fichier, if activee { "oui" } else { "non" });
+}
+
+/// Écrit une durée sous la forme « minutes:secondes », par exemple 3:07.
 fn format_temps(d: Duration) -> String {
     let s = d.as_secs();
     format!("{}:{:02}", s / 60, s % 60)
@@ -959,25 +996,9 @@ impl eframe::App for LecteurApp {
                     if ui.button("⏸ Pause").clicked() {
                         self.pause();
                     }
-                    let stop = ui.button("⏹ Stop").on_hover_text(if self.freinage {
-                        "Effet platine : activé (clic droit pour changer)"
-                    } else {
-                        "Effet platine : désactivé (clic droit pour changer)"
-                    });
-                    if stop.clicked() {
+                    if ui.button("⏹ Stop").clicked() {
                         self.arreter();
                     }
-                    stop.context_menu(|ui| {
-                        let mut freinage = self.freinage;
-                        if ui
-                            .checkbox(&mut freinage, "Effet platine")
-                            .on_hover_text("Au Stop et à la Pause, le son ralentit et descend dans les graves, comme un vinyle qu'on arrête à la main ; à la Lecture, il accélère")
-                            .changed()
-                        {
-                            self.changer_freinage(freinage);
-                            ui.close_menu();
-                        }
-                    });
                     if ui.button("⏭").on_hover_text("Morceau suivant").clicked() {
                         self.suivant();
                     }
@@ -1081,7 +1102,10 @@ impl eframe::App for LecteurApp {
             }
 
             ui.add_space(8.0);
-            ui.weak("⌨ Raccourcis").on_hover_text(raccourcis::AIDE);
+            ui.horizontal(|ui| {
+                ui.menu_button("⚙ Options", |ui| self.menu_options(ui));
+                ui.weak("⌨ Raccourcis").on_hover_text(raccourcis::AIDE);
+            });
         });
 
         // La molette change le volume dans la partie lecteur de la fenêtre (pas sur la
@@ -1302,10 +1326,10 @@ mod tests {
     }
 
     #[test]
-    fn le_freinage_est_active_sauf_si_on_l_a_desactive() {
-        assert!(freinage_depuis(None));
-        assert!(freinage_depuis(Some("oui\n")));
-        assert!(!freinage_depuis(Some("non\n")));
+    fn une_option_est_activee_sauf_si_on_l_a_desactivee() {
+        assert!(option_depuis(None));
+        assert!(option_depuis(Some("oui\n")));
+        assert!(!option_depuis(Some("non\n")));
     }
 
     /// Stop avec le freinage : le morceau est tout de suite « Arrêté », le
@@ -1453,5 +1477,37 @@ mod tests {
         app.stop();
         app.lecture();
         assert!(!app.telecommande.as_ref().unwrap().accelere());
+    }
+
+    /// Son du scratch coupé : pendant le glissement de la barre, la musique
+    /// continue normalement ; activé, elle suit la souris.
+    #[test]
+    fn le_son_du_scratch_peut_etre_coupe() {
+        let ctx = egui::Context::default();
+        let _tour = mon_tour();
+        let mut app = LecteurApp::new(&ctx);
+        let morceau = Arc::new(Morceau::brut(
+            (0..10_000).map(|i| i as i16).collect(),
+            1,
+            1000,
+        ));
+        let (telecommande, mut platine) = Telecommande::nouvelle(morceau);
+        telecommande.aller_a(5.0);
+
+        app.scratch = false;
+        app.glisser(&telecommande, 2.0);
+        for _ in 0..500 {
+            platine.next();
+        }
+        assert_eq!(app.position_glissee, Some(2.0));
+        assert_eq!(telecommande.position(), Duration::from_millis(5500));
+
+        app.scratch = true;
+        app.glisser(&telecommande, 2.0);
+        for _ in 0..1000 {
+            platine.next();
+        }
+        let position = telecommande.position().as_secs_f64();
+        assert!((position - 2.0).abs() < 0.01, "position {position}");
     }
 }
