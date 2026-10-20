@@ -4,12 +4,13 @@
 //! - l'oscilloscope (la vibration du son, en direct) ;
 //! - la forme d'onde (le dessin des 30 secondes autour de l'endroit écouté).
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
+use std::thread;
 
 use eframe::egui;
 use rustfft::{num_complex::Complex, Fft, FftPlanner};
 
-use crate::platine::Morceau;
+use crate::morceau::Morceau;
 
 /// Nombre d'échantillons analysés pour les barres. Plus c'est grand, plus les
 /// graves sont précis, mais plus les barres réagissent lentement.
@@ -33,6 +34,9 @@ const TRANCHES_PAR_SECONDE: u32 = 100;
 const FENETRE: f32 = 30.0;
 /// Hauteur de la zone de dessin, en points.
 const HAUTEUR: f32 = 150.0;
+
+/// Le résumé de la forme d'onde : le plus bas et le plus haut de chaque tranche.
+type Apercu = Vec<(f32, f32)>;
 
 /// Les styles de visualiseur proposés dans le menu.
 #[derive(Clone, Copy, PartialEq)]
@@ -60,8 +64,9 @@ pub struct Visualiseur {
     fft: Arc<dyn Fft<f32>>,
     /// Hauteur actuelle de chaque barre (entre 0 et 1).
     barres: [f32; NB_BARRES],
-    /// Le résumé de la forme d'onde, calculé une fois par morceau.
-    apercu: Option<(Arc<Morceau>, Vec<(f32, f32)>)>,
+    /// Le résumé de la forme d'onde, calculé en arrière-plan une fois par
+    /// morceau (vide tant que le calcul n'est pas fini).
+    apercu: Option<(Arc<Morceau>, Arc<OnceLock<Apercu>>)>,
 }
 
 impl Visualiseur {
@@ -119,8 +124,7 @@ impl Visualiseur {
                 dessiner_oscilloscope(&peintre, zone, &echantillons, couleur);
             }
             Style::FormeOnde => {
-                if let Some(morceau) = morceau {
-                    let apercu = self.apercu_de(morceau);
+                if let Some(apercu) = morceau.and_then(|m| self.apercu_de(m)) {
                     let grise = ui.visuals().weak_text_color();
                     let curseur = ui.visuals().strong_text_color();
                     dessiner_forme_onde(&peintre, zone, apercu, position, couleur, grise, curseur);
@@ -129,13 +133,18 @@ impl Visualiseur {
         }
     }
 
-    /// Le résumé de la forme d'onde du morceau, calculé seulement la première fois.
-    fn apercu_de(&mut self, morceau: &Arc<Morceau>) -> &[(f32, f32)] {
-        let deja_calcule = matches!(&self.apercu, Some((m, _)) if Arc::ptr_eq(m, morceau));
-        if !deja_calcule {
-            self.apercu = Some((morceau.clone(), morceau.apercu(TRANCHES_PAR_SECONDE)));
+    /// Le résumé de la forme d'onde du morceau. La première fois, on lance son
+    /// calcul en arrière-plan (il faut décoder tout le morceau) : en attendant,
+    /// il n'y a rien à dessiner.
+    fn apercu_de(&mut self, morceau: &Arc<Morceau>) -> Option<&[(f32, f32)]> {
+        let deja_lance = matches!(&self.apercu, Some((m, _)) if Arc::ptr_eq(m, morceau));
+        if !deja_lance {
+            let resultat = Arc::new(OnceLock::new());
+            let (m, r) = (morceau.clone(), resultat.clone());
+            thread::spawn(move || r.set(m.apercu(TRANCHES_PAR_SECONDE)));
+            self.apercu = Some((morceau.clone(), resultat));
         }
-        &self.apercu.as_ref().unwrap().1
+        self.apercu.as_ref().unwrap().1.get().map(Vec::as_slice)
     }
 
     /// Analyse le son à partir de `position` et renvoie la hauteur de chaque
