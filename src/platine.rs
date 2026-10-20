@@ -17,6 +17,9 @@ const RATTRAPAGE: f64 = 0.05;
 const INERTIE: f64 = 0.01;
 /// Vitesse maximale du scratch (8 = huit fois plus vite que la normale).
 const VITESSE_MAX: f64 = 8.0;
+/// Pendant un freinage, vitesse en dessous de laquelle le son s'éteint peu à
+/// peu : sans ça, couper net le dernier échantillon ferait un petit « clic ».
+const VITESSE_FONDU: f64 = 0.2;
 
 /// Ce que l'interface et la platine partagent : l'interface écrit les ordres,
 /// la platine (qui tourne dans le fil audio) les lit et met à jour la position.
@@ -28,6 +31,8 @@ struct Etat {
     en_pause: bool,
     /// Pendant un scratch : l'endroit du morceau où se trouve la souris.
     cible_scratch: Option<f64>,
+    /// Pendant un freinage : de combien la vitesse baisse à chaque trame.
+    freinage: Option<f64>,
 }
 
 /// La télécommande de la platine, gardée par l'interface.
@@ -86,6 +91,22 @@ impl Telecommande {
         etat.cible_scratch = None;
     }
 
+    /// Freine comme un vinyle qu'on arrête à la main : la vitesse baisse
+    /// régulièrement jusqu'à 0 en `duree`, le son descend dans les graves,
+    /// puis la platine s'arrête (comme à la fin du morceau).
+    pub fn freiner(&self, duree: Duration) {
+        let pente = 1.0 / (self.morceau.frequence as f64 * duree.as_secs_f64()).max(1.0);
+        let mut etat = self.etat.lock().unwrap();
+        etat.freinage = Some(pente);
+        etat.en_pause = false;
+        etat.cible_scratch = None;
+    }
+
+    /// La platine est-elle en train de freiner (après un Stop) ?
+    pub fn freine(&self) -> bool {
+        self.etat.lock().unwrap().freinage.is_some()
+    }
+
     /// Pendant un glissement : indique où se trouve la souris. La musique la suit.
     pub fn scratcher(&self, secondes: f32) {
         self.etat.lock().unwrap().cible_scratch = Some(self.morceau.trames(secondes));
@@ -112,27 +133,44 @@ impl Platine {
         // On copie les ordres sans garder le verrou : lire la trame peut
         // demander de décoder un bloc (juste après un saut), et pendant ce
         // temps l'interface doit pouvoir lire la position sans attendre.
-        let (position, en_pause, cible_scratch) = {
+        let (position, en_pause, cible_scratch, freinage) = {
             let etat = self.etat.lock().unwrap();
-            (etat.position, etat.en_pause, etat.cible_scratch)
+            (
+                etat.position,
+                etat.en_pause,
+                etat.cible_scratch,
+                etat.freinage,
+            )
         };
         let frequence = self.morceau.frequence as f64;
         let fin = self.morceau.derniere_trame();
+        // Volume de la trame : 1, sauf à la toute fin d'un freinage.
+        let mut gain = 1.0;
 
-        match cible_scratch {
-            Some(cible) => {
+        match (freinage, cible_scratch) {
+            (Some(pente), _) => {
+                // Le freinage l'emporte sur tout le reste (pause, scratch).
+                // Il part de la vitesse du moment (1 en lecture normale).
+                self.vitesse = self.vitesse.min(1.0) - pente;
+                if self.vitesse <= 0.0 || position >= fin {
+                    self.vitesse = 0.0;
+                    return false; // disque arrêté
+                }
+                gain = (self.vitesse / VITESSE_FONDU).min(1.0) as f32;
+            }
+            (None, Some(cible)) => {
                 // On vise la vitesse qui ramène la musique sous la souris,
                 // et on s'en approche en douceur (inertie du disque).
                 let voulue = ((cible - position) / (frequence * RATTRAPAGE))
                     .clamp(-VITESSE_MAX, VITESSE_MAX);
                 self.vitesse += (voulue - self.vitesse) / (frequence * INERTIE);
             }
-            None if en_pause => {
+            (None, None) if en_pause => {
                 // En pause : du silence, sans avancer.
                 self.trame.fill(0.0);
                 return true;
             }
-            None => {
+            (None, None) => {
                 if position >= fin {
                     return false; // morceau terminé
                 }
@@ -158,7 +196,7 @@ impl Platine {
             }
         }
         for sortie in &mut self.trame {
-            *sortie /= 32768.0;
+            *sortie *= gain / 32768.0;
         }
 
         // Si l'interface a sauté ailleurs pendant ce temps, son saut l'emporte.
@@ -301,5 +339,88 @@ mod tests {
         platine.next();
         assert_eq!(telecommande.position(), Duration::from_millis(7001));
         assert_eq!(platine.next(), Some(7001.0 / 32768.0));
+    }
+
+    /// Le freinage dure le temps demandé, la vitesse baisse régulièrement
+    /// (donc le son descend dans les graves), puis la platine s'arrête.
+    #[test]
+    fn le_freinage_ralentit_regulierement_puis_s_arrete() {
+        let (telecommande, mut platine) = Telecommande::nouvelle(morceau_test(10));
+        telecommande.aller_a(2.0);
+        platine.next();
+        assert!(!telecommande.freine());
+        telecommande.freiner(Duration::from_secs(1));
+        assert!(telecommande.freine());
+
+        // On note l'avancée de la position à chaque trame (= la vitesse).
+        let mut vitesses = Vec::new();
+        let mut avant = telecommande.position().as_secs_f64();
+        while platine.next().is_some() {
+            let apres = telecommande.position().as_secs_f64();
+            vitesses.push((apres - avant) * 1000.0);
+            avant = apres;
+            assert!(vitesses.len() < 2000, "ne s'arrête jamais");
+        }
+        // Environ 1 seconde de son (1000 trames à 1000 Hz)…
+        assert!(
+            (995..=1000).contains(&vitesses.len()),
+            "{} trames",
+            vitesses.len()
+        );
+        // …où la vitesse ne fait que baisser, de 1 vers 0, sans à-coup…
+        assert!(
+            vitesses[0] > 0.99 && vitesses[0] <= 1.0,
+            "départ {}",
+            vitesses[0]
+        );
+        assert!(*vitesses.last().unwrap() < 0.01);
+        assert!(vitesses
+            .windows(2)
+            .all(|v| v[1] < v[0] && v[0] - v[1] < 0.0011));
+        // …à mi-chemin, on est à mi-vitesse (la baisse est régulière)…
+        assert!(
+            (vitesses[500] - 0.5).abs() < 0.01,
+            "mi-chemin {}",
+            vitesses[500]
+        );
+        // …et le disque a tourné d'une demi-seconde de musique.
+        let position = telecommande.position().as_secs_f64();
+        assert!((position - 2.5).abs() < 0.01, "position {position}");
+        // Une fois arrêtée, la platine ne joue plus rien.
+        assert_eq!(platine.next(), None);
+    }
+
+    /// À la fin du freinage, le son s'éteint en douceur (pas de « clic ») :
+    /// le dernier échantillon est presque muet.
+    #[test]
+    fn le_freinage_finit_en_silence() {
+        let (telecommande, mut platine) = Telecommande::nouvelle(morceau_test(10));
+        telecommande.aller_a(5.0); // échantillons autour de 5000 : bien audibles
+        telecommande.freiner(Duration::from_secs(1));
+        let echantillons: Vec<f32> = platine.by_ref().collect();
+        let plein = 5000.0 / 32768.0;
+        assert!(echantillons[0] > 0.99 * plein);
+        assert!(*echantillons.last().unwrap() < 0.01 * plein);
+        // Le volume ne baisse qu'à la toute fin.
+        assert!(echantillons[700] > 0.99 * plein);
+    }
+
+    /// Un freinage en pause ou pendant un scratch part quand même et s'arrête,
+    /// et un freinage près de la fin du morceau s'arrête à la fin.
+    #[test]
+    fn le_freinage_l_emporte_sur_la_pause_le_scratch_et_la_fin() {
+        let (telecommande, mut platine) = Telecommande::nouvelle(morceau_test(10));
+        telecommande.mettre_en_pause(true);
+        telecommande.freiner(Duration::from_secs(1));
+        assert!(!telecommande.en_pause());
+        telecommande.scratcher(9.0); // ignoré pendant le freinage
+        assert!((0..2000).any(|_| platine.next().is_none()));
+        assert!(telecommande.position() < Duration::from_millis(600));
+
+        let (telecommande, platine) = Telecommande::nouvelle(morceau_test(10));
+        telecommande.aller_a(9.8);
+        telecommande.freiner(Duration::from_secs(1));
+        assert!(platine.count() < 300);
+        assert_eq!(telecommande.position(), Duration::from_millis(9999));
     }
 }

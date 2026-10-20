@@ -25,7 +25,7 @@ use std::time::{Duration, Instant};
 use eframe::egui;
 use rodio::Sink;
 
-use bibliotheque::Bibliotheque;
+use bibliotheque::{fichier_de_reglage, memoriser, Bibliotheque};
 use liste::{Action, ListeDeLecture};
 use morceau::Morceau;
 use platine::{Platine, Telecommande};
@@ -50,6 +50,12 @@ fn main() -> eframe::Result {
 
 /// Le début du message affiché quand aucune sortie son ne marche.
 const SORTIE_INDISPONIBLE: &str = "Sortie audio indisponible";
+
+/// Durée du freinage de platine au Stop (un vinyle arrêté à la main).
+const DUREE_FREINAGE: Duration = Duration::from_secs(1);
+/// Le petit fichier où l'on mémorise si le freinage est activé
+/// (%APPDATA%\lecteur_mp3\freinage.txt : « oui » ou « non »).
+const REGLAGE_FREINAGE: &str = "freinage.txt";
 
 /// L'état de l'application.
 struct LecteurApp {
@@ -80,6 +86,8 @@ struct LecteurApp {
     // Le son est-il coupé (bouton muet) ? On garde le volume choisi à côté
     // pour le retrouver tel quel quand on remet le son.
     muet: bool,
+    // Au Stop, le son ralentit-il comme un vinyle qu'on arrête à la main ?
+    freinage: bool,
     // L'image qui bouge avec la musique.
     visualiseur: Visualiseur,
     // Les tags (titre, artiste, album, durée) des morceaux, lus en arrière-plan.
@@ -163,6 +171,7 @@ impl LecteurApp {
             position_glissee: None,
             volume: 0.5,
             muet: false,
+            freinage: freinage_memorise(),
             visualiseur: Visualiseur::new(),
             tags: TagsConnus::new(ctx),
             zone: ZoneDeNotification::new(ctx),
@@ -215,7 +224,7 @@ impl LecteurApp {
     /// liste (le premier ajouté, ou l'un d'eux au hasard en lecture aléatoire).
     fn jouer_si_rien_en_cours(&mut self, a_lancer: Option<usize>) {
         if let Some(n) = a_lancer {
-            if self.platine_active().is_none() && self.chargement.is_none() {
+            if self.etat() == Etat::Arrete {
                 self.jouer(n);
             }
         }
@@ -382,7 +391,11 @@ impl LecteurApp {
     /// Remplace la sortie son. Le morceau en cours reprend au même endroit
     /// sur la nouvelle, en pause s'il l'était.
     fn passer_sur(&mut self, sortie: Sortie, maintenant: Instant) {
-        let reprise = self.platine_active().map(Telecommande::reprise);
+        // Un morceau en train de freiner est déjà arrêté : on ne le reprend pas.
+        let reprise = self
+            .platine_active()
+            .filter(|t| !t.freine())
+            .map(Telecommande::reprise);
         if let Some(sink) = self.sink.take() {
             sink.stop();
         }
@@ -430,7 +443,8 @@ impl LecteurApp {
             return;
         }
         // Le morceau est encore en cours : on reprend là où on en était.
-        if let Some(telecommande) = self.platine_active() {
+        // (S'il freine après un Stop, il est arrêté : on le relance plus bas.)
+        if let Some(telecommande) = self.platine_active().filter(|t| !t.freine()) {
             telecommande.mettre_en_pause(false);
             return;
         }
@@ -454,6 +468,22 @@ impl LecteurApp {
         }
     }
 
+    /// Le bouton Stop et la touche S : si le freinage est activé et qu'un
+    /// morceau joue, il ralentit jusqu'à l'arrêt comme un vinyle (voir
+    /// `Telecommande::freiner`) ; sinon (ou au second appui), on coupe net.
+    fn arreter(&mut self) {
+        match self.platine_active() {
+            Some(t) if self.freinage && !t.en_pause() && !t.freine() => t.freiner(DUREE_FREINAGE),
+            _ => self.stop(),
+        }
+    }
+
+    /// Active ou désactive le freinage au Stop, et s'en souvient.
+    fn changer_freinage(&mut self, freinage: bool) {
+        self.freinage = freinage;
+        memoriser(REGLAGE_FREINAGE, if freinage { "oui" } else { "non" });
+    }
+
     /// Arrête la lecture (et le morceau qu'on était peut-être en train d'ouvrir).
     fn stop(&mut self) {
         self.chargement = None;
@@ -470,6 +500,19 @@ impl LecteurApp {
             .unwrap_or_default()
     }
 
+    /// Le morceau en cours vient de se terminer tout seul : on passe au
+    /// suivant. Sauf si c'est la fin d'un freinage : on reste arrêté.
+    /// (Après un Stop sans freinage, il n'y a plus de lecteur : rien à faire.)
+    fn suivre_la_fin(&mut self) {
+        if self.sink.as_ref().is_some_and(|sink| sink.empty()) {
+            if self.telecommande.as_ref().is_some_and(|t| t.freine()) {
+                self.stop();
+            } else {
+                self.suivant();
+            }
+        }
+    }
+
     /// Où en est la lecture (en lecture, en pause, arrêté…).
     fn etat(&self) -> Etat {
         if self.chargement.is_some() {
@@ -477,6 +520,7 @@ impl LecteurApp {
         }
         match self.platine_active() {
             None => Etat::Arrete,
+            Some(t) if t.freine() => Etat::Arrete, // Stop pendant le freinage
             Some(t) if t.en_pause() => Etat::Pause,
             Some(_) => Etat::Lecture,
         }
@@ -489,11 +533,11 @@ impl LecteurApp {
         match commande {
             Commande::LecturePause => match self.platine_active() {
                 None if self.chargement.as_ref().is_some_and(|c| !c.en_pause) => self.pause(),
-                Some(t) if !t.en_pause() => self.pause(),
+                Some(t) if !t.en_pause() && !t.freine() => self.pause(),
                 _ if !self.liste.est_vide() => self.lecture(),
                 _ => {}
             },
-            Commande::Stop => self.stop(),
+            Commande::Stop => self.arreter(),
             Commande::Precedent if !self.liste.est_vide() => self.precedent(),
             Commande::Suivant if !self.liste.est_vide() => self.suivant(),
             Commande::Precedent | Commande::Suivant => {}
@@ -542,7 +586,8 @@ impl LecteurApp {
             .min(duree_s);
 
         // Le curseur n'est utilisable que si un morceau est en lecture ou en pause.
-        let telecommande = self.platine_active().cloned();
+        // (Pas pendant le freinage : le morceau est déjà arrêté.)
+        let telecommande = self.platine_active().filter(|t| !t.freine()).cloned();
 
         ui.add_enabled_ui(telecommande.is_some(), |ui| {
             ui.horizontal(|ui| {
@@ -754,6 +799,19 @@ impl LecteurApp {
 }
 
 /// Écrit une durée sous la forme « minutes:secondes », par exemple 3:07.
+/// Le freinage est-il activé ? Oui, sauf si on l'a désactivé (« non »
+/// dans le fichier de réglage).
+fn freinage_memorise() -> bool {
+    let texte = fichier_de_reglage(REGLAGE_FREINAGE).and_then(|f| std::fs::read_to_string(f).ok());
+    freinage_depuis(texte.as_deref())
+}
+
+/// Lit le réglage du freinage : activé par défaut (pas de fichier, ou
+/// fichier illisible).
+fn freinage_depuis(texte: Option<&str>) -> bool {
+    texte.is_none_or(|t| t.trim() != "non")
+}
+
 fn format_temps(d: Duration) -> String {
     let s = d.as_secs();
     format!("{}:{:02}", s / 60, s % 60)
@@ -868,9 +926,25 @@ impl eframe::App for LecteurApp {
                     if ui.button("⏸ Pause").clicked() {
                         self.pause();
                     }
-                    if ui.button("⏹ Stop").clicked() {
-                        self.stop();
+                    let stop = ui.button("⏹ Stop").on_hover_text(if self.freinage {
+                        "Freinage de platine : activé (clic droit pour changer)"
+                    } else {
+                        "Freinage de platine : désactivé (clic droit pour changer)"
+                    });
+                    if stop.clicked() {
+                        self.arreter();
                     }
+                    stop.context_menu(|ui| {
+                        let mut freinage = self.freinage;
+                        if ui
+                            .checkbox(&mut freinage, "Freinage de platine")
+                            .on_hover_text("Au Stop, le son ralentit et descend dans les graves, comme un vinyle qu'on arrête à la main")
+                            .changed()
+                        {
+                            self.changer_freinage(freinage);
+                            ui.close_menu();
+                        }
+                    });
                     if ui.button("⏭").on_hover_text("Morceau suivant").clicked() {
                         self.suivant();
                     }
@@ -955,7 +1029,8 @@ impl eframe::App for LecteurApp {
             let position = self
                 .position_glissee
                 .unwrap_or_else(|| self.position().as_secs_f32());
-            let en_lecture = self.etat() == Etat::Lecture;
+            // (Pendant le freinage aussi : le son continue de sortir.)
+            let en_lecture = self.platine_active().is_some_and(|t| !t.en_pause());
             self.visualiseur
                 .afficher(ui, self.morceau.as_ref(), position, en_lecture);
             self.afficher_pochette(ui);
@@ -991,11 +1066,7 @@ impl eframe::App for LecteurApp {
 
         self.surveiller_sortie(Instant::now());
 
-        // Le morceau en cours vient de se terminer tout seul : on passe au suivant.
-        // (Après un Stop, il n'y a plus de lecteur, donc on ne passe pas ici.)
-        if self.sink.as_ref().is_some_and(|sink| sink.empty()) {
-            self.suivant();
-        }
+        self.suivre_la_fin();
 
         // Pendant la lecture (ou en pause, le temps que les barres retombent),
         // on redessine à chaque image de l'écran pour que le visualiseur soit fluide.
@@ -1180,5 +1251,83 @@ mod tests {
         assert!(app.sortie.as_ref().unwrap().battements() > 0);
         assert!(app.etat() == Etat::Pause);
         assert_eq!(app.position(), avant);
+    }
+
+    #[test]
+    fn le_freinage_est_active_sauf_si_on_l_a_desactive() {
+        assert!(freinage_depuis(None));
+        assert!(freinage_depuis(Some("oui\n")));
+        assert!(!freinage_depuis(Some("non\n")));
+    }
+
+    /// Stop avec le freinage : le morceau est tout de suite « Arrêté », le
+    /// son ralentit pendant environ 1 s puis tout s'arrête, sans passer au
+    /// morceau suivant. Sans freinage, en pause ou au second Stop : on coupe
+    /// net. (Seulement sur un PC qui a du son.)
+    #[test]
+    fn le_stop_freine_puis_s_arrete_sans_passer_au_suivant() {
+        let ctx = egui::Context::default();
+        let mut app = LecteurApp::new(&ctx);
+        if app.sortie.is_none() {
+            return; // pas de son sur ce PC (machine de test)
+        }
+        let chemin = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/glissando.mp3");
+        app.liste.ajouter(vec![chemin.clone(), chemin.clone()]);
+        app.liste.choisir(0);
+        app.morceau = Some(Morceau::charger(&chemin, &AtomicBool::new(false)).unwrap());
+        app.freinage = true;
+
+        // Le morceau freine : arrêté pour l'interface, mais le son continue.
+        app.demarrer().unwrap();
+        let telecommande = app.telecommande.clone().unwrap();
+        telecommande.aller_a(1.0);
+        app.arreter();
+        assert!(app.etat() == Etat::Arrete);
+        assert!(app.platine_active().is_some_and(|t| t.freine()));
+        // Puis il s'arrête pour de bon, et on reste sur le même morceau.
+        let debut = Instant::now();
+        while app.sink.is_some() {
+            assert!(
+                debut.elapsed() < Duration::from_secs(3),
+                "ne s'arrête jamais"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+            app.suivre_la_fin();
+        }
+        assert!(app.telecommande.is_none());
+        assert!(app.chargement.is_none());
+        assert_eq!(app.liste.courant(), Some(0));
+        assert!(app.etat() == Etat::Arrete);
+        // Le disque a tourné d'environ une demi-seconde de musique en
+        // freinant (et pas jusqu'à la fin du morceau). La durée exacte du
+        // freinage est vérifiée dans les tests de la platine.
+        let position = telecommande.position().as_secs_f64();
+        assert!((1.45..1.7).contains(&position), "position {position}");
+
+        // Lecture pendant le freinage : le morceau repart du début, normalement.
+        app.demarrer().unwrap();
+        app.telecommande.as_ref().unwrap().aller_a(2.0);
+        app.arreter();
+        app.lecture();
+        let t = app.telecommande.as_ref().unwrap();
+        assert!(!t.freine());
+        assert!(t.position() < Duration::from_millis(500));
+        assert!(app.etat() == Etat::Lecture);
+
+        // Second Stop pendant le freinage : on coupe net.
+        app.arreter();
+        app.arreter();
+        assert!(app.sink.is_none());
+
+        // En pause, ou freinage désactivé : on coupe net.
+        app.demarrer().unwrap();
+        app.pause();
+        app.arreter();
+        assert!(app.sink.is_none());
+        app.freinage = false;
+        app.demarrer().unwrap();
+        app.arreter();
+        assert!(app.sink.is_none());
+        assert!(app.etat() == Etat::Arrete);
     }
 }
