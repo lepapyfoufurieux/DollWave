@@ -9,7 +9,7 @@ use std::sync::mpsc::{self, Receiver, TryRecvError};
 use eframe::egui;
 
 use crate::liste::{nom_du_fichier, rangee};
-use crate::playlists::{menu_ajouter_a_une_playlist, MorceauxGlisses};
+use crate::playlists::{menu_clic_droit, ChoixDuMenu, MorceauxGlisses};
 use crate::regroupement::{regrouper, Album, Regroupement};
 use crate::systeme::{dossier_musique, fichier_de_reglage};
 use crate::tags::TagsConnus;
@@ -415,6 +415,7 @@ impl Bibliotheque {
             a_ajouter: Vec::new(),
             etoile: None,
             vers_playlist: None,
+            tags_a_modifier: None,
             hauteur: self.hauteur_ligne,
             hauteur_entete: self.hauteur_entete,
         };
@@ -423,6 +424,7 @@ impl Bibliotheque {
             a_ajouter,
             etoile,
             vers_playlist,
+            tags_a_modifier,
             hauteur,
             hauteur_entete,
             ..
@@ -442,6 +444,7 @@ impl Bibliotheque {
         Demandes {
             a_ajouter,
             vers_playlist,
+            tags_a_modifier,
         }
     }
 
@@ -563,6 +566,8 @@ pub struct Demandes {
     pub a_ajouter: Vec<PathBuf>,
     /// Des morceaux à ajouter à une playlist (clic droit), et son nom.
     pub vers_playlist: Option<(String, Vec<PathBuf>)>,
+    /// Les morceaux dont on veut modifier les tags (clic droit).
+    pub tags_a_modifier: Option<Vec<PathBuf>>,
 }
 
 /// Ce dont les lignes ont besoin pour se dessiner, et ce qu'on y a cliqué.
@@ -579,6 +584,8 @@ struct Lignes<'a> {
     etoile: Option<PathBuf>,
     /// Des morceaux à ajouter à une playlist (clic droit), et son nom.
     vers_playlist: Option<(String, Vec<PathBuf>)>,
+    /// Les morceaux dont on veut modifier les tags (clic droit).
+    tags_a_modifier: Option<Vec<PathBuf>>,
     /// La hauteur d'une ligne de morceau (voir `liste::rangee`).
     hauteur: Option<f32>,
     /// La hauteur d'une ligne de dossier, d'artiste ou d'album repliée.
@@ -593,16 +600,20 @@ fn glisser(reponse: &egui::Response, morceaux: impl FnOnce() -> Vec<PathBuf>) {
     }
 }
 
-/// Le menu du clic droit sur un dossier ou un morceau : « Ajouter à la
-/// playlist » puis le nom de chaque playlist. `morceaux` donne ce qu'il
-/// faut y ajouter (on ne le calcule que si on a choisi une playlist).
-fn menu_playlist(
+/// Le menu du clic droit sur un dossier, un artiste, un album ou un
+/// morceau : « Modifier les tags… », puis « Ajouter à la playlist » et le
+/// nom de chaque playlist. `morceaux` donne les morceaux concernés (on ne
+/// le calcule que si on a choisi quelque chose).
+fn menu(
     reponse: &egui::Response,
     lignes: &mut Lignes,
+    modifier: &str,
     morceaux: impl FnOnce() -> Vec<PathBuf>,
 ) {
-    if let Some(nom) = menu_ajouter_a_une_playlist(reponse, lignes.playlists) {
-        lignes.vers_playlist = Some((nom, morceaux()));
+    match menu_clic_droit(reponse, lignes.playlists, modifier) {
+        Some(ChoixDuMenu::Playlist(nom)) => lignes.vers_playlist = Some((nom, morceaux())),
+        Some(ChoixDuMenu::ModifierLesTags) => lignes.tags_a_modifier = Some(morceaux()),
+        None => {}
     }
 }
 
@@ -695,7 +706,12 @@ fn entete_depliable(
             basculer = true;
         }
         glisser(&etiquette, &morceaux);
-        menu_playlist(&etiquette, lignes, &morceaux);
+        menu(
+            &etiquette,
+            lignes,
+            "✏ Modifier les tags de tous ses morceaux…",
+            &morceaux,
+        );
         let bouton = ui.small_button("➕ tout").on_hover_text(aide_tout);
         if clic_simple(ui, &bouton) {
             // Dans l'ordre affiché, sans faire passer les favoris devant.
@@ -848,7 +864,9 @@ fn ligne_morceau(ui: &mut egui::Ui, chemin: &Path, lignes: &mut Lignes) {
         lignes.a_ajouter.push(chemin.to_path_buf());
     }
     glisser(&ligne, || vec![chemin.to_path_buf()]);
-    menu_playlist(&ligne, lignes, || vec![chemin.to_path_buf()]);
+    menu(&ligne, lignes, "✏ Modifier les tags…", || {
+        vec![chemin.to_path_buf()]
+    });
 }
 
 /// Le dernier clic dans la bibliothèque : sur quel élément, et à quel moment.

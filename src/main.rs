@@ -3,6 +3,8 @@
 
 mod bibliotheque;
 mod depot;
+mod ecriture_tags;
+mod editeur_tags;
 mod liste;
 mod morceau;
 mod platine;
@@ -26,6 +28,7 @@ use eframe::egui;
 use rodio::Sink;
 
 use bibliotheque::{memoriser, Bibliotheque};
+use editeur_tags::EditeurTags;
 use liste::{Action, ListeDeLecture};
 use morceau::Morceau;
 use platine::{Effet, Platine, Telecommande};
@@ -132,6 +135,8 @@ struct LecteurApp {
     chargement: Option<Chargement>,
     // La pochette du morceau qu'on est en train de lire, en arrière-plan.
     pochette_en_cours: Option<(PathBuf, Receiver<Option<egui::ColorImage>>)>,
+    // La fenêtre « Modifier les tags », quand elle est ouverte.
+    editeur: Option<EditeurTags>,
     // Pour redessiner la fenêtre quand un travail en arrière-plan est fini.
     ctx: egui::Context,
 }
@@ -262,6 +267,7 @@ impl LecteurApp {
             depots: depot::Depots::default(),
             chargement: None,
             pochette_en_cours: None,
+            editeur: None,
             ctx: ctx.clone(),
         }
     }
@@ -881,6 +887,32 @@ impl LecteurApp {
 }
 
 impl LecteurApp {
+    /// La fenêtre « Modifier les tags », si elle est ouverte. Une fois les
+    /// tags enregistrés, le fichier est relu : la liste, la bibliothèque,
+    /// les vues Artistes/Albums et la pochette se mettent à jour.
+    fn afficher_editeur(&mut self, ctx: &egui::Context) {
+        let Some(editeur) = &mut self.editeur else {
+            return;
+        };
+        let retour = editeur.afficher(ctx);
+        for chemin in &retour.a_relire {
+            self.tags.relire(chemin);
+        }
+        let touche = |chemin: &PathBuf| retour.a_relire.contains(chemin);
+        if self.pochette.as_ref().is_some_and(|(p, _)| touche(p))
+            || self
+                .pochette_en_cours
+                .as_ref()
+                .is_some_and(|(p, _)| touche(p))
+        {
+            self.pochette = None;
+            self.pochette_en_cours = None;
+        }
+        if retour.fermer {
+            self.editeur = None;
+        }
+    }
+
     /// Le réglage du volume : un bouton pour couper le son, un curseur et le
     /// pourcentage. Il reste utilisable même sans morceau, pour le préparer.
     fn reglage_du_volume(&mut self, ui: &mut egui::Ui) {
@@ -1138,6 +1170,9 @@ impl eframe::App for LecteurApp {
         if let Some((nom, morceaux)) = demandes.vers_playlist {
             self.playlists.ajouter_a(&nom, &morceaux);
         }
+        if let Some(chemins) = demandes.tags_a_modifier {
+            self.editeur = Some(EditeurTags::ouvrir(ctx, chemins, &self.tags));
+        }
         match demande {
             // Écouter une playlist : elle remplace la liste de lecture.
             Some(Demande::Charger { fichiers, depart }) => {
@@ -1274,6 +1309,9 @@ impl eframe::App for LecteurApp {
                 Some(Action::AjouterAPlaylist { nom, fichier }) => {
                     self.playlists.ajouter_a(&nom, &[fichier]);
                 }
+                Some(Action::ModifierLesTags(fichier)) => {
+                    self.editeur = Some(EditeurTags::ouvrir(ui.ctx(), vec![fichier], &self.tags));
+                }
                 None => {}
             }
 
@@ -1317,6 +1355,7 @@ impl eframe::App for LecteurApp {
             }
         }
 
+        self.afficher_editeur(ctx);
         depot::dessiner_survol(ctx);
         playlists::dessiner_glissement(ctx);
 
