@@ -14,6 +14,7 @@ use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::{MetadataOptions, MetadataRevision, StandardTagKey, StandardVisualKey};
 use symphonia::core::probe::Hint;
 
+use crate::egalisation::Mesure;
 use crate::liste::nom_du_fichier;
 
 /// Côté le plus long de la pochette une fois réduite : assez pour qu'elle
@@ -94,6 +95,38 @@ pub fn lire(chemin: &Path) -> Tags {
         tags
     })
     .unwrap_or_default()
+}
+
+/// Le volume du morceau d'après ses tags ReplayGain « par morceau », s'il
+/// en a (« -6.54 dB » pour le gain, « 0.98 » pour la crête). Sans crête
+/// indiquée, on la suppose au maximum : le morceau ne sera jamais monté.
+pub fn lire_replaygain(chemin: &Path) -> Option<Mesure> {
+    ouvrir(chemin, |revision, _| {
+        let tags = revision?.tags();
+        // Selon le logiciel qui les a écrits, ces tags sont en majuscules
+        // ou en minuscules : on les cherche par leur nom, sans distinction.
+        let valeur = |cle: StandardTagKey, nom: &str| -> Option<f32> {
+            let tag = tags
+                .iter()
+                .find(|t| t.std_key == Some(cle) || t.key.to_ascii_lowercase().ends_with(nom))?;
+            premier_decimal(&tag.value.to_string())
+        };
+        let gain_db = valeur(StandardTagKey::ReplayGainTrackGain, "replaygain_track_gain")?;
+        let crete = valeur(StandardTagKey::ReplayGainTrackPeak, "replaygain_track_peak")
+            .filter(|c| *c > 0.0)
+            .unwrap_or(1.0);
+        Some(Mesure { gain_db, crete })
+    })?
+}
+
+/// Le nombre décimal au début d'un tag : « -6.54 dB » donne -6.54.
+fn premier_decimal(texte: &str) -> Option<f32> {
+    let texte = texte.trim().replace(',', ".");
+    let fin = texte
+        .char_indices()
+        .find(|&(i, c)| !(c.is_ascii_digit() || c == '.' || (i == 0 && (c == '-' || c == '+'))))
+        .map_or(texte.len(), |(i, _)| i);
+    texte[..fin].parse().ok().filter(|v: &f32| v.is_finite())
 }
 
 /// Le nombre au début d'un tag : « 3/12 » (piste 3 sur 12) donne 3.
@@ -479,6 +512,61 @@ pub mod tests {
             (tags.artiste_album, tags.numero, tags.disque),
             (None, None, None)
         );
+    }
+
+    /// Un faux MP3 avec un titre et ces cadres TXXX (description, valeur).
+    fn ecrire_mp3_txxx(nom: &str, txxx: &[(&str, &str)]) -> PathBuf {
+        let textes: Vec<String> = txxx.iter().map(|(d, v)| format!("{d}\0{v}")).collect();
+        let mut cadres = vec![("TIT2", "Titre")];
+        cadres.extend(textes.iter().map(|t| ("TXXX", t.as_str())));
+        ecrire_mp3_avec(nom, &cadres, false, 100)
+    }
+
+    #[test]
+    fn lit_les_tags_replaygain() {
+        let chemin = ecrire_mp3_txxx(
+            "replaygain.mp3",
+            &[
+                ("REPLAYGAIN_TRACK_GAIN", "-6.54 dB"),
+                ("REPLAYGAIN_TRACK_PEAK", "0.987654"),
+                ("REPLAYGAIN_ALBUM_GAIN", "-8.00 dB"),
+            ],
+        );
+        let mesure = lire_replaygain(&chemin).expect("tags ReplayGain");
+        assert_eq!(mesure.gain_db, -6.54);
+        assert_eq!(mesure.crete, 0.987654);
+        // Les autres tags sont toujours lus.
+        assert_eq!(lire(&chemin).titre.as_deref(), Some("Titre"));
+    }
+
+    /// En minuscules et sans crête (certains logiciels) : on suppose la
+    /// crête au maximum.
+    #[test]
+    fn replaygain_en_minuscules_sans_crete() {
+        let chemin = ecrire_mp3_txxx(
+            "replaygain_min.mp3",
+            &[("replaygain_track_gain", "+3.2 dB")],
+        );
+        let mesure = lire_replaygain(&chemin).expect("tags ReplayGain");
+        assert_eq!(mesure.gain_db, 3.2);
+        assert_eq!(mesure.crete, 1.0);
+    }
+
+    #[test]
+    fn sans_tags_replaygain() {
+        let chemin = ecrire_mp3("sans_replaygain.mp3", Some("T"), None, None, false, 100);
+        assert_eq!(lire_replaygain(&chemin), None);
+        let album_seul = ecrire_mp3_txxx("album_seul.mp3", &[("REPLAYGAIN_ALBUM_GAIN", "-8 dB")]);
+        assert_eq!(lire_replaygain(&album_seul), None);
+    }
+
+    #[test]
+    fn premier_decimal_d_un_tag() {
+        assert_eq!(premier_decimal("-6.54 dB"), Some(-6.54));
+        assert_eq!(premier_decimal(" +3,5 dB"), Some(3.5));
+        assert_eq!(premier_decimal("0.98"), Some(0.98));
+        assert_eq!(premier_decimal("dB"), None);
+        assert_eq!(premier_decimal(""), None);
     }
 
     #[test]

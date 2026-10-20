@@ -21,6 +21,10 @@ const VITESSE_MAX: f64 = 8.0;
 /// son s'éteint (ou s'allume) peu à peu : sans ça, couper net le dernier
 /// échantillon ferait un petit « clic ».
 const VITESSE_FONDU: f64 = 0.2;
+/// Temps (en secondes) que met le volume égalisé à changer quand on le
+/// découvre en cours de morceau (mesure finie, option cochée ou décochée) :
+/// assez doux pour ne pas faire sursauter, sans clic.
+const LISSAGE_EGALISATION: f64 = 0.3;
 
 /// Comment le son s'arrête ou repart en douceur.
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -56,6 +60,8 @@ struct Etat {
     cible_scratch: Option<f64>,
     /// Pendant un freinage ou un démarrage en douceur.
     rampe: Option<Rampe>,
+    /// Le facteur du volume égalisé voulu pour ce morceau (rien : 1).
+    egalisation: Option<f32>,
 }
 
 /// La télécommande de la platine, gardée par l'interface.
@@ -74,6 +80,7 @@ impl Telecommande {
             canal: 0,
             vitesse: 1.0,
             niveau: 1.0,
+            egalisation: None,
             lecture: Lecture::default(),
             morceau: morceau.clone(),
             etat: etat.clone(),
@@ -91,6 +98,7 @@ impl Telecommande {
             let ancien = self.etat.lock().unwrap();
             let mut nouveau = telecommande.etat.lock().unwrap();
             nouveau.position = ancien.position;
+            nouveau.egalisation = ancien.egalisation;
             // (Un freinage vers la pause en cours compte comme une pause.)
             nouveau.en_pause = ancien.en_pause || matches!(ancien.rampe, Some(Rampe::Pause(..)));
         }
@@ -182,6 +190,13 @@ impl Telecommande {
         1.0 / (self.morceau.frequence as f64 * duree.as_secs_f64()).max(1.0)
     }
 
+    /// Le facteur du volume égalisé de ce morceau (1 = inchangé, 0,5 = deux
+    /// fois moins fort…). S'il change en cours de route, le son glisse en
+    /// douceur vers le nouveau volume.
+    pub fn egaliser(&self, facteur: f32) {
+        self.etat.lock().unwrap().egalisation = Some(facteur);
+    }
+
     /// Pendant un glissement : indique où se trouve la souris. La musique la suit.
     pub fn scratcher(&self, secondes: f32) {
         self.etat.lock().unwrap().cible_scratch = Some(self.morceau.trames(secondes));
@@ -196,6 +211,9 @@ pub struct Platine {
     vitesse: f64,
     /// Volume pendant un fondu (1 = normal, 0 = silence).
     niveau: f64,
+    /// Le facteur du volume égalisé appliqué en ce moment. Rien avant la
+    /// première trame : on part directement du facteur voulu.
+    egalisation: Option<f64>,
     /// La trame en cours d'envoi, et le prochain canal à envoyer.
     trame: Vec<f32>,
     canal: usize,
@@ -242,11 +260,26 @@ impl Platine {
         // On copie les ordres sans garder le verrou : lire la trame peut
         // demander de décoder un bloc (juste après un saut), et pendant ce
         // temps l'interface doit pouvoir lire la position sans attendre.
-        let (position, en_pause, cible_scratch, rampe) = {
+        let (position, en_pause, cible_scratch, rampe, egalisation) = {
             let etat = self.etat.lock().unwrap();
-            (etat.position, etat.en_pause, etat.cible_scratch, etat.rampe)
+            let egalisation = etat.egalisation.unwrap_or(1.0) as f64;
+            (
+                etat.position,
+                etat.en_pause,
+                etat.cible_scratch,
+                etat.rampe,
+                egalisation,
+            )
         };
         let frequence = self.morceau.frequence as f64;
+        // Le volume égalisé glisse vers le facteur voulu.
+        let egalisation = match self.egalisation {
+            Some(actuelle) => {
+                actuelle + (egalisation - actuelle) / (frequence * LISSAGE_EGALISATION)
+            }
+            None => egalisation,
+        };
+        self.egalisation = Some(egalisation);
         let fin = self.morceau.derniere_trame();
         // Volume de la trame : 1, sauf tout près de l'arrêt (freinage, démarrage).
         let mut gain = 1.0;
@@ -341,7 +374,7 @@ impl Platine {
             }
         }
         for sortie in &mut self.trame {
-            *sortie *= gain / 32768.0;
+            *sortie *= gain * egalisation as f32 / 32768.0;
         }
 
         // Si l'interface a sauté ailleurs pendant ce temps, son saut l'emporte.
@@ -752,5 +785,36 @@ mod tests {
         let reste: Vec<f32> = platine.by_ref().collect();
         assert!((298..=301).contains(&reste.len()), "{} trames", reste.len());
         assert!(*reste.last().unwrap() < 0.01 * 6000.0 / 32768.0);
+    }
+
+    /// Le volume égalisé connu dès le départ s'applique dès le premier
+    /// échantillon, et la reprise sur une autre sortie le garde.
+    #[test]
+    fn le_volume_egalise_s_applique_des_le_debut() {
+        let (telecommande, mut platine) = Telecommande::nouvelle(morceau_test(10));
+        telecommande.aller_a(2.0);
+        telecommande.egaliser(0.5);
+        assert_eq!(platine.next(), Some(0.5 * 2000.0 / 32768.0));
+        let (reprise, mut platine) = telecommande.reprise();
+        assert_eq!(platine.next(), Some(0.5 * 2001.0 / 32768.0));
+        drop(reprise);
+    }
+
+    /// Un volume égalisé découvert en cours de morceau arrive en douceur
+    /// (pas d'un coup), puis est atteint.
+    #[test]
+    fn le_volume_egalise_change_en_douceur() {
+        let (telecommande, mut platine) = Telecommande::nouvelle(morceau_test(10));
+        telecommande.aller_a(5.0);
+        assert_eq!(platine.next(), Some(5000.0 / 32768.0));
+        telecommande.egaliser(0.25);
+        let facteur = |e: f32, n: f32| e * 32768.0 / n;
+        let juste_apres = facteur(platine.next().unwrap(), 5001.0);
+        assert!(juste_apres > 0.99, "{juste_apres}");
+        for _ in 0..2000 {
+            platine.next();
+        }
+        let ensuite = facteur(platine.next().unwrap(), 7002.0);
+        assert!((ensuite - 0.25).abs() < 0.01, "{ensuite}");
     }
 }

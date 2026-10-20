@@ -3,6 +3,7 @@
 
 mod bibliotheque;
 mod depot;
+mod egalisation;
 mod liste;
 mod morceau;
 mod platine;
@@ -26,6 +27,7 @@ use eframe::egui;
 use rodio::Sink;
 
 use bibliotheque::{memoriser, Bibliotheque};
+use egalisation::VolumesConnus;
 use liste::{Action, ListeDeLecture};
 use morceau::Morceau;
 use platine::{Effet, Platine, Telecommande};
@@ -63,6 +65,15 @@ const REGLAGE_FREINAGE: &str = "freinage.txt";
 /// Le petit fichier où l'on mémorise si le scratch s'entend quand on fait
 /// glisser la barre de progression (« oui » ou « non »).
 const REGLAGE_SCRATCH: &str = "scratch.txt";
+/// Le petit fichier où l'on mémorise si le volume égalisé est activé (« oui » ou « non »).
+const REGLAGE_EGALISATION: &str = "volume_egalise.txt";
+/// Volume égalisé : facteur appliqué tant que le volume du morceau n'est pas
+/// encore connu (mesure en cours). La plupart des morceaux récents sont
+/// mixés fort : on les baisse déjà à moitié en attendant.
+const FACTEUR_INCONNU: f32 = 0.5;
+/// Volume égalisé : en plus du morceau en cours, on mesure à l'avance ce
+/// nombre de morceaux qui le suivent dans la liste.
+const A_MESURER_A_L_AVANCE: usize = 5;
 
 /// L'état de l'application.
 struct LecteurApp {
@@ -99,6 +110,13 @@ struct LecteurApp {
     // Quand on fait glisser la barre de progression, la musique suit-elle
     // la souris (bruit de scratch) ? Sinon, elle continue et saute au lâcher.
     scratch: bool,
+    // Tous les morceaux sonnent-ils aussi fort (volume égalisé) ?
+    egalisation: bool,
+    // Le volume de chaque morceau, lu dans ses tags ou mesuré en arrière-plan.
+    volumes: VolumesConnus,
+    // Le morceau en cours et la taille de la liste lors de la dernière
+    // demande de volumes : on ne redemande que quand ça change.
+    volumes_demandes: Option<(Option<usize>, usize)>,
     // L'image qui bouge avec la musique.
     visualiseur: Visualiseur,
     // Les tags (titre, artiste, album, durée) des morceaux, lus en arrière-plan.
@@ -187,6 +205,9 @@ impl LecteurApp {
             muet: false,
             freinage: option_memorisee(REGLAGE_FREINAGE),
             scratch: option_memorisee(REGLAGE_SCRATCH),
+            egalisation: option_memorisee(REGLAGE_EGALISATION),
+            volumes: VolumesConnus::new(ctx),
+            volumes_demandes: None,
             visualiseur: Visualiseur::new(),
             tags: TagsConnus::new(ctx),
             zone: ZoneDeNotification::new(ctx),
@@ -377,6 +398,8 @@ impl LecteurApp {
     ) -> Result<(), Box<dyn std::error::Error>> {
         let sortie = self.sortie.as_ref().ok_or("pas de sortie audio")?;
         let sink = Sink::try_new(&sortie.handle)?;
+        // Le volume égalisé est réglé avant le premier son.
+        telecommande.egaliser(self.facteur_egalisation());
         sink.append(platine);
         self.sink = Some(sink);
         self.appliquer_volume();
@@ -561,6 +584,50 @@ impl LecteurApp {
             .changed()
         {
             memoriser_option(REGLAGE_SCRATCH, self.scratch);
+        }
+        if ui
+            .checkbox(&mut self.egalisation, "Volume égalisé")
+            .on_hover_text(
+                "Tous les morceaux sonnent aussi fort, d'un album à l'autre. Le volume \
+                 de chaque morceau vient de ses tags ReplayGain s'il en a ; sinon, le \
+                 lecteur le mesure une fois et s'en souvient. Le curseur de volume \
+                 s'applique par-dessus.",
+            )
+            .changed()
+        {
+            memoriser_option(REGLAGE_EGALISATION, self.egalisation);
+            self.volumes_demandes = None;
+        }
+    }
+
+    /// Le facteur du volume égalisé pour le morceau en cours : 1 si
+    /// l'option est décochée, `FACTEUR_INCONNU` tant qu'il n'est pas mesuré.
+    fn facteur_egalisation(&self) -> f32 {
+        if !self.egalisation {
+            return 1.0;
+        }
+        self.liste
+            .courant()
+            .and_then(|n| self.liste.fichier(n))
+            .and_then(|chemin| self.volumes.gain(chemin))
+            .unwrap_or(FACTEUR_INCONNU)
+    }
+
+    /// Demande le volume du morceau en cours (en urgence) et des suivants,
+    /// et l'applique à la platine dès qu'il est connu.
+    fn suivre_l_egalisation(&mut self) {
+        let morceaux = self.liste.morceaux();
+        let demande = (self.liste.courant(), morceaux.len());
+        if self.egalisation && self.volumes_demandes != Some(demande) {
+            self.volumes_demandes = Some(demande);
+            if let Some(courant) = demande.0 {
+                let suivants = (0..=A_MESURER_A_L_AVANCE.min(morceaux.len().saturating_sub(1)))
+                    .map(|ecart| morceaux[(courant + ecart) % morceaux.len()].as_path());
+                self.volumes.demander(suivants);
+            }
+        }
+        if let Some(telecommande) = &self.telecommande {
+            telecommande.egaliser(self.facteur_egalisation());
         }
     }
 
@@ -914,6 +981,7 @@ impl eframe::App for LecteurApp {
 
         self.recevoir_depot(ctx);
         self.suivre_le_chargement();
+        self.suivre_l_egalisation();
 
         // À gauche, la bibliothèque. Un clic sur un morceau (ou sur « ➕ tout »)
         // l'ajoute à la liste de lecture. En bas, les playlists.

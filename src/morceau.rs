@@ -110,6 +110,49 @@ impl Morceau {
         Ok(morceau)
     }
 
+    /// Ouvre un MP3 pour le parcourir une seule fois en entier (pour mesurer
+    /// son volume) : pas de fil qui prépare les blocs, voir `parcourir`.
+    pub fn ouvrir_pour_parcourir(
+        chemin: &Path,
+        continuer: impl Fn() -> bool,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::depuis_tant_que(Box::new(File::open(chemin)?), continuer)
+    }
+
+    /// Décode tout le morceau, du début à la fin, et passe le son à `f` petit
+    /// à petit (échantillons entrelacés). On ne garde rien en mémoire. S'arrête
+    /// dès que `f` renvoie faux, et renvoie faux dans ce cas.
+    pub fn parcourir(&self, mut f: impl FnMut(&[i16]) -> bool) -> bool {
+        match &self.contenu {
+            Contenu::Mp3 {
+                paquets,
+                parametres,
+                ..
+            } => {
+                let Ok(mut decodeur) = MpaDecoder::try_new(parametres, &DecoderOptions::default())
+                else {
+                    return true; // rien de lisible : rien à parcourir
+                };
+                let mut tampon: Option<SampleBuffer<i16>> = None;
+                for paquet in paquets {
+                    // Un paquet abîmé est simplement sauté.
+                    if let Ok(son) = decodeur.decode(paquet) {
+                        let tampon = tampon.get_or_insert_with(|| {
+                            SampleBuffer::new(son.capacity() as u64, *son.spec())
+                        });
+                        tampon.copy_interleaved_ref(son);
+                        if !f(tampon.samples()) {
+                            return false;
+                        }
+                    }
+                }
+                true
+            }
+            #[cfg(test)]
+            Contenu::Brut(tout) => f(tout),
+        }
+    }
+
     /// Lance le fil qui prépare les blocs à l'avance.
     fn lancer_la_preparation(self: &Arc<Self>) {
         let suivi = Arc::downgrade(self);
