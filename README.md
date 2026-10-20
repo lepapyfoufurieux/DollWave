@@ -26,3 +26,4 @@ cargo run --release
 - [x] Étape 3 : barre de progression
 - [x] Étape 4 : liste de lecture (précédent / suivant, lecture aléatoire)
 - [x] Étape 5 : bibliothèque (tous les MP3 du dossier Musique, rangés par dossier, avec recherche ; un clic ajoute un morceau à la liste)
+- [x] Étape 6 : favoris (★ sur un dossier ou un morceau pour le faire remonter en tête de son dossier)
