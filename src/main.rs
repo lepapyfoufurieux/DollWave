@@ -77,6 +77,8 @@ struct LecteurApp {
     pochette: Option<(PathBuf, Option<egui::TextureHandle>)>,
     // Un message affiché en bas de la fenêtre (erreurs, infos).
     message: String,
+    // Les dossiers lâchés dans la fenêtre, en train d'être parcourus.
+    depots: depot::Depots,
 }
 
 impl LecteurApp {
@@ -102,6 +104,7 @@ impl LecteurApp {
             tags: TagsConnus::new(ctx),
             pochette: None,
             message,
+            depots: depot::Depots::default(),
         }
     }
 
@@ -125,16 +128,19 @@ impl LecteurApp {
     }
 
     /// Ajoute les fichiers et dossiers lâchés dans la fenêtre, s'il y en a.
+    /// Les dossiers sont parcourus en arrière-plan : leurs morceaux arrivent
+    /// dans la liste quand c'est fini.
     fn recevoir_depot(&mut self, ctx: &egui::Context) {
         let elements = depot::elements_deposes(ctx);
-        if elements.is_empty() {
-            return;
+        if !elements.is_empty() {
+            self.depots.lancer(ctx, elements);
         }
-        let fichiers = depot::mp3_deposes(elements);
-        if fichiers.is_empty() {
-            self.message = "Aucun fichier MP3 dans ce qui a été déposé.".to_string();
-        } else {
-            self.ajouter(fichiers);
+        if let Some(fichiers) = self.depots.recu() {
+            if fichiers.is_empty() {
+                self.message = "Aucun fichier MP3 dans ce qui a été déposé.".to_string();
+            } else {
+                self.ajouter(fichiers);
+            }
         }
     }
 
@@ -678,6 +684,13 @@ impl eframe::App for LecteurApp {
             if !self.message.is_empty() {
                 ui.add_space(8.0);
                 ui.colored_label(egui::Color32::LIGHT_RED, &self.message);
+            }
+            if self.depots.en_cours() {
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label("Lecture des fichiers déposés…");
+                });
             }
 
             ui.add_space(8.0);
