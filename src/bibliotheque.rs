@@ -11,6 +11,7 @@ use eframe::egui;
 use crate::liste::{nom_du_fichier, rangee};
 use crate::playlists::{menu_ajouter_a_une_playlist, MorceauxGlisses};
 use crate::regroupement::{regrouper, Album, Regroupement};
+use crate::systeme::{dossier_musique, fichier_de_reglage};
 use crate::tags::TagsConnus;
 
 /// Au-delà de ce nombre de résultats de recherche, on n'affiche que les
@@ -251,11 +252,11 @@ pub struct Bibliotheque {
 
 impl Bibliotheque {
     /// Reprend le dossier mémorisé la dernière fois, ou à défaut le dossier
-    /// Musique de Windows, et commence à le lire.
+    /// Musique du système, et commence à le lire.
     pub fn new(ctx: &egui::Context) -> Self {
         let dossier = fichier_de_reglage(REGLAGE_DOSSIER)
             .and_then(|f| lire_reglage(&f))
-            .unwrap_or_else(dossier_par_defaut);
+            .unwrap_or_else(dossier_musique);
         let favoris = fichier_de_reglage(REGLAGE_FAVORIS)
             .map(|f| lire_favoris(&f))
             .unwrap_or_default();
@@ -911,32 +912,10 @@ pub fn est_un_mp3(chemin: &Path) -> bool {
         .is_some_and(|e| e.eq_ignore_ascii_case("mp3"))
 }
 
-/// Le dossier Musique de Windows : C:\Users\<nom>\Music.
-fn dossier_par_defaut() -> PathBuf {
-    variable("USERPROFILE")
-        .or_else(|| variable("HOME"))
-        .map(|maison| PathBuf::from(maison).join("Music"))
-        .unwrap_or_default()
-}
-
 /// Les petits fichiers où l'on mémorise nos réglages.
 const REGLAGE_DOSSIER: &str = "dossier_musique.txt";
 const REGLAGE_FAVORIS: &str = "favoris.txt";
 const REGLAGE_VUE: &str = "vue_bibliotheque.txt";
-
-/// Un petit fichier de réglage, par exemple
-/// %APPDATA%\lecteur_mp3\dossier_musique.txt.
-pub(crate) fn fichier_de_reglage(nom: &str) -> Option<PathBuf> {
-    let base = variable("APPDATA")
-        .map(PathBuf::from)
-        .or_else(|| variable("HOME").map(|h| PathBuf::from(h).join(".config")))?;
-    Some(base.join("lecteur_mp3").join(nom))
-}
-
-/// La valeur d'une variable d'environnement de Windows, si elle n'est pas vide.
-fn variable(nom: &str) -> Option<std::ffi::OsString> {
-    std::env::var_os(nom).filter(|v| !v.is_empty())
-}
 
 /// Le dossier mémorisé, s'il y en a un.
 fn lire_reglage(fichier: &Path) -> Option<PathBuf> {

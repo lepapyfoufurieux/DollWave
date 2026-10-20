@@ -1,4 +1,6 @@
 # Compile lecteur_mp3.exe sur un Windows de GitHub.
+# Un second job compile aussi sous Linux, pour vérifier que le lecteur
+# reste facile à porter.
 # - À chaque pull request ou lancement manuel : le .exe est disponible
 #   dans l'onglet « Actions » (rubrique « Artifacts ») pour le tester.
 # - Quand on pousse une étiquette de version (ex. v0.1.0) : le .exe est
@@ -40,3 +42,19 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release create "${{ github.ref_name }}" target/release/lecteur_mp3.exe --title "Lecteur MP3 ${{ github.ref_name }}" --generate-notes
+
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Bibliothèque son de Linux, nécessaire à rodio.
+      - name: Dépendances Linux
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Tests
+        run: cargo test

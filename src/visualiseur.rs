@@ -10,8 +10,9 @@ use std::thread;
 use eframe::egui;
 use rustfft::{num_complex::Complex, Fft, FftPlanner};
 
-use crate::bibliotheque::{fichier_de_reglage, memoriser};
+use crate::bibliotheque::memoriser;
 use crate::morceau::Morceau;
+use crate::systeme::fichier_de_reglage;
 
 /// Nombre d'échantillons analysés pour les barres. Plus c'est grand, plus les
 /// graves sont précis, mais plus les barres réagissent lentement.
