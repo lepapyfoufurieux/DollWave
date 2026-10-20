@@ -85,6 +85,20 @@ impl ZoneDeNotification {
     pub fn new(ctx: &egui::Context) -> Self {
         let (envoi, clics) = mpsc::channel();
         let partage = Arc::new(Partage::default());
+        // Pendant les tests, plusieurs lecteurs sont créés en même temps,
+        // chacun dans son fil : pas d'icône, car tray-icon n'a qu'un seul
+        // gestionnaire de clics pour tout le programme (le test plante sinon).
+        if cfg!(test) {
+            drop(envoi);
+            return Self {
+                entrees: None,
+                rangee: None,
+                partage,
+                clics,
+                fil: None,
+                infobulle: String::new(),
+            };
+        }
         let (envoi_entrees, entrees) = mpsc::channel();
         let fil = {
             let (partage, ctx) = (partage.clone(), ctx.clone());
