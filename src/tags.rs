@@ -31,6 +31,9 @@ pub struct Tags {
     pub artiste: Option<String>,
     pub album: Option<String>,
     pub duree: Option<Duration>,
+    /// Titre, artiste et album en minuscules, préparés une fois pour toutes
+    /// pour la recherche (voir `texte_a_chercher`).
+    recherche: String,
 }
 
 impl Tags {
@@ -45,8 +48,12 @@ impl Tags {
     }
 
     /// Le titre, l'artiste et l'album à la suite, en minuscules, pour la recherche.
-    pub fn texte_a_chercher(&self) -> String {
-        [&self.titre, &self.artiste, &self.album]
+    pub fn texte_a_chercher(&self) -> &str {
+        &self.recherche
+    }
+
+    fn preparer_la_recherche(&mut self) {
+        self.recherche = [&self.titre, &self.artiste, &self.album]
             .into_iter()
             .flatten()
             .map(String::as_str)
@@ -66,12 +73,15 @@ pub fn lire(chemin: &Path) -> Tags {
             let valeur = valeur.trim();
             (!valeur.is_empty()).then(|| valeur.to_string())
         };
-        Tags {
+        let mut tags = Tags {
             titre: texte(StandardTagKey::TrackTitle),
             artiste: texte(StandardTagKey::Artist),
             album: texte(StandardTagKey::Album),
             duree,
-        }
+            recherche: String::new(),
+        };
+        tags.preparer_la_recherche();
+        tags
     })
     .unwrap_or_default()
 }
@@ -224,19 +234,25 @@ impl TagsConnus {
         self.avec(chemin, |tags| tags.and_then(|t| t.duree))
     }
 
-    /// Titre, artiste et album en minuscules (vide tant que ce n'est pas lu).
-    pub fn texte_a_chercher(&self, chemin: &Path) -> String {
-        // Pas de `avec` ici : la recherche passe sur toute la bibliothèque,
-        // déjà demandée en entier.
-        self.etat()
-            .lus
-            .get(chemin)
-            .map(Tags::texte_a_chercher)
-            .unwrap_or_default()
+    /// De quoi chercher dans les tags de toute la bibliothèque, en ne prenant
+    /// le verrou qu'une fois pour toute la recherche (et pas une fois par
+    /// morceau). Pas de `avec` ici : la bibliothèque est déjà demandée en entier.
+    pub fn pour_chercher(&self) -> TextesAChercher<'_> {
+        TextesAChercher(self.etat())
     }
 
     pub fn version(&self) -> u64 {
         self.etat().version
+    }
+}
+
+/// Les tags connus, le temps d'une recherche (voir `TagsConnus::pour_chercher`).
+pub struct TextesAChercher<'a>(std::sync::MutexGuard<'a, Etat>);
+
+impl TextesAChercher<'_> {
+    /// Titre, artiste et album en minuscules (vide tant que ce n'est pas lu).
+    pub fn de(&self, chemin: &Path) -> &str {
+        self.0.lus.get(chemin).map_or("", Tags::texte_a_chercher)
     }
 }
 
@@ -432,6 +448,6 @@ pub mod tests {
             assert!(debut.elapsed() < Duration::from_secs(5), "tags jamais lus");
             std::thread::sleep(Duration::from_millis(10));
         }
-        assert_eq!(connus.texte_a_chercher(&chemin), "fond moi");
+        assert_eq!(connus.pour_chercher().de(&chemin), "fond moi");
     }
 }

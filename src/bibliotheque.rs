@@ -141,7 +141,7 @@ impl Contenu {
 /// album), sans tenir compte des majuscules. Par exemple « daft discovery »
 /// trouve « Daft Punk\Discovery\One More Time.mp3 ».
 /// `tags` donne le texte des tags d'un morceau, en minuscules.
-fn chercher(tous: &[Entree], recherche: &str, tags: impl Fn(&Path) -> String) -> Vec<usize> {
+fn chercher<'t>(tous: &[Entree], recherche: &str, tags: impl Fn(&Path) -> &'t str) -> Vec<usize> {
     let mots: Vec<String> = recherche
         .split_whitespace()
         .map(str::to_lowercase)
@@ -149,9 +149,16 @@ fn chercher(tous: &[Entree], recherche: &str, tags: impl Fn(&Path) -> String) ->
     tous.iter()
         .enumerate()
         .filter(|(_, entree)| {
+            // On ne regarde les tags que pour les mots absents du nom.
+            let mut manquants = mots
+                .iter()
+                .filter(|mot| !entree.texte.contains(mot.as_str()))
+                .peekable();
+            if manquants.peek().is_none() {
+                return true;
+            }
             let tags = tags(&entree.chemin);
-            mots.iter()
-                .all(|mot| entree.texte.contains(mot.as_str()) || tags.contains(mot.as_str()))
+            manquants.all(|mot| tags.contains(mot.as_str()))
         })
         .map(|(n, _)| n)
         .collect()
@@ -396,8 +403,8 @@ impl Bibliotheque {
         // Pendant que les tags arrivent, la recherche se refait de temps en temps.
         let faite = (recherche.to_string(), lignes.tags.version());
         if self.recherche_faite.as_ref() != Some(&faite) {
-            let tags = lignes.tags;
-            self.resultats = chercher(&contenu.tous, recherche, |m| tags.texte_a_chercher(m));
+            let textes = lignes.tags.pour_chercher();
+            self.resultats = chercher(&contenu.tous, recherche, |m| textes.de(m));
             self.recherche_faite = Some(faite);
         }
         if self.resultats.is_empty() {
@@ -836,7 +843,7 @@ mod tests {
         }
         let contenu = Contenu::lire(&racine);
         let trouves = |recherche: &str| -> Vec<String> {
-            chercher(&contenu.tous, recherche, |_| String::new())
+            chercher(&contenu.tous, recherche, |_| "")
                 .into_iter()
                 .map(|n| nom_du_fichier(&contenu.tous[n].chemin))
                 .collect()
@@ -859,11 +866,11 @@ mod tests {
         }
         let contenu = Contenu::lire(&racine);
         // Seul 01.mp3 a des tags.
-        let tags = |chemin: &Path| -> String {
+        let tags = |chemin: &Path| -> &str {
             if chemin.ends_with("01.mp3") {
-                "one more time daft punk discovery".to_string()
+                "one more time daft punk discovery"
             } else {
-                String::new()
+                ""
             }
         };
         let trouves = |recherche: &str| -> Vec<String> {
