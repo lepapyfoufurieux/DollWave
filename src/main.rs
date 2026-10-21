@@ -165,7 +165,7 @@ struct LecteurApp {
     muet: bool,
     // Au Stop et à la Pause, le son ralentit-il comme un vinyle qu'on arrête
     // à la main (et accélère-t-il à la Lecture) ?
-    // Les effets néon : lignes d'écran, lueurs qui respirent, intensité.
+    // Les effets néon : lignes d'écran, lueurs qui respirent.
     effets: effets::Effets,
     freinage: bool,
     // Quand on fait glisser la barre de progression, la musique suit-elle
@@ -342,7 +342,7 @@ impl LecteurApp {
             position_glissee: None,
             volume: 0.5,
             muet: false,
-            effets: effets::Effets::charger(),
+            effets: effets::Effets::default(),
             freinage: option_memorisee(REGLAGE_FREINAGE),
             scratch: option_memorisee(REGLAGE_SCRATCH),
             egalisation: option_memorisee(REGLAGE_EGALISATION),
@@ -839,8 +839,6 @@ impl LecteurApp {
         {
             memoriser_option(REGLAGE_PAROLES, self.afficher_paroles);
         }
-        ui.separator();
-        self.effets.menu(ui);
     }
 
     /// Le facteur du volume égalisé pour le morceau en cours : 1 si

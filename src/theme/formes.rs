@@ -5,32 +5,20 @@
 //! Tout est dessiné avec les formes simples d'egui (polygones, traits,
 //! maillages colorés) : rien à charger, et peu de calcul à chaque image.
 
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use eframe::egui::{self, epaint, Color32, Pos2, Rect, Shape, Stroke, Vec2};
 
 use super::{attenue, CYAN, FOND, PANNEAU, TEXTE_DISCRET};
 
-/// La force des lueurs, de 0 (aucune) à 2 (très fortes). 1 par défaut ;
-/// le réglage « Intensité des effets » la change (voir `fixer_intensite`).
-static INTENSITE: AtomicU32 = AtomicU32::new(0x3F80_0000); // 1.0
-
-/// La force des lueurs en ce moment (voir `INTENSITE`).
+/// La force des lueurs et des lignes d'écran (1 : celle de la maquette).
 pub fn intensite() -> f32 {
-    f32::from_bits(INTENSITE.load(Ordering::Relaxed))
-}
-
-/// Change la force des lueurs (gardée entre 0 et 2).
-pub fn fixer_intensite(force: f32) {
-    INTENSITE.store(force.clamp(0.0, 2.0).to_bits(), Ordering::Relaxed);
+    1.0
 }
 
 /// La respiration des lueurs animées, de 0 (au plus faible) à 1 (au plus
 /// fort). Elle bat pendant la lecture et reste à 1 sinon (écran figé).
 static PULSATION: AtomicU32 = AtomicU32::new(0x3F80_0000); // 1.0
-
-/// Les lignes d'écran (effet vieux moniteur) sont-elles affichées ?
-static LIGNES: AtomicBool = AtomicBool::new(true);
 
 /// La respiration des lueurs animées en ce moment (voir `PULSATION`).
 pub fn pulsation() -> f32 {
@@ -42,17 +30,11 @@ pub fn fixer_pulsation(valeur: f32) {
     PULSATION.store(valeur.clamp(0.0, 1.0).to_bits(), Ordering::Relaxed);
 }
 
-/// Affiche ou cache les lignes d'écran.
-pub fn fixer_lignes(affichees: bool) {
-    LIGNES.store(affichees, Ordering::Relaxed);
-}
-
 /// Des lignes d'écran sur `zone` : une ligne sombre d'un pixel toutes les
-/// `ecart` points, d'opacité `opacite` (0 à 255) à l'intensité normale.
-/// Rien si l'option est décochée ou si l'intensité des effets est à 0.
+/// `ecart` points, d'opacité `opacite` (0 à 255).
 pub fn lignes_d_ecran(peintre: &egui::Painter, zone: Rect, ecart: f32, opacite: f32) {
     let alpha = (opacite * intensite()).round().min(255.0);
-    if !LIGNES.load(Ordering::Relaxed) || alpha < 1.0 {
+    if alpha < 1.0 {
         return;
     }
     let trait_ = Stroke::new(1.0_f32, Color32::from_black_alpha(alpha as u8));
@@ -887,16 +869,6 @@ mod tests {
         );
         let milieu = melange(Color32::BLACK, Color32::WHITE, 0.5);
         assert!((127..=128).contains(&milieu.r()));
-    }
-
-    #[test]
-    fn l_intensite_reste_entre_0_et_2() {
-        fixer_intensite(5.0);
-        assert_eq!(intensite(), 2.0);
-        fixer_intensite(-1.0);
-        assert_eq!(intensite(), 0.0);
-        fixer_intensite(1.0);
-        assert_eq!(intensite(), 1.0);
     }
 
     /// Dessine une image avec un bouton néon, en cliquant à `clic` s'il y en a
