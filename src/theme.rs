@@ -46,8 +46,18 @@ const MAILLE: f32 = 28.0;
 const MAILLE_FORTE: usize = 4;
 
 /// Un néon atténué : `opacite` de 0 (invisible) à 255 (plein).
+///
+/// Le mélange se fait comme dans un navigateur (donc comme sur la maquette) :
+/// `from_rgba_unmultiplied` d'egui mélange autrement et rend les couleurs
+/// peu opaques environ trois fois plus claires.
 pub fn attenue(couleur: Color32, opacite: u8) -> Color32 {
-    Color32::from_rgba_unmultiplied(couleur.r(), couleur.g(), couleur.b(), opacite)
+    let canal = |c: u8| ((c as u16 * opacite as u16 + 127) / 255) as u8;
+    Color32::from_rgba_premultiplied(
+        canal(couleur.r()),
+        canal(couleur.g()),
+        canal(couleur.b()),
+        opacite,
+    )
 }
 
 /// Les couleurs egui du thème Néon.
@@ -147,6 +157,15 @@ fn positions(debut: f32, fin: f32) -> impl Iterator<Item = f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn une_couleur_attenuee_se_melange_comme_sur_la_maquette() {
+        // Cyan à 13 % sur le fond nuit : à peine teinté, comme dans le navigateur.
+        let c = attenue(CYAN, 34);
+        assert_eq!((c.r(), c.g(), c.b(), c.a()), (0, 31, 34, 34));
+        assert_eq!(attenue(CYAN, 255), CYAN);
+        assert_eq!(attenue(CYAN, 0), Color32::TRANSPARENT);
+    }
 
     /// Luminance relative (WCAG) d'une couleur opaque.
     fn luminance(c: Color32) -> f32 {
