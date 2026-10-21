@@ -8,6 +8,7 @@ use std::sync::mpsc::{self, Receiver, TryRecvError};
 
 use eframe::egui;
 
+use crate::generer_paroles::Generation;
 use crate::liste::{nom_du_fichier, rangee};
 use crate::playlists::{menu_clic_droit, ChoixDuMenu, MorceauxGlisses};
 use crate::regroupement::{regrouper, Album, Regroupement};
@@ -248,6 +249,9 @@ pub struct Bibliotheque {
     /// connus à ce moment-là : on ne range à nouveau que si de nouveaux
     /// tags sont arrivés.
     regroupement: Option<(Regroupement, u64)>,
+    /// La recherche des paroles (bouton « 📝 Paroles »), pendant qu'elle
+    /// tourne et ensuite tant que son résumé est affiché.
+    generation: Option<Generation>,
 }
 
 impl Bibliotheque {
@@ -275,6 +279,7 @@ impl Bibliotheque {
             hauteur_entete: None,
             vue,
             regroupement: None,
+            generation: None,
         };
         bibliotheque.actualiser(ctx);
         bibliotheque
@@ -358,6 +363,7 @@ impl Bibliotheque {
                 {
                     self.actualiser(ui.ctx());
                 }
+                self.bouton_paroles(ui);
             });
         });
         ui.label(
@@ -365,6 +371,7 @@ impl Bibliotheque {
                 .small()
                 .weak(),
         );
+        let paroles_ecrites = self.afficher_generation(ui);
 
         // De droite à gauche : d'abord le bouton ✖, puis le champ prend
         // exactement la place qui reste (sans quoi le panneau s'élargirait
@@ -448,7 +455,110 @@ impl Bibliotheque {
             vers_playlist,
             tags_a_modifier,
             infos_a_voir,
+            paroles_ecrites,
         }
+    }
+
+    /// Le bouton « 📝 Paroles » : cherche les .lrc qui manquent dans toute
+    /// la bibliothèque. Grisé pendant la lecture du dossier et pendant une
+    /// recherche de paroles déjà en cours.
+    fn bouton_paroles(&mut self, ui: &mut egui::Ui) {
+        let en_cours = self
+            .generation
+            .as_ref()
+            .is_some_and(|g| !g.progression().fini);
+        let morceaux = match &self.contenu {
+            Some(contenu) if self.en_cours.is_none() && !en_cours => contenu.tous.as_slice(),
+            _ => &[],
+        };
+        let bouton = ui
+            .add_enabled(!morceaux.is_empty(), egui::Button::new("📝 Paroles"))
+            .on_hover_text(
+                "Chercher sur Internet (LRCLIB) les paroles synchronisées des morceaux \
+                 qui n'ont pas encore de fichier .lrc, et les ranger à côté des MP3.\n\
+                 Les .lrc qui existent déjà ne sont jamais remplacés.",
+            );
+        if bouton.clicked() {
+            let chemins = morceaux.iter().map(|e| e.chemin.clone()).collect();
+            self.generation = Some(Generation::lancer(ui.ctx(), chemins));
+        }
+    }
+
+    /// Où en est la recherche des paroles (« Paroles : 12 / 40 », bouton
+    /// « Arrêter »), puis son résumé une fois finie. Renvoie les morceaux
+    /// dont le .lrc vient d'être écrit.
+    fn afficher_generation(&mut self, ui: &mut egui::Ui) -> Vec<PathBuf> {
+        let Some(generation) = &self.generation else {
+            return Vec::new();
+        };
+        let mut fermer = false;
+        let mut p = generation.progression();
+        let nouveaux = std::mem::take(&mut p.nouveaux);
+        ui.group(|ui| {
+            ui.set_width(ui.available_width());
+            if !p.fini {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label(format!("Paroles : {} / {}", p.faits, p.total));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if generation.arret_demande() {
+                            ui.label("Arrêt…");
+                        } else if ui
+                            .small_button("⏹ Arrêter")
+                            .on_hover_text("Arrêter la recherche (les .lrc déjà créés restent)")
+                            .clicked()
+                        {
+                            generation.arreter();
+                        }
+                    });
+                });
+                if let Some(chemin) = &p.en_cours {
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(nom_du_fichier(chemin)).small().weak(),
+                        )
+                        .truncate(),
+                    );
+                }
+                return;
+            }
+            ui.horizontal(|ui| {
+                ui.strong("Paroles");
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui
+                        .small_button("✖")
+                        .on_hover_text("Fermer ce résumé")
+                        .clicked()
+                    {
+                        fermer = true;
+                    }
+                });
+            });
+            if let Some(raison) = &p.interruption {
+                ui.label(format!("{raison} ({} / {} morceaux vus)", p.faits, p.total));
+            }
+            ui.label(format!(
+                "✔ {} trouvées · {} déjà présentes · {} introuvables",
+                p.trouves,
+                p.deja_presents,
+                p.introuvables.len()
+            ));
+            liste_du_resume(
+                ui,
+                "À vérifier (durée différente, version clip ?)",
+                &p.a_verifier,
+            );
+            liste_du_resume(ui, "Introuvables", &p.introuvables);
+            let erreurs: Vec<PathBuf> = p.erreurs.iter().map(|(c, _)| c.clone()).collect();
+            if let Some((_, premiere)) = p.erreurs.first() {
+                liste_du_resume(ui, &format!("Erreurs ({premiere})"), &erreurs);
+            }
+        });
+        drop(p);
+        if fermer {
+            self.generation = None;
+        }
+        nouveaux
     }
 
     /// Dessine les morceaux : l'arbre des dossiers, les artistes, les
@@ -573,6 +683,28 @@ pub struct Demandes {
     pub tags_a_modifier: Option<Vec<PathBuf>>,
     /// Le morceau dont on veut voir les infos du fichier (clic droit).
     pub infos_a_voir: Option<PathBuf>,
+    /// Les morceaux dont le .lrc vient d'être créé (bouton « 📝 Paroles »).
+    pub paroles_ecrites: Vec<PathBuf>,
+}
+
+/// Une liste de morceaux du résumé des paroles, repliée (rien si elle est vide).
+fn liste_du_resume(ui: &mut egui::Ui, titre: &str, morceaux: &[PathBuf]) {
+    if morceaux.is_empty() {
+        return;
+    }
+    egui::CollapsingHeader::new(format!("{titre} : {}", morceaux.len()))
+        .id_salt(titre)
+        .show(ui, |ui| {
+            egui::ScrollArea::vertical()
+                .id_salt(titre)
+                .max_height(120.0)
+                .show(ui, |ui| {
+                    for chemin in morceaux {
+                        ui.label(egui::RichText::new(nom_du_fichier(chemin)).small())
+                            .on_hover_text(chemin.display().to_string());
+                    }
+                });
+        });
 }
 
 /// Ce dont les lignes ont besoin pour se dessiner, et ce qu'on y a cliqué.
@@ -1234,6 +1366,7 @@ mod tests {
             hauteur_entete: None,
             vue: Vue::Dossiers,
             regroupement: None,
+            generation: None,
         };
         let dans_la_liste = HashSet::new();
         let mut image = |temps: f64, events: Vec<egui::Event>| {
@@ -1337,6 +1470,7 @@ mod tests {
             hauteur_entete: None,
             vue: Vue::Albums,
             regroupement: None,
+            generation: None,
         };
         let dans_la_liste = HashSet::new();
         let mut image = |temps: f64, events: Vec<egui::Event>| {

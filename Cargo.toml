@@ -25,6 +25,12 @@ id3 = "1.17.2"
 # Un seul lecteur ouvert : un deuxième lancement (double-clic sur un MP3)
 # passe ses fichiers au premier, sous Windows comme sous Linux.
 interprocess = "2.4"
+# Bouton « Paroles » de la bibliothèque : on cherche les .lrc sur LRCLIB
+# (site web), on lit ses réponses (format JSON) et on nettoie les titres
+# (« (Official Video) », numéros de piste…) avec des expressions régulières.
+ureq = "3.4.2"
+serde_json = "1.0.154"
+regex = "1.13.1"
 
 # Seulement sous Windows (voir src/systeme/windows.rs).
 [target.'cfg(windows)'.dependencies]
