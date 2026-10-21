@@ -107,7 +107,7 @@ impl ZoneDeNotification {
 #[cfg(not(windows))]
 pub fn autoriser_le_premier_plan() {}
 
-/// L'icône du lecteur (plot néon devant un soleil synthwave), en grand pour
+/// L'icône du lecteur (plot néon sur un sol quadrillé synthwave), en grand pour
 /// la fenêtre et la barre des tâches. Le dessin d'origine est
 /// assets/icone/icone.svg ; le .exe reçoit assets/icone/icone.ico (voir
 /// build.rs).
