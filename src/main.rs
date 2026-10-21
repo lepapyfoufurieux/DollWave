@@ -70,7 +70,8 @@ fn main() -> eframe::Result {
         // colonnes du bas seraient trop serrées.
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1320.0, 900.0])
-            .with_min_inner_size([1040.0, 720.0]),
+            .with_min_inner_size([1040.0, 720.0])
+            .with_icon(systeme::icone_fenetre()),
         ..Default::default()
     };
     eframe::run_native(

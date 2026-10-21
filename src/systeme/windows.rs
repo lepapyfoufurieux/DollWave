@@ -38,7 +38,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     WS_EX_APPWINDOW, WS_EX_TOOLWINDOW,
 };
 
-use super::{icone_vinyle, texte_d_infobulle, TAILLE_ICONE};
+use super::{icone_petite, texte_d_infobulle};
 use crate::raccourcis::Commande;
 
 /// Tous les combien (en millisecondes) le fil de l'icône regarde s'il a
@@ -313,7 +313,8 @@ fn creer_l_icone() -> Option<(TrayIcon, Entrees)> {
         &quitter,
     ])
     .ok()?;
-    let image = Icon::from_rgba(icone_vinyle(TAILLE_ICONE), TAILLE_ICONE, TAILLE_ICONE).ok()?;
+    let (pixels, largeur, hauteur) = icone_petite()?;
+    let image = Icon::from_rgba(pixels, largeur, hauteur).ok()?;
     let icone = TrayIconBuilder::new()
         .with_icon(image)
         .with_tooltip(texte_d_infobulle(None))

@@ -105,9 +105,29 @@ impl ZoneDeNotification {
 #[cfg(not(windows))]
 pub fn autoriser_le_premier_plan() {}
 
-/// Taille de l'icône près de l'horloge, en pixels.
+/// L'icône du lecteur (plot néon devant un soleil synthwave), en grand pour
+/// la fenêtre et la barre des tâches. Le dessin d'origine est
+/// assets/icone/icone.svg ; le .exe reçoit assets/icone/icone.ico (voir
+/// build.rs).
+const ICONE_GRANDE: &[u8] = include_bytes!("../assets/icone/icone-256.png");
+
+/// La même icône en 32 pixels, pour la zone près de l'horloge.
 #[cfg_attr(not(windows), allow(dead_code))]
-const TAILLE_ICONE: u32 = 32;
+const ICONE_PETITE: &[u8] = include_bytes!("../assets/icone/icone-32.png");
+
+/// L'icône de la fenêtre du lecteur.
+pub fn icone_fenetre() -> eframe::egui::IconData {
+    eframe::icon_data::from_png_bytes(ICONE_GRANDE).unwrap_or_default()
+}
+
+/// L'icône près de l'horloge : ses pixels (rouge, vert, bleu, opacité),
+/// ligne par ligne, et sa taille.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn icone_petite() -> Option<(Vec<u8>, u32, u32)> {
+    let image = image::load_from_memory(ICONE_PETITE).ok()?.into_rgba8();
+    let (largeur, hauteur) = image.dimensions();
+    Some((image.into_raw(), largeur, hauteur))
+}
 
 /// Windows coupe l'infobulle de l'icône au-delà de 127 caractères.
 const INFOBULLE_MAX: usize = 120;
@@ -125,36 +145,6 @@ fn texte_d_infobulle(morceau: Option<&str>) -> String {
     let mut coupe: String = texte.chars().take(INFOBULLE_MAX - 1).collect();
     coupe.push('…');
     coupe
-}
-
-/// Dessine l'icône du lecteur : un petit disque vinyle avec son étiquette
-/// orange. Rend les pixels (rouge, vert, bleu, opacité), ligne par ligne.
-#[cfg_attr(not(windows), allow(dead_code))]
-fn icone_vinyle(taille: u32) -> Vec<u8> {
-    let centre = taille as f32 / 2.0;
-    let mut pixels = Vec::with_capacity((taille * taille * 4) as usize);
-    for y in 0..taille {
-        for x in 0..taille {
-            // Distance au centre, rapportée au rayon (1.0 = bord du disque).
-            let dx = x as f32 + 0.5 - centre;
-            let dy = y as f32 + 0.5 - centre;
-            let r = (dx * dx + dy * dy).sqrt() / centre;
-            let (couleur, opacite) = if !(0.08..=1.0).contains(&r) {
-                // Hors du disque, ou le trou du milieu : transparent.
-                ([0, 0, 0], 0)
-            } else if r < 0.38 {
-                ([240, 130, 40], 255)
-            } else if ((r * 10.0).round() as u32).is_multiple_of(2) {
-                // Les sillons, un peu plus clairs.
-                ([60, 60, 60], 255)
-            } else {
-                ([25, 25, 25], 255)
-            };
-            pixels.extend_from_slice(&couleur);
-            pixels.push(opacite);
-        }
-    }
-    pixels
 }
 
 #[cfg(test)]
@@ -179,15 +169,13 @@ mod tests {
     }
 
     #[test]
-    fn l_icone_est_un_disque_troue() {
-        let pixels = icone_vinyle(TAILLE_ICONE);
-        assert_eq!(pixels.len(), (TAILLE_ICONE * TAILLE_ICONE * 4) as usize);
-        let opacite = |x: u32, y: u32| pixels[((y * TAILLE_ICONE + x) * 4 + 3) as usize];
-        let milieu = TAILLE_ICONE / 2;
-        assert_eq!(opacite(0, 0), 0, "coin transparent");
-        assert_eq!(opacite(milieu, milieu), 0, "trou du milieu");
-        assert_eq!(opacite(milieu, 2), 255, "bord du disque");
-        assert_eq!(opacite(milieu, milieu - 4), 255, "étiquette");
+    fn les_icones_se_lisent() {
+        let fenetre = icone_fenetre();
+        assert_eq!((fenetre.width, fenetre.height), (256, 256));
+        let (pixels, largeur, hauteur) = icone_petite().expect("icône 32 px");
+        assert_eq!((largeur, hauteur), (32, 32));
+        assert_eq!(pixels.len(), 32 * 32 * 4);
+        assert_eq!(pixels[3], 0, "coin arrondi transparent");
     }
 
     #[test]
