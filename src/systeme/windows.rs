@@ -1,9 +1,12 @@
 //! Ce qui n'existe que sous Windows : l'icône du lecteur près de l'horloge.
 //!
-//! Quand on réduit la fenêtre, elle quitte la barre des tâches et le
-//! lecteur n'est plus qu'une petite icône près de l'horloge. Un clic sur
-//! l'icône fait revenir la fenêtre ; un clic droit ouvre un menu (lecture,
-//! suivant, quitter…).
+//! Quand on ferme la fenêtre (la croix, Alt+F4 ou « Fermer la fenêtre »
+//! dans la barre des tâches), elle quitte la barre des tâches et le lecteur
+//! n'est plus qu'une petite icône près de l'horloge : la musique continue.
+//! Un clic sur l'icône fait revenir la fenêtre ; un clic droit ouvre un menu
+//! (lecture, suivant, quitter…). Pour fermer vraiment le lecteur, il y a
+//! « Quitter » dans ce menu, ou le bouton « Quitter » de la fenêtre. Le
+//! bouton de réduction, lui, réduit normalement dans la barre des tâches.
 //!
 //! La fenêtre reste « réduite » et non pas cachée : Windows continue ainsi
 //! de la faire vivre, et le lecteur passe toujours au morceau suivant. Pour
@@ -82,6 +85,8 @@ pub struct ZoneDeNotification {
     /// Le lecteur a demandé à revenir au premier plan (MP3 ouvert depuis
     /// l'explorateur), comme un clic sur l'icône.
     a_afficher: bool,
+    /// On a demandé à quitter vraiment : la fermeture n'est plus retenue.
+    quitter: bool,
 }
 
 impl ZoneDeNotification {
@@ -101,6 +106,7 @@ impl ZoneDeNotification {
                 fil: None,
                 infobulle: String::new(),
                 a_afficher: false,
+                quitter: false,
             };
         }
         let (envoi_entrees, entrees) = mpsc::channel();
@@ -120,7 +126,14 @@ impl ZoneDeNotification {
             fil,
             infobulle: String::new(),
             a_afficher: false,
+            quitter: false,
         }
+    }
+
+    /// Ferme vraiment le lecteur (et pas seulement sa fenêtre).
+    pub fn quitter(&mut self, ctx: &egui::Context) {
+        self.quitter = true;
+        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
     }
 
     /// Ramène la fenêtre au premier plan, même rangée près de l'horloge.
@@ -139,7 +152,7 @@ impl ZoneDeNotification {
     }
 
     /// À appeler à chaque image : range la fenêtre près de l'horloge quand
-    /// on vient de la réduire, la fait revenir quand on clique sur l'icône,
+    /// on vient de la fermer, la fait revenir quand on clique sur l'icône,
     /// et rend les commandes choisies dans le menu.
     pub fn surveiller(&mut self, ctx: &egui::Context, frame: &eframe::Frame) -> Vec<Commande> {
         let mut commandes = Vec::new();
@@ -168,8 +181,16 @@ impl ZoneDeNotification {
             } else if id == entrees.suivant {
                 commandes.push(Commande::Suivant);
             } else if id == entrees.quitter {
+                self.quitter = true;
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
+        }
+
+        // Fermer la fenêtre la range près de l'horloge, sauf si on a demandé
+        // à quitter.
+        let fermer = ctx.input(|i| i.viewport().close_requested());
+        if fermer && !self.quitter {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
         }
 
         let reduite = ctx.input(|i| i.viewport().minimized == Some(true));
@@ -184,9 +205,15 @@ impl ZoneDeNotification {
                 ressortir(fenetre, style);
                 self.rangee = None;
             }
-            // Déjà visible : on la passe juste au premier plan.
-            None if afficher => ctx.send_viewport_cmd(egui::ViewportCommand::Focus),
-            None if reduite => self.rangee = Some(ranger(fenetre)),
+            None if fermer && !self.quitter => self.rangee = Some(ranger(fenetre)),
+            // Déjà là (peut-être réduite dans la barre des tâches) : on la
+            // passe juste au premier plan.
+            None if afficher => {
+                if reduite {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+                }
+                ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+            }
             _ => {}
         }
         self.partage
@@ -324,8 +351,8 @@ fn fenetre(frame: &eframe::Frame) -> Option<HWND> {
     }
 }
 
-/// Retire la fenêtre (déjà réduite) de la barre des tâches, et rend son
-/// style d'origine.
+/// Réduit la fenêtre et la retire de la barre des tâches. Rend son style
+/// d'origine.
 fn ranger(fenetre: HWND) -> isize {
     // SAFETY : la fenêtre est celle du lecteur, ouverte pendant tout son
     // fonctionnement ; on ne change que son style et son affichage.
