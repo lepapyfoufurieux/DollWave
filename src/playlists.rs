@@ -39,18 +39,26 @@ pub enum ChoixDuMenu {
     Playlist(String),
     /// Ouvrir la fenêtre « Modifier les tags ».
     ModifierLesTags,
+    /// Ouvrir la fenêtre « Infos du fichier » (pour un morceau seul).
+    Infos,
 }
 
 /// Le menu du clic droit sur un morceau, un dossier, un artiste ou un album
-/// (de la bibliothèque ou de la liste de lecture) : `modifier` (« ✏ Modifier
-/// les tags… »), puis « Ajouter à la playlist » et le nom de chaque playlist.
+/// (de la bibliothèque ou de la liste de lecture) : « ℹ Infos du fichier… »
+/// si `infos` (un morceau seul), `modifier` (« ✏ Modifier les tags… »), puis
+/// « Ajouter à la playlist » et le nom de chaque playlist.
 pub fn menu_clic_droit(
     reponse: &egui::Response,
     noms: &[String],
     modifier: &str,
+    infos: bool,
 ) -> Option<ChoixDuMenu> {
     let mut choix = None;
     reponse.context_menu(|ui| {
+        if infos && ui.button("ℹ Infos du fichier…").clicked() {
+            choix = Some(ChoixDuMenu::Infos);
+            ui.close_menu();
+        }
         if ui.button(modifier).clicked() {
             choix = Some(ChoixDuMenu::ModifierLesTags);
             ui.close_menu();

@@ -24,6 +24,8 @@ pub enum Action {
     AjouterAPlaylist { nom: String, fichier: PathBuf },
     /// Ouvrir la fenêtre « Modifier les tags » de ce morceau (clic droit).
     ModifierLesTags(PathBuf),
+    /// Ouvrir la fenêtre « Infos du fichier » de ce morceau (clic droit).
+    Infos(PathBuf),
 }
 
 #[derive(Default)]
@@ -418,7 +420,7 @@ impl ListeDeLecture {
                                 },
                             );
                         }
-                        match menu_clic_droit(&ligne, playlists, "✏ Modifier les tags…") {
+                        match menu_clic_droit(&ligne, playlists, "✏ Modifier les tags…", true) {
                             Some(ChoixDuMenu::Playlist(nom)) => {
                                 action = Some(Action::AjouterAPlaylist {
                                     nom,
@@ -427,6 +429,9 @@ impl ListeDeLecture {
                             }
                             Some(ChoixDuMenu::ModifierLesTags) => {
                                 action = Some(Action::ModifierLesTags(fichier.clone()));
+                            }
+                            Some(ChoixDuMenu::Infos) => {
+                                action = Some(Action::Infos(fichier.clone()));
                             }
                             None => {}
                         }
