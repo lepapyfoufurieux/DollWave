@@ -6,6 +6,7 @@ mod depot;
 mod ecriture_tags;
 mod editeur_tags;
 mod egalisation;
+mod infos_fichier;
 mod liste;
 mod morceau;
 mod paroles;
@@ -32,6 +33,7 @@ use rodio::Sink;
 use bibliotheque::{memoriser, Bibliotheque};
 use editeur_tags::EditeurTags;
 use egalisation::VolumesConnus;
+use infos_fichier::{FenetreInfos, InfosConnues};
 use liste::{Action, ListeDeLecture};
 use morceau::Morceau;
 use paroles::Paroles;
@@ -203,6 +205,10 @@ struct LecteurApp {
     pochette_en_cours: Option<(PathBuf, Receiver<Option<egui::ColorImage>>)>,
     // La fenêtre « Modifier les tags », quand elle est ouverte.
     editeur: Option<EditeurTags>,
+    // La fenêtre « Infos du fichier », quand elle est ouverte.
+    fenetre_infos: Option<FenetreInfos>,
+    // Débit, taille… du morceau en cours (la ligne sous la pochette).
+    infos: InfosConnues,
     // Pour redessiner la fenêtre quand un travail en arrière-plan est fini.
     ctx: egui::Context,
 }
@@ -346,6 +352,8 @@ impl LecteurApp {
             chargement: None,
             pochette_en_cours: None,
             editeur: None,
+            fenetre_infos: None,
+            infos: InfosConnues::default(),
             ctx: ctx.clone(),
         }
     }
@@ -1084,6 +1092,8 @@ impl LecteurApp {
         let retour = editeur.afficher(ctx);
         for chemin in &retour.a_relire {
             self.tags.relire(chemin);
+            // Sa taille a changé.
+            self.infos.oublier(chemin);
         }
         let touche = |chemin: &PathBuf| retour.a_relire.contains(chemin);
         if self.pochette.as_ref().is_some_and(|(p, _)| touche(p))
@@ -1307,6 +1317,39 @@ impl LecteurApp {
     }
 }
 
+impl LecteurApp {
+    /// Sous la pochette, en petit : la qualité et la taille du morceau en
+    /// cours (« MP3 · 320 kbit/s · 44,1 kHz · stéréo · 8,4 Mo »). Un clic
+    /// ouvre la fenêtre « Infos du fichier ».
+    fn ligne_des_infos(&mut self, ui: &mut egui::Ui) {
+        let en_cours = match (&self.morceau, self.liste.courant()) {
+            (Some(_), Some(n)) => self.liste.fichier(n).map(Path::to_path_buf),
+            _ => None,
+        };
+        let Some(chemin) = en_cours else {
+            return;
+        };
+        let Some(infos) = self.infos.demander(ui.ctx(), &chemin) else {
+            return;
+        };
+        ui.add_space(4.0);
+        let clic = ui
+            .vertical_centered(|ui| {
+                ui.add(
+                    egui::Label::new(egui::RichText::new(infos_fichier::resume(&infos)).weak())
+                        .selectable(false)
+                        .sense(egui::Sense::click()),
+                )
+                .on_hover_text("ℹ Infos du fichier (débit, taille, emplacement)")
+                .clicked()
+            })
+            .inner;
+        if clic {
+            self.fenetre_infos = Some(FenetreInfos::ouvrir(ui.ctx(), chemin, &self.tags));
+        }
+    }
+}
+
 /// Une option du menu Options est-elle activée ? Oui, sauf si on l'a
 /// désactivée (« non » dans son fichier de réglage).
 fn option_memorisee(fichier: &str) -> bool {
@@ -1405,6 +1448,9 @@ impl eframe::App for LecteurApp {
         }
         if let Some(chemins) = demandes.tags_a_modifier {
             self.editeur = Some(EditeurTags::ouvrir(ctx, chemins, &self.tags));
+        }
+        if let Some(chemin) = demandes.infos_a_voir {
+            self.fenetre_infos = Some(FenetreInfos::ouvrir(ctx, chemin, &self.tags));
         }
         match demande {
             // Écouter une playlist : elle remplace la liste de lecture.
@@ -1546,6 +1592,9 @@ impl eframe::App for LecteurApp {
                 Some(Action::ModifierLesTags(fichier)) => {
                     self.editeur = Some(EditeurTags::ouvrir(ui.ctx(), vec![fichier], &self.tags));
                 }
+                Some(Action::Infos(fichier)) => {
+                    self.fenetre_infos = Some(FenetreInfos::ouvrir(ui.ctx(), fichier, &self.tags));
+                }
                 None => {}
             }
 
@@ -1559,6 +1608,7 @@ impl eframe::App for LecteurApp {
             self.visualiseur
                 .afficher(ui, self.morceau.as_ref(), position, en_lecture);
             self.afficher_pochette(ui, position);
+            self.ligne_des_infos(ui);
 
             if !self.message.is_empty() {
                 ui.add_space(8.0);
@@ -1595,6 +1645,11 @@ impl eframe::App for LecteurApp {
         }
 
         self.afficher_editeur(ctx);
+        if let Some(fenetre) = &mut self.fenetre_infos {
+            if !fenetre.afficher(ctx) {
+                self.fenetre_infos = None;
+            }
+        }
         depot::dessiner_survol(ctx);
         playlists::dessiner_glissement(ctx);
 

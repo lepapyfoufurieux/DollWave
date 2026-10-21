@@ -4,7 +4,7 @@
 //! usages de chaque système. Le code propre à un seul système est dans un
 //! sous-module (systeme/windows.rs).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 mod instance;
 #[cfg(windows)]
@@ -34,6 +34,34 @@ pub fn dossier_musique() -> PathBuf {
 /// - Linux : ~/.config/lecteur_mp3/dossier_musique.txt
 pub fn fichier_de_reglage(nom: &str) -> Option<PathBuf> {
     Some(dirs::config_dir()?.join(NOTRE_DOSSIER).join(nom))
+}
+
+/// Ouvre le dossier d'un fichier dans le gestionnaire de fichiers, avec ce
+/// fichier sélectionné (sous Windows : l'Explorateur). Sous Linux, le
+/// dossier s'ouvre simplement, sans sélection.
+pub fn montrer_le_fichier(chemin: &Path) -> Result<(), String> {
+    let erreur = |e: std::io::Error| format!("Impossible d'ouvrir le dossier : {e}");
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // L'Explorateur attend exactement /select,"C:\chemin\du fichier.mp3" :
+        // on écrit les guillemets nous-mêmes. Il répond « échec » même quand
+        // tout va bien : on ne regarde que s'il a pu être lancé.
+        std::process::Command::new("explorer")
+            .raw_arg(format!("/select,\"{}\"", chemin.display()))
+            .spawn()
+            .map(drop)
+            .map_err(erreur)
+    }
+    #[cfg(not(windows))]
+    {
+        let dossier = chemin.parent().unwrap_or(Path::new("."));
+        std::process::Command::new("xdg-open")
+            .arg(dossier)
+            .spawn()
+            .map(drop)
+            .map_err(erreur)
+    }
 }
 
 /// Ailleurs que sous Windows, pas encore d'icône près de l'horloge : la

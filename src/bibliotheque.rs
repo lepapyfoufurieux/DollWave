@@ -416,6 +416,7 @@ impl Bibliotheque {
             etoile: None,
             vers_playlist: None,
             tags_a_modifier: None,
+            infos_a_voir: None,
             hauteur: self.hauteur_ligne,
             hauteur_entete: self.hauteur_entete,
         };
@@ -425,6 +426,7 @@ impl Bibliotheque {
             etoile,
             vers_playlist,
             tags_a_modifier,
+            infos_a_voir,
             hauteur,
             hauteur_entete,
             ..
@@ -445,6 +447,7 @@ impl Bibliotheque {
             a_ajouter,
             vers_playlist,
             tags_a_modifier,
+            infos_a_voir,
         }
     }
 
@@ -568,6 +571,8 @@ pub struct Demandes {
     pub vers_playlist: Option<(String, Vec<PathBuf>)>,
     /// Les morceaux dont on veut modifier les tags (clic droit).
     pub tags_a_modifier: Option<Vec<PathBuf>>,
+    /// Le morceau dont on veut voir les infos du fichier (clic droit).
+    pub infos_a_voir: Option<PathBuf>,
 }
 
 /// Ce dont les lignes ont besoin pour se dessiner, et ce qu'on y a cliqué.
@@ -586,6 +591,8 @@ struct Lignes<'a> {
     vers_playlist: Option<(String, Vec<PathBuf>)>,
     /// Les morceaux dont on veut modifier les tags (clic droit).
     tags_a_modifier: Option<Vec<PathBuf>>,
+    /// Le morceau dont on veut voir les infos du fichier (clic droit).
+    infos_a_voir: Option<PathBuf>,
     /// La hauteur d'une ligne de morceau (voir `liste::rangee`).
     hauteur: Option<f32>,
     /// La hauteur d'une ligne de dossier, d'artiste ou d'album repliée.
@@ -601,18 +608,21 @@ fn glisser(reponse: &egui::Response, morceaux: impl FnOnce() -> Vec<PathBuf>) {
 }
 
 /// Le menu du clic droit sur un dossier, un artiste, un album ou un
-/// morceau : « Modifier les tags… », puis « Ajouter à la playlist » et le
-/// nom de chaque playlist. `morceaux` donne les morceaux concernés (on ne
-/// le calcule que si on a choisi quelque chose).
+/// morceau : « Infos du fichier… » (pour un morceau seul, `infos`),
+/// « Modifier les tags… », puis « Ajouter à la playlist » et le nom de chaque
+/// playlist. `morceaux` donne les morceaux concernés (on ne le calcule que si
+/// on a choisi quelque chose).
 fn menu(
     reponse: &egui::Response,
     lignes: &mut Lignes,
     modifier: &str,
+    infos: bool,
     morceaux: impl FnOnce() -> Vec<PathBuf>,
 ) {
-    match menu_clic_droit(reponse, lignes.playlists, modifier) {
+    match menu_clic_droit(reponse, lignes.playlists, modifier, infos) {
         Some(ChoixDuMenu::Playlist(nom)) => lignes.vers_playlist = Some((nom, morceaux())),
         Some(ChoixDuMenu::ModifierLesTags) => lignes.tags_a_modifier = Some(morceaux()),
+        Some(ChoixDuMenu::Infos) => lignes.infos_a_voir = morceaux().into_iter().next(),
         None => {}
     }
 }
@@ -710,6 +720,7 @@ fn entete_depliable(
             &etiquette,
             lignes,
             "✏ Modifier les tags de tous ses morceaux…",
+            false,
             &morceaux,
         );
         let bouton = ui.small_button("➕ tout").on_hover_text(aide_tout);
@@ -864,7 +875,7 @@ fn ligne_morceau(ui: &mut egui::Ui, chemin: &Path, lignes: &mut Lignes) {
         lignes.a_ajouter.push(chemin.to_path_buf());
     }
     glisser(&ligne, || vec![chemin.to_path_buf()]);
-    menu(&ligne, lignes, "✏ Modifier les tags…", || {
+    menu(&ligne, lignes, "✏ Modifier les tags…", true, || {
         vec![chemin.to_path_buf()]
     });
 }
