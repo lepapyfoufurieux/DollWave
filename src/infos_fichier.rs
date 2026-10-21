@@ -181,7 +181,7 @@ impl Entete {
 
 /// La taille des tags ID3v2 au début du fichier (0 s'il n'y en a pas). Il
 /// peut y en avoir plusieurs à la suite.
-fn taille_des_tags_id3(octets: &[u8]) -> usize {
+pub(crate) fn taille_des_tags_id3(octets: &[u8]) -> usize {
     let mut debut = 0;
     while let Some(entete) = octets.get(debut..debut + 10) {
         if &entete[..3] != b"ID3" {
