@@ -8,6 +8,7 @@ mod editeur_tags;
 mod egalisation;
 mod liste;
 mod morceau;
+mod paroles;
 mod platine;
 mod playlists;
 mod police;
@@ -33,6 +34,7 @@ use editeur_tags::EditeurTags;
 use egalisation::VolumesConnus;
 use liste::{Action, ListeDeLecture};
 use morceau::Morceau;
+use paroles::Paroles;
 use platine::{Effet, Platine, Telecommande};
 use playlists::{Demande, Playlists};
 use raccourcis::Commande;
@@ -118,6 +120,8 @@ const AVANCE_OUVERTURE: Duration = Duration::from_secs(20);
 /// Le petit fichier où l'on mémorise si le fondu enchaîné est activé
 /// (« oui » ou « non »).
 const REGLAGE_ENCHAINEMENT: &str = "fondu_enchaine.txt";
+/// Le petit fichier où l'on mémorise si les paroles (.lrc) sont affichées.
+const REGLAGE_PAROLES: &str = "paroles.txt";
 
 /// L'état de l'application.
 struct LecteurApp {
@@ -184,6 +188,11 @@ struct LecteurApp {
     // La pochette du morceau en cours, et le fichier dont elle vient (pour
     // ne la relire que quand le morceau change). Rien si le fichier n'en a pas.
     pochette: Option<(PathBuf, Option<egui::TextureHandle>)>,
+    // Affiche-t-on les paroles synchronisées (fichier .lrc à côté du MP3) ?
+    afficher_paroles: bool,
+    // Les paroles du morceau en cours, et le fichier dont elles viennent
+    // (pour ne relire le .lrc que quand le morceau change). Rien sans .lrc.
+    paroles: Option<(PathBuf, Option<Paroles>)>,
     // Un message affiché en bas de la fenêtre (erreurs, infos).
     message: String,
     // Les dossiers lâchés dans la fenêtre, en train d'être parcourus.
@@ -330,6 +339,8 @@ impl LecteurApp {
             boite: Boite::vide(),
             derniere_ouverture: None,
             pochette: None,
+            afficher_paroles: option_memorisee(REGLAGE_PAROLES),
+            paroles: None,
             message,
             depots: depot::Depots::default(),
             chargement: None,
@@ -796,6 +807,17 @@ impl LecteurApp {
                 self.a_suivre = None;
             }
         }
+        if ui
+            .checkbox(&mut self.afficher_paroles, "Paroles")
+            .on_hover_text(
+                "Si un fichier .lrc porte le même nom que le MP3 (chanson.mp3 → \
+                 chanson.lrc, dans le même dossier), ses paroles défilent sur la \
+                 pochette en même temps que la musique",
+            )
+            .changed()
+        {
+            memoriser_option(REGLAGE_PAROLES, self.afficher_paroles);
+        }
     }
 
     /// Le facteur du volume égalisé pour le morceau en cours : 1 si
@@ -1236,18 +1258,51 @@ impl LecteurApp {
         self.pochette_en_cours = Some((chemin.to_path_buf(), reception));
     }
 
-    /// La pochette du morceau en cours, centrée sous le visualiseur.
-    fn afficher_pochette(&self, ui: &mut egui::Ui) {
-        let Some((_, Some(pochette))) = &self.pochette else {
+    /// Lit le .lrc du morceau en cours quand il change (rien à faire sinon).
+    /// C'est un petit fichier texte : pas besoin d'arrière-plan.
+    fn charger_paroles(&mut self, en_cours: Option<&Path>) {
+        let Some(chemin) = en_cours.filter(|_| self.afficher_paroles) else {
+            self.paroles = None;
             return;
         };
+        if self.paroles.as_ref().is_some_and(|(p, _)| p == chemin) {
+            return;
+        }
+        self.paroles = Some((chemin.to_path_buf(), paroles::charger(chemin)));
+    }
+
+    /// La pochette du morceau en cours, centrée sous le visualiseur, avec
+    /// ses paroles par-dessus s'il en a. (Sans pochette, les paroles
+    /// s'affichent sur un fond sombre de la même taille.)
+    fn afficher_pochette(&self, ui: &mut egui::Ui, position: f32) {
+        let pochette = match &self.pochette {
+            Some((_, Some(pochette))) => Some(pochette),
+            _ => None,
+        };
+        let paroles = match &self.paroles {
+            Some((_, Some(paroles))) => Some(paroles),
+            _ => None,
+        };
+        if pochette.is_none() && paroles.is_none() {
+            return;
+        }
         ui.add_space(8.0);
         // On garde de la place pour le message et l'aide des raccourcis en dessous.
         let cote = (ui.available_height() - 40.0)
             .min(ui.available_width())
             .clamp(POCHETTE_MIN, POCHETTE_MAX);
         ui.vertical_centered(|ui| {
-            ui.add(egui::Image::new(pochette).fit_to_exact_size(egui::vec2(cote, cote)));
+            let (cadre, _) = ui.allocate_exact_size(egui::vec2(cote, cote), egui::Sense::hover());
+            match pochette {
+                Some(pochette) => egui::Image::new(pochette).paint_at(ui, cadre),
+                None => {
+                    let fond = egui::Color32::from_gray(40);
+                    ui.painter().rect_filled(cadre, 0.0, fond);
+                }
+            }
+            if let Some(paroles) = paroles {
+                paroles.afficher(ui, cadre, position);
+            }
         });
     }
 }
@@ -1378,6 +1433,7 @@ impl eframe::App for LecteurApp {
                 _ => None,
             };
             self.charger_pochette(ui.ctx(), en_cours.as_deref());
+            self.charger_paroles(en_cours.as_deref());
             // Pendant l'ouverture, on montre déjà le nom du morceau.
             let en_cours = en_cours.or_else(|| self.chargement.as_ref().map(|c| c.chemin.clone()));
             let nom = match &en_cours {
@@ -1502,7 +1558,7 @@ impl eframe::App for LecteurApp {
             let en_lecture = self.platine_active().is_some_and(Telecommande::tourne);
             self.visualiseur
                 .afficher(ui, self.morceau.as_ref(), position, en_lecture);
-            self.afficher_pochette(ui);
+            self.afficher_pochette(ui, position);
 
             if !self.message.is_empty() {
                 ui.add_space(8.0);
