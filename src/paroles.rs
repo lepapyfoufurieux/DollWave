@@ -117,16 +117,24 @@ impl Paroles {
 
         let courante = self.ligne_courante(position);
         let largeur = cadre.width() - 32.0;
-        let (taille, taille_courante) = (17.0, 21.0);
+        // La phrase en cours en Orbitron (police des titres néon), les
+        // autres en texte courant.
+        let (taille, taille_courante) = (16.0, 18.0);
         let mises_en_page: Vec<_> = self
             .lignes
             .iter()
             .enumerate()
             .map(|(n, (_, texte))| {
-                let (taille, couleur) = if Some(n) == courante {
-                    (taille_courante, egui::Color32::WHITE)
+                let (police, couleur) = if Some(n) == courante {
+                    (
+                        crate::police::titres(ui.ctx(), taille_courante),
+                        egui::Color32::WHITE,
+                    )
                 } else {
-                    (taille, egui::Color32::from_gray(150))
+                    (
+                        egui::FontId::proportional(taille),
+                        egui::Color32::from_white_alpha(150),
+                    )
                 };
                 // Une phrase vide (passage instrumental) garde sa place.
                 let texte = if texte.is_empty() {
@@ -134,12 +142,8 @@ impl Paroles {
                 } else {
                     texte.as_str()
                 };
-                let mut mise_en_page = egui::text::LayoutJob::simple(
-                    texte.to_string(),
-                    egui::FontId::proportional(taille),
-                    couleur,
-                    largeur,
-                );
+                let mut mise_en_page =
+                    egui::text::LayoutJob::simple(texte.to_string(), police, couleur, largeur);
                 mise_en_page.halign = egui::Align::Center;
                 ui.fonts(|f| f.layout_job(mise_en_page))
             })
@@ -164,13 +168,27 @@ impl Paroles {
                 .animate_value_with_time(ui.id().with("defilement_paroles"), cible, 0.3);
 
         let haut = cadre.center().y - defilement;
-        for (galet, y) in mises_en_page.into_iter().zip(hauts) {
+        for (n, (galet, y)) in mises_en_page.into_iter().zip(hauts).enumerate() {
             let y = haut + y;
             if y > cadre.bottom() || y + galet.size().y < cadre.top() {
                 continue;
             }
             // (Le texte centré part du milieu du cadre.)
-            peintre.galley(egui::pos2(cadre.center().x, y), galet, egui::Color32::WHITE);
+            let position = egui::pos2(cadre.center().x, y);
+            // La phrase en cours brille d'une lueur magenta, comme un néon.
+            let force = crate::theme::intensite();
+            if Some(n) == courante && force > 0.0 {
+                let lueur = crate::theme::fondu(crate::theme::MAGENTA, 0.3 * force.min(1.5));
+                let r = 2.0 * force.sqrt();
+                for (dx, dy) in [(r, 0.0), (-r, 0.0), (0.0, r), (0.0, -r)] {
+                    peintre.galley_with_override_text_color(
+                        position + egui::vec2(dx, dy),
+                        galet.clone(),
+                        lueur,
+                    );
+                }
+            }
+            peintre.galley(position, galet, egui::Color32::WHITE);
         }
     }
 }
@@ -294,6 +312,8 @@ mod tests {
     fn s_affiche_sans_planter_avant_pendant_et_apres() {
         let paroles = Paroles::lire("[00:01.00]Une phrase assez longue pour passer à la ligne dans un petit cadre\n[00:02.00]\n[00:03.00]Fin");
         let ctx = egui::Context::default();
+        // Les polices néon (le titre « SPECTRE », la phrase en cours) en ont besoin.
+        crate::police::installer(&ctx);
         for position in [0.0, 1.5, 2.5, 100.0] {
             let _ = ctx.run(Default::default(), |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| {

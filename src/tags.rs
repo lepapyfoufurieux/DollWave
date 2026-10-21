@@ -292,6 +292,20 @@ impl TagsConnus {
         }
     }
 
+    /// Le titre (le nom du fichier sans « .mp3 » s'il n'en a pas) et l'artiste,
+    /// séparés, pour le bloc « En lecture ».
+    pub fn titre_et_artiste(&self, chemin: &Path) -> (String, Option<String>) {
+        self.avec(chemin, |tags| {
+            let titre = tags.and_then(|t| t.titre.clone()).unwrap_or_else(|| {
+                chemin
+                    .file_stem()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default()
+            });
+            (titre, tags.and_then(|t| t.artiste.clone()))
+        })
+    }
+
     pub fn album(&self, chemin: &Path) -> Option<String> {
         self.avec(chemin, |tags| tags.and_then(|t| t.album.clone()))
     }

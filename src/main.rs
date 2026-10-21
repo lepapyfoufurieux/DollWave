@@ -1,15 +1,19 @@
 // En version finale (release), on cache la fenêtre de console noire sous Windows.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod bandeau;
 mod bibliotheque;
 mod depot;
 mod ecriture_tags;
 mod editeur_tags;
+mod effets;
 mod egalisation;
 mod generer_paroles;
+mod hud;
 mod infos_fichier;
 mod liste;
 mod morceau;
+mod onde;
 mod paroles;
 mod platine;
 mod playlists;
@@ -19,6 +23,7 @@ mod regroupement;
 mod sortie;
 mod systeme;
 mod tags;
+mod theme;
 mod visualiseur;
 
 use std::collections::HashSet;
@@ -61,7 +66,11 @@ fn main() -> eframe::Result {
         Demarrage::DejaOuvert => return Ok(()),
     };
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_inner_size([920.0, 840.0]),
+        // La taille de la maquette néon ; en dessous du minimum, les deux
+        // colonnes du bas seraient trop serrées.
+        viewport: egui::ViewportBuilder::default()
+            .with_inner_size([1320.0, 900.0])
+            .with_min_inner_size([1040.0, 720.0]),
         ..Default::default()
     };
     eframe::run_native(
@@ -157,6 +166,8 @@ struct LecteurApp {
     muet: bool,
     // Au Stop et à la Pause, le son ralentit-il comme un vinyle qu'on arrête
     // à la main (et accélère-t-il à la Lecture) ?
+    // Les effets néon : lignes d'écran, lueurs qui respirent.
+    effets: effets::Effets,
     freinage: bool,
     // Quand on fait glisser la barre de progression, la musique suit-elle
     // la souris (bruit de scratch) ? Sinon, elle continue et saute au lâcher.
@@ -309,6 +320,7 @@ impl Etat {
 impl LecteurApp {
     fn new(ctx: &egui::Context) -> Self {
         police::installer(ctx);
+        theme::installer(ctx);
         let (sortie, message) = match Sortie::ouvrir() {
             Ok(sortie) => (Some(sortie), String::new()),
             Err(e) => (None, format!("Aucune sortie audio disponible : {e}")),
@@ -331,6 +343,7 @@ impl LecteurApp {
             position_glissee: None,
             volume: 0.5,
             muet: false,
+            effets: effets::Effets::charger(),
             freinage: option_memorisee(REGLAGE_FREINAGE),
             scratch: option_memorisee(REGLAGE_SCRATCH),
             egalisation: option_memorisee(REGLAGE_EGALISATION),
@@ -827,6 +840,8 @@ impl LecteurApp {
         {
             memoriser_option(REGLAGE_PAROLES, self.afficher_paroles);
         }
+        ui.separator();
+        self.effets.menu(ui);
     }
 
     /// Le facteur du volume égalisé pour le morceau en cours : 1 si
@@ -1050,34 +1065,78 @@ impl LecteurApp {
         // (Pas pendant le freinage : le morceau est déjà arrêté.)
         let telecommande = self.platine_active().filter(|t| !t.freine()).cloned();
 
-        ui.add_enabled_ui(telecommande.is_some(), |ui| {
-            ui.horizontal(|ui| {
-                // Le curseur prend toute la largeur, moins la place du texte des temps.
-                ui.spacing_mut().slider_width = (ui.available_width() - 90.0).max(50.0);
-                // Sans morceau, la plage serait vide (0 à 0) et egui placerait le
-                // curseur au milieu : on garde au moins 1 seconde pour qu'il soit à gauche.
-                let fin = duree_s.max(1.0);
-                let reponse = ui.add(egui::Slider::new(&mut secondes, 0.0..=fin).show_value(false));
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 14.0;
+            let temps = egui::FontId::monospace(15.0);
+            let ecoule = format_temps(Duration::from_secs_f32(secondes));
+            let total = match duree {
+                Some(d) => format_temps(d),
+                None => "--:--".to_string(),
+            };
+            let place_temps = egui::vec2(48.0, onde::HAUTEUR);
+            let (zone, _) = ui.allocate_exact_size(place_temps, egui::Sense::hover());
+            theme::texte_lumineux(
+                ui.painter(),
+                zone.right_center(),
+                egui::Align2::RIGHT_CENTER,
+                &ecoule,
+                temps.clone(),
+                0.0,
+                theme::CYAN,
+                theme::CYAN,
+            );
 
-                if let Some(telecommande) = &telecommande {
-                    if reponse.dragged() {
-                        self.glisser(telecommande, secondes);
-                    } else if self.position_glissee.take().is_some() || reponse.changed() {
-                        // Relâchement après un glissement, ou simple clic : on s'y rend
-                        // et la lecture reprend normalement.
-                        telecommande.aller_a(secondes);
-                    }
-                }
-
-                let total = match duree {
-                    Some(d) => format_temps(d),
-                    None => "--:--".to_string(),
-                };
-                ui.label(format!(
-                    "{} / {total}",
-                    format_temps(Duration::from_secs_f32(secondes))
-                ));
+            let largeur = (ui.available_width() - place_temps.x - 14.0).max(50.0);
+            let (zone, reponse) = ui.allocate_exact_size(
+                egui::vec2(largeur, onde::HAUTEUR),
+                if telecommande.is_some() {
+                    egui::Sense::click_and_drag()
+                } else {
+                    egui::Sense::hover()
+                },
+            );
+            let fraction = if duree_s > 0.0 {
+                secondes / duree_s
+            } else {
+                0.0
+            };
+            let nombre = onde::nombre_de_barres(zone.width() - 8.0);
+            let barres = self.morceau.clone().and_then(|m| {
+                self.visualiseur
+                    .apercu_de(&m)
+                    .map(|a| onde::barres_de_l_apercu(a, nombre))
             });
+            onde::dessiner_progression(
+                ui.painter(),
+                zone,
+                barres.as_deref(),
+                fraction,
+                telecommande.is_some(),
+            );
+
+            if let Some(telecommande) = &telecommande {
+                let souris = reponse.interact_pointer_pos();
+                if let Some(x) = souris.map(|p| p.x).filter(|_| reponse.dragged()) {
+                    secondes = onde::fraction_sous(zone, x) * duree_s;
+                    self.glisser(telecommande, secondes);
+                } else if self.position_glissee.take().is_some() {
+                    // Relâchement après un glissement : on s'y rend et la
+                    // lecture reprend normalement.
+                    telecommande.aller_a(secondes);
+                } else if let Some(x) = souris.map(|p| p.x).filter(|_| reponse.clicked()) {
+                    // Simple clic : on saute à cet endroit.
+                    telecommande.aller_a(onde::fraction_sous(zone, x) * duree_s);
+                }
+            }
+
+            let (zone, _) = ui.allocate_exact_size(place_temps, egui::Sense::hover());
+            ui.painter().text(
+                zone.left_center(),
+                egui::Align2::LEFT_CENTER,
+                total,
+                temps,
+                theme::TEXTE_DISCRET,
+            );
         });
     }
 }
@@ -1111,16 +1170,20 @@ impl LecteurApp {
         }
     }
 
-    /// Le réglage du volume : un bouton pour couper le son, un curseur et le
-    /// pourcentage. Il reste utilisable même sans morceau, pour le préparer.
+    /// Le réglage du volume : un bouton pour couper le son, 20 segments
+    /// (cyan → jaune → magenta) et le pourcentage. Il reste utilisable même
+    /// sans morceau, pour le préparer.
     fn reglage_du_volume(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            let icone = if self.muet || self.volume == 0.0 {
-                "🔇"
+            ui.spacing_mut().item_spacing.x = 10.0;
+            let muet = self.muet || self.volume == 0.0;
+            let icone = if muet {
+                theme::Icone::Muet
             } else {
-                "🔊"
+                theme::Icone::Son
             };
-            let bouton = ui.button(icone).on_hover_text(if self.muet {
+            let bouton = theme::Bouton::icone(icone).taille(egui::vec2(34.0, 34.0));
+            let bouton = ui.add(bouton).on_hover_text(if self.muet {
                 "Remettre le son"
             } else {
                 "Couper le son"
@@ -1131,13 +1194,14 @@ impl LecteurApp {
                 change = true;
             }
 
-            let reponse = ui.add(egui::Slider::new(&mut self.volume, 0.0..=1.0).show_value(false));
-            if reponse.changed() {
-                // Bouger le curseur remet le son, comme sur la plupart des lecteurs.
+            if let Some(volume) = onde::segments_du_volume(ui, self.volume, self.muet) {
+                // Toucher au volume remet le son, comme sur la plupart des lecteurs.
+                self.volume = volume;
                 self.muet = false;
                 change = true;
             }
-            ui.label(format!("{:.0} %", self.volume * 100.0));
+            let texte = format!("{:.0} %", self.volume * 100.0);
+            ui.label(police::chiffres(texte).color(theme::CYAN).size(14.0));
 
             if change {
                 self.appliquer_volume();
@@ -1221,9 +1285,6 @@ fn ouvrir_un_lisible<T>(
 
 /// Côté de la pochette affichée sous le visualiseur, en points : la plus
 /// grande possible dans la place qui reste, entre ces deux tailles.
-const POCHETTE_MIN: f32 = 200.0;
-const POCHETTE_MAX: f32 = 600.0;
-
 impl LecteurApp {
     /// Lit la pochette du morceau en cours quand il change (rien à faire
     /// sinon). Décoder l'image prend un moment : on le fait en arrière-plan.
@@ -1282,9 +1343,9 @@ impl LecteurApp {
         self.paroles = Some((chemin.to_path_buf(), paroles::charger(chemin)));
     }
 
-    /// La pochette du morceau en cours, centrée sous le visualiseur, avec
-    /// ses paroles par-dessus s'il en a. (Sans pochette, les paroles
-    /// s'affichent sur un fond noir de la même taille.)
+    /// La pochette du morceau en cours, sous le visualiseur, dans toute la
+    /// place qui reste (recadrée pour la remplir), avec ses paroles
+    /// par-dessus s'il en a. Sans pochette : un fond néon.
     fn afficher_pochette(&self, ui: &mut egui::Ui, position: f32) {
         let pochette = match &self.pochette {
             Some((_, Some(pochette))) => Some(pochette),
@@ -1294,60 +1355,370 @@ impl LecteurApp {
             Some((_, Some(paroles))) => Some(paroles),
             _ => None,
         };
-        if pochette.is_none() && paroles.is_none() {
+        let cadre = ui.available_rect_before_wrap();
+        if cadre.height() < 40.0 {
             return;
         }
-        ui.add_space(8.0);
-        // On garde de la place pour le message et l'aide des raccourcis en dessous.
-        let cote = (ui.available_height() - 40.0)
-            .min(ui.available_width())
-            .clamp(POCHETTE_MIN, POCHETTE_MAX);
-        ui.vertical_centered(|ui| {
-            let (cadre, _) = ui.allocate_exact_size(egui::vec2(cote, cote), egui::Sense::hover());
-            match pochette {
-                Some(pochette) => egui::Image::new(pochette).paint_at(ui, cadre),
-                None => {
-                    let fond = egui::Color32::BLACK;
-                    ui.painter().rect_filled(cadre, 0.0, fond);
+        ui.allocate_rect(cadre, egui::Sense::hover());
+        let peintre = ui.painter_at(cadre);
+        match pochette {
+            Some(pochette) => {
+                // Comme un fond d'écran : l'image remplit le cadre, coupée
+                // en haut et en bas (ou sur les côtés) plutôt que déformée.
+                let image = pochette.size_vec2();
+                let echelle = (cadre.width() / image.x).max(cadre.height() / image.y);
+                let visible = cadre.size() / (image * echelle);
+                let uv = egui::Rect::from_center_size(egui::pos2(0.5, 0.5), visible);
+                peintre.image(pochette.id(), cadre, uv, egui::Color32::WHITE);
+            }
+            None => {
+                // Pas de pochette : un fond nuit avec deux taches de néon.
+                peintre.rect_filled(cadre, 0.0, egui::Color32::from_rgb(0x0B, 0x07, 0x18));
+                let points = theme::contour(cadre, theme::Coins::AUCUN);
+                let rien = egui::Color32::TRANSPARENT;
+                let magenta = theme::attenue(theme::MAGENTA, 70);
+                let cyan = theme::attenue(theme::CYAN, 60);
+                theme::degrade(&peintre, &points, magenta, rien, egui::vec2(1.0, 1.0));
+                theme::degrade(&peintre, &points, rien, cyan, egui::vec2(1.0, 1.0));
+                if paroles.is_none() {
+                    peintre.text(
+                        cadre.center(),
+                        egui::Align2::CENTER_CENTER,
+                        "POCHETTE",
+                        egui::FontId::monospace(12.0),
+                        theme::TEXTE_DISCRET,
+                    );
                 }
             }
-            if let Some(paroles) = paroles {
-                paroles.afficher(ui, cadre, position);
-            }
+        }
+        // Les lignes de la pochette sous les paroles, pour qu'elles se lisent
+        // bien (celles de la fenêtre ne passent pas ici).
+        theme::lignes_d_ecran(&peintre, cadre, 3.0, 56.0);
+        self.effets.proteger(cadre);
+        if let Some(paroles) = paroles {
+            paroles.afficher(ui, cadre, position);
+        }
+        peintre.rect_stroke(
+            cadre,
+            0.0,
+            egui::Stroke::new(1.0_f32, theme::attenue(theme::CYAN, 85)),
+        );
+    }
+}
+
+/// La place que prend le réglage du volume (bouton, segments, pourcentage).
+const LARGEUR_VOLUME: f32 = 290.0;
+/// La place que prennent les boutons de lecture, Aléa et Boucle.
+const LARGEUR_BOUTONS: f32 = 540.0;
+
+impl LecteurApp {
+    /// Le panneau de la liste de lecture : son en-tête (titre, compteur jaune,
+    /// « Autre fichier… », « Vider ») et la liste. Renvoie la place de la
+    /// liste (la molette y fait défiler, sans changer le volume).
+    fn panneau_liste(&mut self, ui: &mut egui::Ui) -> egui::Rect {
+        let cadre = ui.max_rect();
+        ui.painter()
+            .rect_filled(cadre, 0.0, theme::attenue(theme::PANNEAU, 204));
+        ui.painter().rect_stroke(
+            cadre,
+            0.0,
+            egui::Stroke::new(1.0_f32, theme::attenue(theme::CYAN, 68)),
+        );
+        let mut dedans = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(cadre.shrink(12.0))
+                .layout(egui::Layout::top_down(egui::Align::Min)),
+        );
+        let ui = &mut dedans;
+        ui.horizontal(|ui| {
+            theme::titre_neon(ui, "Liste de lecture", theme::CYAN);
+            let compteur = self.liste.compteur(&self.tags);
+            // Les boutons d'abord (calés à droite) : le compteur prend la
+            // place qui reste, coupé s'il ne tient pas.
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if !self.liste.est_vide() {
+                    let vider = theme::Bouton::texte("Vider")
+                        .couleur(theme::MAGENTA)
+                        .petit()
+                        .taille(egui::vec2(58.0, 24.0));
+                    if ui.add(vider).clicked() {
+                        self.liste.vider();
+                        self.playlists.oublier_la_chargee();
+                        self.oublier_morceau();
+                    }
+                }
+                let autre = theme::Bouton::texte("Autre fichier…")
+                    .petit()
+                    .taille(egui::vec2(120.0, 24.0));
+                if ui
+                    .add(autre)
+                    .on_hover_text("Ajouter un MP3 rangé en dehors de la bibliothèque")
+                    .clicked()
+                {
+                    self.ajouter_fichiers();
+                }
+                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                    if !compteur.is_empty() {
+                        let texte = police::chiffres(compteur.to_uppercase())
+                            .size(12.0)
+                            .color(theme::JAUNE);
+                        ui.add(egui::Label::new(texte).truncate());
+                    }
+                });
+            });
         });
+        ui.add_space(8.0);
+        if self.liste.est_vide() {
+            ui.label(
+                egui::RichText::new(
+                    "Liste vide : clique sur un morceau de la bibliothèque, ou glisse des MP3 dans la fenêtre.",
+                )
+                .color(theme::TEXTE_DISCRET),
+            );
+        }
+        let noms = self.playlists.noms();
+        let liste = ui.scope(|ui| self.liste.afficher(ui, &self.tags, &noms));
+        match liste.inner {
+            // Un clic sur le morceau en cours ne le relance pas depuis le
+            // début : il continue, reprend s'il était en pause, ou
+            // repart s'il était arrêté.
+            Some(Action::Jouer(n)) if self.liste.courant() == Some(n) => self.lecture(),
+            Some(Action::Jouer(n)) => self.jouer(n),
+            Some(Action::Retirer(n)) => {
+                // Si c'était le morceau en cours et qu'il jouait, on passe au
+                // suivant (au hasard en lecture aléatoire). En pause ou à
+                // l'arrêt, on s'arrête simplement.
+                let jouait = matches!(self.etat(), Etat::Lecture | Etat::Chargement);
+                if self.liste.retirer(n) {
+                    match jouait.then(|| self.liste.apres_retrait(n)).flatten() {
+                        Some(suivant) => self.jouer(suivant),
+                        None => self.oublier_morceau(),
+                    }
+                }
+            }
+            Some(Action::AjouterAPlaylist { nom, fichier }) => {
+                self.playlists.ajouter_a(&nom, &[fichier]);
+            }
+            Some(Action::ModifierLesTags(fichier)) => {
+                self.editeur = Some(EditeurTags::ouvrir(ui.ctx(), vec![fichier], &self.tags));
+            }
+            Some(Action::Infos(fichier)) => {
+                self.fenetre_infos = Some(FenetreInfos::ouvrir(ui.ctx(), fichier, &self.tags));
+            }
+            None => {}
+        }
+        liste.response.rect
+    }
+
+    /// Le pied de la fenêtre : les messages s'il y en a, puis OPTIONS,
+    /// RACCOURCIS, QUITTER et le bandeau d'état des options.
+    fn pied(&mut self, ui: &mut egui::Ui) {
+        use theme::{Bouton, Icone};
+        if !self.message.is_empty() {
+            ui.colored_label(theme::ERREUR, &self.message);
+        }
+        if self.depots.en_cours() {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label("Lecture des fichiers déposés…");
+            });
+        }
+        ui.add_space(6.0);
+        let (trait_, _) =
+            ui.allocate_exact_size(egui::vec2(ui.available_width(), 1.0), egui::Sense::hover());
+        ui.painter()
+            .rect_filled(trait_, 0.0, theme::attenue(theme::CYAN, 68));
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            let options = Bouton::texte("Options")
+                .avec_icone(Icone::Options)
+                .allure(theme::Allure::Allume)
+                .taille(egui::vec2(112.0, 30.0));
+            let options = ui.add(options);
+            let id = ui.make_persistent_id("menu_options");
+            if options.clicked() {
+                ui.memory_mut(|m| m.toggle_popup(id));
+            }
+            egui::popup::popup_above_or_below_widget(
+                ui,
+                id,
+                &options,
+                egui::AboveOrBelow::Above,
+                egui::PopupCloseBehavior::CloseOnClickOutside,
+                |ui| {
+                    ui.set_min_width(260.0);
+                    self.menu_options(ui);
+                },
+            );
+            let raccourcis = Bouton::texte("Raccourcis")
+                .allure(theme::Allure::Eteint)
+                .taille(egui::vec2(120.0, 30.0));
+            ui.add(raccourcis).on_hover_text(raccourcis::AIDE);
+            // La croix de la fenêtre range le lecteur près de l'horloge
+            // (sous Windows) : ce bouton-ci le ferme vraiment.
+            let quitter = Bouton::texte("Quitter")
+                .couleur(theme::MAGENTA)
+                .taille(egui::vec2(96.0, 30.0));
+            if ui
+                .add(quitter)
+                .on_hover_text("Fermer le lecteur (la croix le range près de l'horloge)")
+                .clicked()
+            {
+                self.zone.quitter(ui.ctx());
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.add(egui::Label::new(self.bandeau_d_etat()).truncate());
+            });
+        });
+        ui.add_space(2.0);
+    }
+
+    /// « PLATINE ON · FONDU 3 S · VOL. ÉGAL. ON · PAROLES ON » : l'état des
+    /// options, les valeurs en cyan quand elles sont actives.
+    fn bandeau_d_etat(&self) -> egui::text::LayoutJob {
+        let fondu = format!("{} S", DUREE_ENCHAINEMENT.as_secs());
+        let elements = [
+            ("PLATINE", self.freinage, "ON"),
+            ("FONDU", self.enchainement, fondu.as_str()),
+            ("VOL. ÉGAL.", self.egalisation, "ON"),
+            ("PAROLES", self.afficher_paroles, "ON"),
+        ];
+        let mut job = egui::text::LayoutJob::default();
+        let format = |couleur| egui::TextFormat {
+            font_id: egui::FontId::monospace(12.0),
+            color: couleur,
+            ..Default::default()
+        };
+        for (n, (nom, actif, valeur)) in elements.into_iter().enumerate() {
+            if n > 0 {
+                job.append(" · ", 0.0, format(theme::TEXTE_DISCRET));
+            }
+            job.append(&format!("{nom} "), 0.0, format(theme::TEXTE_DISCRET));
+            if actif {
+                job.append(valeur, 0.0, format(theme::CYAN));
+            } else {
+                job.append("OFF", 0.0, format(theme::fondu(theme::TEXTE_DISCRET, 0.7)));
+            }
+        }
+        job
     }
 }
 
 impl LecteurApp {
-    /// Sous la pochette, en petit : la qualité et la taille du morceau en
-    /// cours (« MP3 · 320 kbit/s · 44,1 kHz · stéréo · 8,4 Mo »). Un clic
-    /// ouvre la fenêtre « Infos du fichier ».
-    fn ligne_des_infos(&mut self, ui: &mut egui::Ui) {
-        let en_cours = match (&self.morceau, self.liste.courant()) {
-            (Some(_), Some(n)) => self.liste.fichier(n).map(Path::to_path_buf),
-            _ => None,
+    /// Le bloc « En lecture » : état, titre, artiste, album, et les infos
+    /// techniques. Un clic ouvre la fenêtre « Infos du fichier ».
+    fn bloc_en_lecture(&mut self, ui: &mut egui::Ui, en_cours: Option<&Path>) {
+        let etat = self.etat();
+        let compteur = self.liste.compteur(&self.tags);
+        // « Titre 3 / 12 · 47 min » : le bloc ne garde que « Titre 3 / 12 ».
+        let compteur = compteur
+            .split(" · ")
+            .next()
+            .filter(|c| c.starts_with("Titre"))
+            .map(str::to_string);
+        let (titre, artiste, album, infos) = match en_cours {
+            Some(chemin) => {
+                let (titre, artiste) = self.tags.titre_et_artiste(chemin);
+                let infos = self.infos.demander(ui.ctx(), chemin);
+                (titre, artiste, self.tags.album(chemin), infos)
+            }
+            None => ("Aucun morceau".to_string(), None, None, None),
         };
-        let Some(chemin) = en_cours else {
-            return;
+        let gain = self
+            .egalisation
+            .then(|| en_cours.and_then(|chemin| self.volumes.gain(chemin)));
+        let sortie = self.sortie.as_ref().and_then(|s| s.nom.as_deref());
+        let bloc = hud::EnLecture {
+            etat: etat.texte().trim_end_matches('…').to_string(),
+            voyant: etat == Etat::Lecture,
+            compteur,
+            titre,
+            artiste,
+            album,
+            techniques: hud::infos_techniques(infos.as_ref(), gain, sortie),
         };
-        let Some(infos) = self.infos.demander(ui.ctx(), &chemin) else {
-            return;
-        };
-        ui.add_space(4.0);
-        let clic = ui
-            .vertical_centered(|ui| {
-                ui.add(
-                    egui::Label::new(egui::RichText::new(infos_fichier::resume(&infos)).weak())
-                        .selectable(false)
-                        .sense(egui::Sense::click()),
-                )
-                .on_hover_text("ℹ Infos du fichier (débit, taille, emplacement)")
-                .clicked()
-            })
-            .inner;
-        if clic {
-            self.fenetre_infos = Some(FenetreInfos::ouvrir(ui.ctx(), chemin, &self.tags));
+        let mut aide = "ℹ Infos du fichier (débit, taille, emplacement)".to_string();
+        if let Some(infos) = &infos {
+            aide = format!("{}\n{aide}", infos_fichier::resume(infos));
         }
+        if hud::afficher(ui, &bloc).on_hover_text(aide).clicked() {
+            if let Some(chemin) = en_cours {
+                self.fenetre_infos = Some(FenetreInfos::ouvrir(
+                    ui.ctx(),
+                    chemin.to_path_buf(),
+                    &self.tags,
+                ));
+            }
+        }
+    }
+
+    /// Les boutons de lecture néon : ⏮, le gros bouton Lecture hexagonal,
+    /// Pause, Stop, ⏭, puis Aléa et Boucle.
+    fn boutons_de_lecture(&mut self, ui: &mut egui::Ui) {
+        use theme::{Allure, Bouton, Coins, Icone};
+        let carre = egui::vec2(44.0, 44.0);
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 8.0;
+            // Les boutons de lecture ne sont actifs que si la liste contient des morceaux.
+            ui.add_enabled_ui(!self.liste.est_vide(), |ui| {
+                let bouton = Bouton::icone(Icone::Precedent)
+                    .coins(Coins::haut_gauche(10.0))
+                    .taille(carre);
+                if ui.add(bouton).on_hover_text("Morceau précédent").clicked() {
+                    self.precedent();
+                }
+                let bouton = Bouton::icone(Icone::Lecture)
+                    .allure(Allure::Hexagone)
+                    .taille(egui::vec2(64.0, 64.0));
+                if ui.add(bouton).on_hover_text("Lecture").clicked() {
+                    self.lecture();
+                }
+                let bouton = Bouton::icone(Icone::Pause).taille(carre);
+                if ui.add(bouton).on_hover_text("Pause").clicked() {
+                    self.pause();
+                }
+                let bouton = Bouton::icone(Icone::Stop).taille(carre);
+                if ui.add(bouton).on_hover_text("Stop").clicked() {
+                    self.arreter();
+                }
+                let bouton = Bouton::icone(Icone::Suivant)
+                    .coins(Coins::bas_droit(10.0))
+                    .taille(carre);
+                if ui.add(bouton).on_hover_text("Morceau suivant").clicked() {
+                    self.suivant();
+                }
+            });
+            ui.add_space(10.0);
+            // La lecture aléatoire se règle à tout moment, même liste vide.
+            let aleatoire = self.liste.aleatoire();
+            let bouton = Bouton::texte("Aléa")
+                .avec_icone(Icone::Aleatoire)
+                .couleur(theme::MAGENTA)
+                .allume(aleatoire)
+                .taille(egui::vec2(86.0, 32.0));
+            let bouton = ui.add(bouton).on_hover_text(if aleatoire {
+                "Lecture aléatoire : activée"
+            } else {
+                "Lecture aléatoire : désactivée"
+            });
+            if bouton.clicked() {
+                self.liste.changer_aleatoire(!aleatoire);
+            }
+            let repetition = self.liste.repetition();
+            let bouton = Bouton::texte("Boucle")
+                .avec_icone(Icone::Boucle)
+                .couleur(theme::MAGENTA)
+                .allume(repetition)
+                .taille(egui::vec2(98.0, 32.0));
+            let bouton = ui.add(bouton).on_hover_text(if repetition {
+                "Répétition de la liste : activée"
+            } else {
+                "Répétition de la liste : désactivée"
+            });
+            if bouton.clicked() {
+                self.liste.changer_repetition(!repetition);
+            }
+        });
     }
 }
 
@@ -1410,16 +1781,37 @@ impl eframe::App for LecteurApp {
         self.suivre_l_egalisation();
         self.preparer_l_enchainement();
 
+        // Le fond nuit quadrillé, sous tous les panneaux ; les lignes d'écran
+        // par-dessus. Les lueurs respirent seulement pendant la lecture.
+        theme::dessiner_fond(ctx);
+        let en_lecture = self.platine_active().is_some_and(Telecommande::tourne);
+        self.effets.avancer(ctx.input(|i| i.stable_dt), en_lecture);
+
+        // En haut, le bandeau néon (logo et voyants), sur toute la largeur.
+        let voyants = bandeau::Voyants {
+            sortie: self.sortie.is_some(),
+            bibliotheque: self.bibliotheque.nombre_de_titres().is_some_and(|n| n > 0),
+            liste: !self.liste.est_vide(),
+            morceau: self.morceau.is_some(),
+            lecture: en_lecture,
+        };
+        egui::TopBottomPanel::top("bandeau")
+            .exact_height(bandeau::HAUTEUR)
+            .frame(egui::Frame::none())
+            .show_separator_line(false)
+            .show(ctx, |ui| bandeau::afficher(ui, &voyants));
+
         // À gauche, la bibliothèque. Un clic sur un morceau (ou sur « ➕ tout »)
         // l'ajoute à la liste de lecture. En bas, les playlists.
         let (demandes, demande) = egui::SidePanel::left("bibliotheque")
             .resizable(true)
-            .default_width(340.0)
+            .default_width(310.0)
             .width_range(220.0..=600.0)
             .show(ctx, |ui| {
                 // Les playlists d'abord, pour qu'elles se réservent le bas du
                 // panneau ; la bibliothèque prend la place qui reste au-dessus.
                 let demande = egui::TopBottomPanel::bottom("playlists")
+                    .frame(theme::cadre_interieur(ui.style()))
                     .resizable(true)
                     .default_height(240.0)
                     .height_range(110.0..=500.0)
@@ -1432,11 +1824,16 @@ impl eframe::App for LecteurApp {
                     })
                     .inner;
                 let noms = self.playlists.noms();
+                // Le morceau en lecture (ou en pause), écrit en jaune.
+                let en_lecture = match (&self.morceau, self.liste.courant()) {
+                    (Some(_), Some(n)) => self.liste.fichier(n),
+                    _ => None,
+                };
                 let dans_la_liste: HashSet<&Path> =
                     self.liste.morceaux().iter().map(PathBuf::as_path).collect();
                 (
                     self.bibliotheque
-                        .afficher(ui, &dans_la_liste, &self.tags, &noms),
+                        .afficher(ui, &dans_la_liste, &self.tags, &noms, en_lecture),
                     demande,
                 )
             })
@@ -1480,7 +1877,9 @@ impl eframe::App for LecteurApp {
         // La zone de la liste de lecture : la molette y fait défiler la liste,
         // pas changer le volume.
         let mut zone_liste = egui::Rect::NOTHING;
-        let panneau = egui::CentralPanel::default().show(ctx, |ui| {
+        // Fond transparent : le quadrillage se voit derrière.
+        let centre = egui::CentralPanel::default().frame(theme::cadre_central(&ctx.style()));
+        let panneau = centre.show(ctx, |ui| {
             let en_cours = match (&self.morceau, self.liste.courant()) {
                 (Some(_), Some(n)) => self.liste.fichier(n).map(Path::to_path_buf),
                 _ => None,
@@ -1495,117 +1894,54 @@ impl eframe::App for LecteurApp {
             };
             self.zone
                 .infobulle(en_cours.is_some().then_some(nom.as_str()));
-            ui.label(format!("Morceau : {nom}"));
-            if let Some(album) = en_cours.as_deref().and_then(|c| self.tags.album(c)) {
-                ui.label(format!("Album : {album}"));
-            }
-            ui.label(format!("État : {}", self.etat().texte()));
+            self.bloc_en_lecture(ui, en_cours.as_deref());
 
-            ui.add_space(8.0);
+            ui.add_space(12.0);
             self.barre_de_progression(ui);
             ui.add_space(8.0);
 
-            ui.horizontal(|ui| {
-                // Les boutons de lecture ne sont actifs que si la liste contient des morceaux.
-                ui.add_enabled_ui(!self.liste.est_vide(), |ui| {
-                    if ui.button("⏮").on_hover_text("Morceau précédent").clicked() {
-                        self.precedent();
-                    }
-                    if ui.button("▶ Lecture").clicked() {
-                        self.lecture();
-                    }
-                    if ui.button("⏸ Pause").clicked() {
-                        self.pause();
-                    }
-                    if ui.button("⏹ Stop").clicked() {
-                        self.arreter();
-                    }
-                    if ui.button("⏭").on_hover_text("Morceau suivant").clicked() {
-                        self.suivant();
-                    }
+            // Les boutons de lecture, puis le volume calé à droite (dessous,
+            // si la fenêtre est trop étroite pour les deux).
+            if ui.available_width() >= LARGEUR_BOUTONS + LARGEUR_VOLUME {
+                ui.horizontal(|ui| {
+                    self.boutons_de_lecture(ui);
+                    ui.add_space((ui.available_width() - LARGEUR_VOLUME).max(10.0));
+                    self.reglage_du_volume(ui);
                 });
-                // La lecture aléatoire se règle à tout moment, même liste vide.
-                let aleatoire = self.liste.aleatoire();
-                let bouton = ui
-                    .selectable_label(aleatoire, "🔀")
-                    .on_hover_text(if aleatoire {
-                        "Lecture aléatoire : activée"
-                    } else {
-                        "Lecture aléatoire : désactivée"
-                    });
-                if bouton.clicked() {
-                    self.liste.changer_aleatoire(!aleatoire);
-                }
-                let repetition = self.liste.repetition();
-                let bouton = ui
-                    .selectable_label(repetition, "🔁")
-                    .on_hover_text(if repetition {
-                        "Répétition de la liste : activée"
-                    } else {
-                        "Répétition de la liste : désactivée"
-                    });
-                if bouton.clicked() {
-                    self.liste.changer_repetition(!repetition);
-                }
-            });
-
-            ui.add_space(8.0);
-            self.reglage_du_volume(ui);
-
-            ui.add_space(8.0);
-            ui.horizontal(|ui| {
-                ui.strong("Liste de lecture");
-                let compteur = self.liste.compteur(&self.tags);
-                if !compteur.is_empty() {
-                    ui.weak(compteur);
-                }
-                if ui
-                    .small_button("📂 Autre fichier…")
-                    .on_hover_text("Ajouter un MP3 rangé en dehors de la bibliothèque")
-                    .clicked()
-                {
-                    self.ajouter_fichiers();
-                }
-                if !self.liste.est_vide() && ui.small_button("Vider").clicked() {
-                    self.liste.vider();
-                    self.playlists.oublier_la_chargee();
-                    self.oublier_morceau();
-                }
-            });
-            let noms = self.playlists.noms();
-            let liste = ui.scope(|ui| self.liste.afficher(ui, &self.tags, &noms));
-            zone_liste = liste.response.rect;
-            match liste.inner {
-                // Un clic sur le morceau en cours ne le relance pas depuis le
-                // début : il continue, reprend s'il était en pause, ou
-                // repart s'il était arrêté.
-                Some(Action::Jouer(n)) if self.liste.courant() == Some(n) => self.lecture(),
-                Some(Action::Jouer(n)) => self.jouer(n),
-                Some(Action::Retirer(n)) => {
-                    // Si c'était le morceau en cours et qu'il jouait, on passe au
-                    // suivant (au hasard en lecture aléatoire). En pause ou à
-                    // l'arrêt, on s'arrête simplement.
-                    let jouait = matches!(self.etat(), Etat::Lecture | Etat::Chargement);
-                    if self.liste.retirer(n) {
-                        match jouait.then(|| self.liste.apres_retrait(n)).flatten() {
-                            Some(suivant) => self.jouer(suivant),
-                            None => self.oublier_morceau(),
-                        }
-                    }
-                }
-                Some(Action::AjouterAPlaylist { nom, fichier }) => {
-                    self.playlists.ajouter_a(&nom, &[fichier]);
-                }
-                Some(Action::ModifierLesTags(fichier)) => {
-                    self.editeur = Some(EditeurTags::ouvrir(ui.ctx(), vec![fichier], &self.tags));
-                }
-                Some(Action::Infos(fichier)) => {
-                    self.fenetre_infos = Some(FenetreInfos::ouvrir(ui.ctx(), fichier, &self.tags));
-                }
-                None => {}
+            } else {
+                self.boutons_de_lecture(ui);
+                self.reglage_du_volume(ui);
             }
+            ui.add_space(10.0);
 
-            ui.add_space(12.0);
+            // En bas : Options, Raccourcis, Quitter et l'état des options.
+            egui::TopBottomPanel::bottom("pied")
+                .frame(egui::Frame::none())
+                .show_separator_line(false)
+                .show_inside(ui, |ui| self.pied(ui));
+
+            // Le reste : la liste de lecture à gauche ; le visualiseur, la
+            // pochette et les paroles à droite.
+            let reste = ui.available_rect_before_wrap();
+            ui.allocate_rect(reste, egui::Sense::hover());
+            let ecart = 14.0;
+            let moitie = ((reste.width() - ecart) / 2.0).max(0.0);
+            let gauche = egui::Rect::from_min_size(reste.min, egui::vec2(moitie, reste.height()));
+            let droite = egui::Rect::from_min_max(
+                egui::pos2(gauche.right() + ecart, reste.top()),
+                reste.max,
+            );
+            let colonne = |ui: &mut egui::Ui, rect| {
+                ui.new_child(
+                    egui::UiBuilder::new()
+                        .max_rect(rect)
+                        .layout(egui::Layout::top_down(egui::Align::Min)),
+                )
+            };
+            zone_liste = self.panneau_liste(&mut colonne(ui, gauche));
+
+            let mut ui_droite = colonne(ui, droite);
+            let ui = &mut ui_droite;
             // Pendant un glissement de la barre, le visualiseur suit la souris.
             let position = self
                 .position_glissee
@@ -1614,31 +1950,8 @@ impl eframe::App for LecteurApp {
             let en_lecture = self.platine_active().is_some_and(Telecommande::tourne);
             self.visualiseur
                 .afficher(ui, self.morceau.as_ref(), position, en_lecture);
+            ui.add_space(12.0);
             self.afficher_pochette(ui, position);
-            self.ligne_des_infos(ui);
-
-            if !self.message.is_empty() {
-                ui.add_space(8.0);
-                ui.colored_label(egui::Color32::LIGHT_RED, &self.message);
-            }
-            if self.depots.en_cours() {
-                ui.add_space(8.0);
-                ui.horizontal(|ui| {
-                    ui.spinner();
-                    ui.label("Lecture des fichiers déposés…");
-                });
-            }
-
-            ui.add_space(8.0);
-            ui.horizontal(|ui| {
-                ui.menu_button("⚙ Options", |ui| self.menu_options(ui));
-                ui.weak("⌨ Raccourcis").on_hover_text(raccourcis::AIDE);
-            });
-            // La croix de la fenêtre range le lecteur près de l'horloge
-            // (sous Windows) : ce bouton-ci le ferme vraiment.
-            if ui.button("Quitter").clicked() {
-                self.zone.quitter(ctx);
-            }
         });
 
         // La molette change le volume dans la partie lecteur de la fenêtre (pas sur la
@@ -1669,6 +1982,9 @@ impl eframe::App for LecteurApp {
         // Sinon (en pause, à l'arrêt, ou fenêtre réduite : rien ne bouge à
         // l'écran), de temps en temps suffit pour voir l'état changer et
         // passer au morceau suivant.
+        // Les lignes d'écran, une fois tous les panneaux dessinés.
+        self.effets.dessiner(ctx);
+
         let en_lecture = self.platine_active().is_some_and(Telecommande::tourne);
         let reduite = ctx.input(|i| i.viewport().minimized == Some(true));
         let anime = en_lecture || !self.visualiseur.au_repos() || self.position_glissee.is_some();
