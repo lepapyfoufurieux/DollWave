@@ -37,7 +37,7 @@ pub fn fichier_de_reglage(nom: &str) -> Option<PathBuf> {
 }
 
 /// Ailleurs que sous Windows, pas encore d'icône près de l'horloge : la
-/// fenêtre se réduit normalement. (Sous Linux, il faudra une autre
+/// croix ferme le lecteur, comme d'habitude. (Sous Linux, il faudra une autre
 /// bibliothèque que sous Windows, voir la to do.)
 #[cfg(not(windows))]
 pub struct ZoneDeNotification;
@@ -57,6 +57,11 @@ impl ZoneDeNotification {
     }
 
     pub fn infobulle(&mut self, _morceau: Option<&str>) {}
+
+    /// Ferme le lecteur.
+    pub fn quitter(&mut self, ctx: &eframe::egui::Context) {
+        ctx.send_viewport_cmd(eframe::egui::ViewportCommand::Close);
+    }
 
     /// Ramène la fenêtre au premier plan (même réduite).
     pub fn afficher(&mut self, ctx: &eframe::egui::Context) {

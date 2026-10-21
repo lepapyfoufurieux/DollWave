@@ -1521,6 +1521,11 @@ impl eframe::App for LecteurApp {
                 ui.menu_button("⚙ Options", |ui| self.menu_options(ui));
                 ui.weak("⌨ Raccourcis").on_hover_text(raccourcis::AIDE);
             });
+            // La croix de la fenêtre range le lecteur près de l'horloge
+            // (sous Windows) : ce bouton-ci le ferme vraiment.
+            if ui.button("Quitter").clicked() {
+                self.zone.quitter(ctx);
+            }
         });
 
         // La molette change le volume dans la partie lecteur de la fenêtre (pas sur la
