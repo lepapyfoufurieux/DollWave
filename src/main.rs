@@ -123,9 +123,9 @@ const REGLAGE_ENCHAINEMENT: &str = "fondu_enchaine.txt";
 /// Le petit fichier où l'on mémorise si les paroles (.lrc) sont affichées.
 const REGLAGE_PAROLES: &str = "paroles.txt";
 
-/// Une pochette lue dans le fichier, avec sa couleur moyenne (rien si le
-/// fichier n'en a pas).
-type PochetteLue = Option<(egui::ColorImage, egui::Color32)>;
+/// Une pochette lue dans le fichier, avec les couleurs des paroles qui
+/// vont avec (rien si le fichier n'en a pas).
+type PochetteLue = Option<(egui::ColorImage, Teintes)>;
 
 /// L'état de l'application.
 struct LecteurApp {
@@ -191,8 +191,8 @@ struct LecteurApp {
     derniere_ouverture: Option<Instant>,
     // La pochette du morceau en cours, et le fichier dont elle vient (pour
     // ne la relire que quand le morceau change). Rien si le fichier n'en a pas.
-    // (Avec sa couleur moyenne, pour choisir la couleur des paroles.)
-    pochette: Option<(PathBuf, Option<(egui::TextureHandle, egui::Color32)>)>,
+    // (Avec les couleurs des paroles qui vont avec.)
+    pochette: Option<(PathBuf, Option<(egui::TextureHandle, Teintes)>)>,
     // Affiche-t-on les paroles synchronisées (fichier .lrc à côté du MP3) ?
     afficher_paroles: bool,
     // Les paroles du morceau en cours, et le fichier dont elles viennent
@@ -1232,9 +1232,9 @@ impl LecteurApp {
             if demandee == chemin {
                 match reception.try_recv() {
                     Ok(image) => {
-                        let texture = image.map(|(image, moyenne)| {
+                        let texture = image.map(|(image, teintes)| {
                             let options = egui::TextureOptions::LINEAR;
-                            (ctx.load_texture("pochette", image, options), moyenne)
+                            (ctx.load_texture("pochette", image, options), teintes)
                         });
                         self.pochette = Some((chemin.to_path_buf(), texture));
                         self.pochette_en_cours = None;
@@ -1259,8 +1259,8 @@ impl LecteurApp {
         let (fichier, ctx) = (chemin.to_path_buf(), ctx.clone());
         std::thread::spawn(move || {
             let pochette = tags::lire_pochette(&fichier).map(|image| {
-                let moyenne = paroles::couleur_moyenne(&image);
-                (image, moyenne)
+                let teintes = Teintes::de_la_pochette(&image);
+                (image, teintes)
             });
             let _ = envoi.send(pochette);
             ctx.request_repaint();
@@ -1305,9 +1305,9 @@ impl LecteurApp {
         ui.vertical_centered(|ui| {
             let (cadre, _) = ui.allocate_exact_size(egui::vec2(cote, cote), egui::Sense::hover());
             let teintes = match pochette {
-                Some((pochette, moyenne)) => {
+                Some((pochette, teintes)) => {
                     egui::Image::new(pochette).paint_at(ui, cadre);
-                    Teintes::pour(*moyenne)
+                    *teintes
                 }
                 None => {
                     ui.painter().rect_filled(cadre, 0.0, egui::Color32::BLACK);
