@@ -6,6 +6,7 @@ mod depot;
 mod ecriture_tags;
 mod editeur_tags;
 mod egalisation;
+mod generer_paroles;
 mod infos_fichier;
 mod liste;
 mod morceau;
