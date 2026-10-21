@@ -8,22 +8,45 @@
 //! - Linux : MPRIS, que les bureaux (GNOME, KDE…) utilisent pour les touches
 //!   multimédia et leurs propres panneaux.
 //!
+//! Le système affiche aussi le titre, l'artiste, l'album et la pochette du
+//! morceau en cours. Windows veut la pochette dans un fichier : on l'écrit
+//! dans le dossier temporaire (le disque vinyle du lecteur si le morceau
+//! n'en a pas, sinon Windows garderait celle du morceau d'avant).
+//!
 //! Les touches arrivent sur un autre fil que celui de la fenêtre : on se
 //! contente de les mettre de côté et de réveiller la fenêtre, qui les traite
 //! à la prochaine image (comme le menu de l'icône près de l'horloge).
 
-use std::path::Path;
+use std::fs;
+use std::io::Cursor;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc::{self, Receiver};
-use std::time::Duration;
+use std::thread;
 
 use eframe::egui;
 use souvlaki::{MediaControlEvent, MediaControls, MediaMetadata, MediaPlayback, PlatformConfig};
 
 use crate::raccourcis::Commande;
+use crate::tags;
 
 /// De combien les touches « avance / retour rapide » se déplacent dans le
 /// morceau (comme Q et D).
 const SAUT: f32 = 5.0;
+
+/// Côté du disque vinyle donné comme pochette aux morceaux qui n'en ont pas.
+const TAILLE_VINYLE: u32 = 256;
+
+/// Ce que le panneau média affiche d'un morceau.
+#[derive(Debug)]
+struct Infos {
+    chemin: PathBuf,
+    titre: String,
+    artiste: String,
+    album: String,
+    /// Le fichier image de la pochette, dans le dossier temporaire.
+    pochette: Option<PathBuf>,
+}
 
 /// Ce que le système affiche de la lecture.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -43,6 +66,11 @@ pub struct ControlesMedia {
     touches: Option<Receiver<MediaControlEvent>>,
     /// Le dernier état donné au système.
     etat: EtatMedia,
+    /// Le morceau dont le système affiche (ou va afficher) les informations.
+    morceau: Option<PathBuf>,
+    /// Ses informations, préparées en arrière-plan (lire les tags et écrire
+    /// la pochette prend un moment).
+    infos: Option<Receiver<Infos>>,
 }
 
 impl ControlesMedia {
@@ -52,6 +80,8 @@ impl ControlesMedia {
             essaye: false,
             touches: None,
             etat: EtatMedia::Arrete,
+            morceau: None,
+            infos: None,
         }
     }
 
@@ -90,27 +120,47 @@ impl ControlesMedia {
         }
     }
 
-    /// Les informations du morceau en cours, pour les panneaux média du
-    /// système. (Pas encore utilisé : ce sera le panneau média de Windows.)
-    #[allow(dead_code)]
-    pub fn metadonnees(
-        &mut self,
-        titre: Option<&str>,
-        artiste: Option<&str>,
-        album: Option<&str>,
-        pochette: Option<&Path>,
-        duree: Option<Duration>,
-    ) {
+    /// À appeler à chaque image avec le morceau en cours : quand il change,
+    /// ses informations sont préparées puis données au système. À l'arrêt
+    /// (rien en cours), le panneau garde le dernier morceau.
+    pub fn morceau(&mut self, chemin: Option<&Path>) {
+        if let Some(reception) = &self.infos {
+            if let Ok(infos) = reception.try_recv() {
+                self.infos = None;
+                // Un morceau plus récent a pu être lancé entre-temps.
+                if self.morceau.as_deref() == Some(infos.chemin.as_path()) {
+                    self.metadonnees(&infos);
+                }
+            }
+        }
+        let Some(chemin) = chemin else {
+            return;
+        };
+        if self.controles.is_none() || self.morceau.as_deref() == Some(chemin) {
+            return;
+        }
+        self.morceau = Some(chemin.to_path_buf());
+        let (envoi, reception) = mpsc::channel();
+        let chemin = chemin.to_path_buf();
+        thread::spawn(move || {
+            let _ = envoi.send(preparer(&chemin, &dossier_des_pochettes()));
+        });
+        self.infos = Some(reception);
+    }
+
+    fn metadonnees(&mut self, infos: &Infos) {
         let Some(controles) = &mut self.controles else {
             return;
         };
-        let pochette = pochette.map(adresse_de_fichier);
+        let pochette = infos.pochette.as_deref().map(adresse_de_fichier);
+        // Tout est donné, même vide : Windows garde sinon l'artiste ou
+        // l'album du morceau d'avant.
         let _ = controles.set_metadata(MediaMetadata {
-            title: titre,
-            artist: artiste,
-            album,
+            title: Some(&infos.titre),
+            artist: Some(&infos.artiste),
+            album: Some(&infos.album),
             cover_url: pochette.as_deref(),
-            duration: duree,
+            duration: None,
         });
     }
 
@@ -164,12 +214,95 @@ fn commande(touche: &MediaControlEvent, etat: EtatMedia) -> Option<Commande> {
     }
 }
 
-/// Le chemin d'un fichier écrit comme une adresse « file:/// », la forme
-/// que les systèmes attendent pour une pochette.
+/// Lit les tags du morceau et écrit sa pochette dans `dossier`.
+fn preparer(chemin: &Path, dossier: &Path) -> Infos {
+    let tags = tags::lire(chemin);
+    Infos {
+        chemin: chemin.to_path_buf(),
+        titre: tags.titre.unwrap_or_else(|| sans_extension(chemin)),
+        artiste: tags.artiste.unwrap_or_default(),
+        album: tags.album.unwrap_or_default(),
+        pochette: ecrire_pochette(chemin, dossier),
+    }
+}
+
+/// Le nom du fichier sans « .mp3 », comme titre d'un morceau sans tags.
+fn sans_extension(chemin: &Path) -> String {
+    chemin
+        .file_stem()
+        .map(|nom| nom.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
+/// Le dossier temporaire où l'on range la pochette donnée au système.
+fn dossier_des_pochettes() -> PathBuf {
+    std::env::temp_dir().join("lecteur_mp3_pochettes")
+}
+
+/// Écrit la pochette du morceau (ou, s'il n'en a pas, le disque vinyle du
+/// lecteur) dans `dossier`, après avoir effacé les précédentes. Chaque
+/// pochette a un nouveau nom : on n'écrit jamais dans un fichier que le
+/// système est peut-être en train de lire.
+fn ecrire_pochette(chemin: &Path, dossier: &Path) -> Option<PathBuf> {
+    static NUMERO: AtomicU32 = AtomicU32::new(0);
+    let (donnees, extension) = match tags::lire_pochette_brute(chemin).and_then(avec_extension) {
+        Some(pochette) => pochette,
+        None => (vinyle_png()?, "png"),
+    };
+    if let Ok(anciennes) = fs::read_dir(dossier) {
+        for ancienne in anciennes.flatten() {
+            let _ = fs::remove_file(ancienne.path());
+        }
+    }
+    fs::create_dir_all(dossier).ok()?;
+    let numero = NUMERO.fetch_add(1, Ordering::Relaxed);
+    let fichier = dossier.join(format!("pochette-{numero}.{extension}"));
+    fs::write(&fichier, donnees).ok()?;
+    Some(fichier)
+}
+
+/// L'image avec l'extension de son format, si c'est un format que les
+/// panneaux média savent afficher.
+fn avec_extension(donnees: Vec<u8>) -> Option<(Vec<u8>, &'static str)> {
+    let extension = match image::guess_format(&donnees).ok()? {
+        image::ImageFormat::Jpeg => "jpg",
+        image::ImageFormat::Png => "png",
+        _ => return None,
+    };
+    Some((donnees, extension))
+}
+
+/// Le disque vinyle de l'icône du lecteur, en PNG.
+fn vinyle_png() -> Option<Vec<u8>> {
+    let pixels = super::icone_vinyle(TAILLE_VINYLE);
+    let image = image::RgbaImage::from_raw(TAILLE_VINYLE, TAILLE_VINYLE, pixels)?;
+    let mut png = Cursor::new(Vec::new());
+    image.write_to(&mut png, image::ImageFormat::Png).ok()?;
+    Some(png.into_inner())
+}
+
+/// Le chemin d'un fichier écrit comme une adresse « file:// », la forme
+/// qu'attend souvlaki pour une pochette. Sous Windows, souvlaki retire
+/// juste « file:// » et ouvre ce qui reste : il faut le chemin tel quel.
+#[cfg(windows)]
 fn adresse_de_fichier(chemin: &Path) -> String {
-    let texte = chemin.to_string_lossy().replace('\\', "/");
-    let texte = texte.trim_start_matches('/');
-    format!("file:///{}", texte.replace(' ', "%20"))
+    format!("file://{}", chemin.display())
+}
+
+/// Sous Linux, une vraie adresse : les caractères spéciaux (espaces,
+/// accents…) sont écrits en « %xx ».
+#[cfg(not(windows))]
+fn adresse_de_fichier(chemin: &Path) -> String {
+    use std::os::unix::ffi::OsStrExt;
+    let mut adresse = String::from("file://");
+    for &octet in chemin.as_os_str().as_bytes() {
+        if octet.is_ascii_alphanumeric() || b"/-_.~".contains(&octet) {
+            adresse.push(octet as char);
+        } else {
+            adresse.push_str(&format!("%{octet:02X}"));
+        }
+    }
+    adresse
 }
 
 #[cfg(windows)]
@@ -244,15 +377,98 @@ mod tests {
         assert_eq!(commande(&MediaControlEvent::Raise, etat), None);
     }
 
+    #[cfg(windows)]
     #[test]
     fn adresse_de_pochette() {
         assert_eq!(
-            adresse_de_fichier(Path::new(r"C:\Musique\Mon album\cover.jpg")),
-            "file:///C:/Musique/Mon%20album/cover.jpg"
+            adresse_de_fichier(Path::new(
+                r"C:\Users\Luce\AppData\Local\Temp\pochette-0.jpg"
+            )),
+            r"file://C:\Users\Luce\AppData\Local\Temp\pochette-0.jpg"
+        );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn adresse_de_pochette() {
+        assert_eq!(
+            adresse_de_fichier(Path::new("/tmp/Mon album/pochette-0.jpg")),
+            "file:///tmp/Mon%20album/pochette-0.jpg"
         );
         assert_eq!(
-            adresse_de_fichier(Path::new("/home/luce/pochette.png")),
-            "file:///home/luce/pochette.png"
+            adresse_de_fichier(Path::new("/tmp/Élodie.png")),
+            "file:///tmp/%C3%89lodie.png"
         );
+    }
+
+    /// Un dossier vide pour un test.
+    fn dossier_de_test(nom: &str) -> PathBuf {
+        let dossier = std::env::temp_dir().join(format!("lecteur_mp3_test_media_{nom}"));
+        let _ = fs::remove_dir_all(&dossier);
+        fs::create_dir_all(&dossier).unwrap();
+        dossier
+    }
+
+    #[test]
+    fn sans_tags_le_titre_est_le_nom_du_fichier_et_la_pochette_le_vinyle() {
+        let dossier = dossier_de_test("sans_tags");
+        let mp3 = dossier.join("Mon morceau.mp3");
+        fs::copy("tests/glissando.mp3", &mp3).unwrap();
+        let pochettes = dossier.join("pochettes");
+        let infos = preparer(&mp3, &pochettes);
+        assert_eq!(infos.titre, "Mon morceau");
+        assert_eq!(infos.artiste, "");
+        assert_eq!(infos.album, "");
+        let pochette = infos.pochette.unwrap();
+        assert_eq!(pochette.extension().unwrap(), "png");
+        let image = image::open(&pochette).unwrap();
+        assert_eq!(image.width(), TAILLE_VINYLE);
+    }
+
+    #[test]
+    fn titre_artiste_album_et_pochette_viennent_des_tags() {
+        use id3::TagLike;
+        let dossier = dossier_de_test("avec_tags");
+        let mp3 = dossier.join("morceau.mp3");
+        fs::copy("tests/glissando.mp3", &mp3).unwrap();
+        let jpeg = {
+            let image = image::RgbImage::from_pixel(8, 4, image::Rgb([200, 0, 100]));
+            let mut jpeg = Cursor::new(Vec::new());
+            image.write_to(&mut jpeg, image::ImageFormat::Jpeg).unwrap();
+            jpeg.into_inner()
+        };
+        let mut tag = id3::Tag::new();
+        tag.set_title("Néon");
+        tag.set_artist("Luce");
+        tag.set_album("Nuit");
+        tag.add_frame(id3::frame::Picture {
+            mime_type: "image/jpeg".into(),
+            picture_type: id3::frame::PictureType::CoverFront,
+            description: String::new(),
+            data: jpeg.clone(),
+        });
+        tag.write_to_path(&mp3, id3::Version::Id3v24).unwrap();
+
+        let pochettes = dossier.join("pochettes");
+        let infos = preparer(&mp3, &pochettes);
+        assert_eq!(infos.titre, "Néon");
+        assert_eq!(infos.artiste, "Luce");
+        assert_eq!(infos.album, "Nuit");
+        let pochette = infos.pochette.unwrap();
+        assert_eq!(pochette.extension().unwrap(), "jpg");
+        assert_eq!(fs::read(&pochette).unwrap(), jpeg);
+    }
+
+    #[test]
+    fn une_nouvelle_pochette_efface_l_ancienne() {
+        let dossier = dossier_de_test("efface");
+        let mp3 = dossier.join("a.mp3");
+        fs::copy("tests/glissando.mp3", &mp3).unwrap();
+        let pochettes = dossier.join("pochettes");
+        let premiere = ecrire_pochette(&mp3, &pochettes).unwrap();
+        let seconde = ecrire_pochette(&mp3, &pochettes).unwrap();
+        assert_ne!(premiere, seconde);
+        assert!(!premiere.exists());
+        assert_eq!(fs::read_dir(&pochettes).unwrap().count(), 1);
     }
 }

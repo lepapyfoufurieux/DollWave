@@ -131,7 +131,6 @@ fn texte_d_infobulle(morceau: Option<&str>) -> String {
 
 /// Dessine l'icône du lecteur : un petit disque vinyle avec son étiquette
 /// orange. Rend les pixels (rouge, vert, bleu, opacité), ligne par ligne.
-#[cfg_attr(not(windows), allow(dead_code))]
 fn icone_vinyle(taille: u32) -> Vec<u8> {
     let centre = taille as f32 / 2.0;
     let mut pixels = Vec::with_capacity((taille * taille * 4) as usize);

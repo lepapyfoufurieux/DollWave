@@ -142,14 +142,7 @@ fn premier_nombre(texte: &str) -> Option<u32> {
 /// La pochette rangée dans le fichier (de préférence celle marquée « devant »),
 /// réduite pour l'affichage. Rien si le fichier n'en a pas.
 pub fn lire_pochette(chemin: &Path) -> Option<egui::ColorImage> {
-    let donnees = ouvrir(chemin, |revision, _| {
-        let visuels = revision?.visuals();
-        let visuel = visuels
-            .iter()
-            .find(|v| v.usage == Some(StandardVisualKey::FrontCover))
-            .or_else(|| visuels.first())?;
-        Some(visuel.data.to_vec())
-    })??;
+    let donnees = lire_pochette_brute(chemin)?;
     let mut image = image::load_from_memory(&donnees).ok()?;
     if image.width().max(image.height()) > TAILLE_POCHETTE {
         image = image.thumbnail(TAILLE_POCHETTE, TAILLE_POCHETTE);
@@ -160,6 +153,19 @@ pub fn lire_pochette(chemin: &Path) -> Option<egui::ColorImage> {
         taille,
         image.as_raw(),
     ))
+}
+
+/// L'image de la pochette telle qu'elle est rangée dans le fichier (JPEG ou
+/// PNG, en général), sans la décoder.
+pub fn lire_pochette_brute(chemin: &Path) -> Option<Vec<u8>> {
+    ouvrir(chemin, |revision, _| {
+        let visuels = revision?.visuals();
+        let visuel = visuels
+            .iter()
+            .find(|v| v.usage == Some(StandardVisualKey::FrontCover))
+            .or_else(|| visuels.first())?;
+        Some(visuel.data.to_vec())
+    })?
 }
 
 /// Ouvre le fichier avec symphonia, sans décoder la musique, et passe ses
