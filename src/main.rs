@@ -1390,10 +1390,13 @@ impl LecteurApp {
                 }
             }
         }
+        // Les lignes de la pochette sous les paroles, pour qu'elles se lisent
+        // bien (celles de la fenêtre ne passent pas ici).
+        theme::lignes_d_ecran(&peintre, cadre, 3.0, 56.0);
+        self.effets.proteger(cadre);
         if let Some(paroles) = paroles {
             paroles.afficher(ui, cadre, position);
         }
-        theme::lignes_d_ecran(&peintre, cadre, 3.0, 56.0);
         peintre.rect_stroke(
             cadre,
             0.0,
@@ -1782,7 +1785,6 @@ impl eframe::App for LecteurApp {
         theme::dessiner_fond(ctx);
         let en_lecture = self.platine_active().is_some_and(Telecommande::tourne);
         self.effets.avancer(ctx.input(|i| i.stable_dt), en_lecture);
-        self.effets.dessiner(ctx);
 
         // En haut, le bandeau néon (logo et voyants), sur toute la largeur.
         let voyants = bandeau::Voyants {
@@ -1973,6 +1975,9 @@ impl eframe::App for LecteurApp {
         // Sinon (en pause, à l'arrêt, ou fenêtre réduite : rien ne bouge à
         // l'écran), de temps en temps suffit pour voir l'état changer et
         // passer au morceau suivant.
+        // Les lignes d'écran, une fois tous les panneaux dessinés.
+        self.effets.dessiner(ctx);
+
         let en_lecture = self.platine_active().is_some_and(Telecommande::tourne);
         let reduite = ctx.input(|i| i.viewport().minimized == Some(true));
         let anime = en_lecture || !self.visualiseur.au_repos() || self.position_glissee.is_some();

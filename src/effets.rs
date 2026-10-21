@@ -4,7 +4,9 @@
 //! Les lignes d'écran se cochent dans ⚙ Options ; le choix est mémorisé
 //! dans le dossier de réglages (lignes_ecran.txt : « oui » ou « non »).
 
-use eframe::egui;
+use std::cell::Cell;
+
+use eframe::egui::{self, Rect};
 
 use crate::bibliotheque::memoriser;
 use crate::systeme::fichier_de_reglage;
@@ -24,6 +26,9 @@ pub struct Effets {
     pub lignes: bool,
     /// Où en est la respiration des lueurs (en secondes).
     phase: f32,
+    /// Une zone où les lignes de la fenêtre ne passent pas (la pochette :
+    /// elle a ses propres lignes, sous les paroles). Remise à zéro à chaque image.
+    sans_lignes: Cell<Option<Rect>>,
 }
 
 impl Effets {
@@ -33,6 +38,7 @@ impl Effets {
         let effets = Self {
             lignes: lignes_depuis(lire(REGLAGE_LIGNES).as_deref()),
             phase: 0.0,
+            sans_lignes: Cell::new(None),
         };
         effets.appliquer();
         effets
@@ -54,13 +60,21 @@ impl Effets {
         }
     }
 
+    /// Les lignes de la fenêtre ne passeront pas sur `zone` à cette image.
+    pub fn proteger(&self, zone: Rect) {
+        self.sans_lignes.set(Some(zone));
+    }
+
     /// Les lignes d'écran par-dessus toute la fenêtre (mais sous les menus
-    /// et les fenêtres, qui restent bien nets).
+    /// et les fenêtres, qui restent bien nets), sauf sur la zone protégée.
+    /// À appeler après les panneaux.
     pub fn dessiner(&self, ctx: &egui::Context) {
         let calque =
             egui::LayerId::new(egui::Order::PanelResizeLine, egui::Id::new("lignes_ecran"));
         let peintre = ctx.layer_painter(calque);
-        theme::lignes_d_ecran(&peintre, ctx.screen_rect(), ECART_FENETRE, OPACITE_FENETRE);
+        for zone in autour(ctx.screen_rect(), self.sans_lignes.take()) {
+            theme::lignes_d_ecran(&peintre, zone, ECART_FENETRE, OPACITE_FENETRE);
+        }
     }
 
     /// Le réglage des effets, dans le menu ⚙ Options.
@@ -82,6 +96,28 @@ fn respiration(phase: f32) -> f32 {
     0.5 + 0.5 * (phase / PERIODE * std::f32::consts::TAU).cos()
 }
 
+/// Les morceaux de `ecran` autour de `trou` (au plus 4 bandes : dessus,
+/// dessous, gauche, droite). Tout l'écran s'il n'y a pas de trou.
+fn autour(ecran: Rect, trou: Option<Rect>) -> Vec<Rect> {
+    let Some(trou) = trou.map(|t| t.intersect(ecran)).filter(|t| t.is_positive()) else {
+        return vec![ecran];
+    };
+    let haut = Rect::from_min_max(ecran.min, egui::pos2(ecran.right(), trou.top()));
+    let bas = Rect::from_min_max(egui::pos2(ecran.left(), trou.bottom()), ecran.max);
+    let gauche = Rect::from_min_max(
+        egui::pos2(ecran.left(), trou.top()),
+        egui::pos2(trou.left(), trou.bottom()),
+    );
+    let droite = Rect::from_min_max(
+        egui::pos2(trou.right(), trou.top()),
+        egui::pos2(ecran.right(), trou.bottom()),
+    );
+    [haut, bas, gauche, droite]
+        .into_iter()
+        .filter(|r| r.is_positive())
+        .collect()
+}
+
 /// Lit le fichier des lignes d'écran : affichées sauf si l'on a mis « non ».
 fn lignes_depuis(texte: Option<&str>) -> bool {
     texte.is_none_or(|t| t.trim() != "non")
@@ -99,6 +135,25 @@ mod tests {
     }
 
     #[test]
+    fn les_lignes_contournent_la_pochette() {
+        let ecran = Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(100.0, 100.0));
+        assert_eq!(autour(ecran, None), vec![ecran]);
+        let pochette = Rect::from_min_max(egui::pos2(60.0, 50.0), egui::pos2(90.0, 80.0));
+        let bandes = autour(ecran, Some(pochette));
+        assert_eq!(bandes.len(), 4);
+        let surface: f32 = bandes.iter().map(|r| r.area()).sum();
+        assert_eq!(
+            surface,
+            100.0 * 100.0 - 30.0 * 30.0,
+            "tout sauf la pochette"
+        );
+        assert!(bandes.iter().all(|r| !r.intersects(pochette.shrink(0.5))));
+        // Collée au bord : une bande de moins.
+        let au_bord = Rect::from_min_max(egui::pos2(60.0, 50.0), egui::pos2(100.0, 100.0));
+        assert_eq!(autour(ecran, Some(au_bord)).len(), 2);
+    }
+
+    #[test]
     fn la_respiration_va_de_1_a_0_et_revient() {
         assert!((respiration(0.0) - 1.0).abs() < 1e-6);
         assert!(respiration(PERIODE / 2.0) < 1e-6);
@@ -110,6 +165,7 @@ mod tests {
         let mut effets = Effets {
             lignes: true,
             phase: 0.0,
+            sans_lignes: Cell::new(None),
         };
         effets.avancer(PERIODE / 2.0, true);
         assert!(
