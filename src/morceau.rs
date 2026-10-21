@@ -8,6 +8,7 @@
 
 use std::collections::HashMap;
 use std::fs::File;
+use std::io::{Read, Seek, SeekFrom};
 use std::ops::Range;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -172,6 +173,7 @@ impl Morceau {
         source: Box<dyn MediaSource>,
         continuer: impl Fn() -> bool,
     ) -> Result<Self, Box<dyn std::error::Error>> {
+        let source = sauter_les_tags_id3(source)?;
         let flux = MediaSourceStream::new(source, Default::default());
         let options = FormatOptions {
             enable_gapless: true,
@@ -453,6 +455,24 @@ fn resumer(
     Some(apercu)
 }
 
+/// Place la source juste après les tags ID3v2 du début. Le lecteur MP3 de
+/// symphonia ne les saute pas : il cherchait du son dans la pochette, et des
+/// octets qui y ressemblaient par hasard donnaient un faux morceau (muet, à la
+/// mauvaise fréquence, d'une durée fausse).
+fn sauter_les_tags_id3(mut source: Box<dyn MediaSource>) -> std::io::Result<Box<dyn MediaSource>> {
+    loop {
+        let debut = source.stream_position()?;
+        let mut entete = [0u8; 10];
+        let lus = source.read(&mut entete)?;
+        let taille = crate::infos_fichier::taille_des_tags_id3(&entete[..lus]);
+        if taille == 0 {
+            source.seek(SeekFrom::Start(debut))?;
+            return Ok(source);
+        }
+        source.seek(SeekFrom::Start(debut + taille as u64))?;
+    }
+}
+
 /// Décode les paquets d'un bloc, en commençant un peu avant pour « amorcer »
 /// le décodeur, et ne garde que le son du bloc.
 fn decoder_paquets(
@@ -691,5 +711,34 @@ mod tests {
         let source = || Box::new(Cursor::new(GLISSANDO.to_vec()));
         assert!(Morceau::depuis_tant_que(source(), || false).is_err());
         assert!(Morceau::depuis_tant_que(source(), || true).is_ok());
+    }
+
+    /// Un tag ID3v2 (comme une pochette) dont le contenu ressemble par hasard
+    /// à du son MP3 : quelques fausses trames à 12 kHz, puis de vrais octets.
+    fn tag_id3_trompeur() -> Vec<u8> {
+        // Fausse trame MPEG-2.5 couche III, 32 kbit/s, 12 kHz, mono : 192 octets.
+        let mut fausse_trame = vec![0xFF, 0xE3, 0x44, 0xC0];
+        fausse_trame.resize(192, 0);
+        let contenu = fausse_trame.repeat(8);
+        let taille = contenu.len();
+        let mut tag = b"ID3\x03\x00\x00".to_vec();
+        // Taille sur 4 octets de 7 bits.
+        tag.extend([21, 14, 7, 0].map(|decalage| ((taille >> decalage) & 0x7F) as u8));
+        tag.extend(contenu);
+        tag
+    }
+
+    #[test]
+    fn le_contenu_des_tags_id3_n_est_pas_pris_pour_du_son() {
+        // Bug de « Eko » : la pochette était lue comme du son à 12 kHz, le
+        // morceau durait 15 minutes au lieu de 3 et restait muet.
+        let mut fichier = tag_id3_trompeur();
+        fichier.extend_from_slice(GLISSANDO);
+        let morceau = Morceau::depuis(Box::new(Cursor::new(fichier))).unwrap();
+        let attendu = glissando();
+        assert_eq!(morceau.frequence, 44_100);
+        assert_eq!(morceau.canaux, 2);
+        assert_eq!(morceau.nb_trames, attendu.nb_trames);
+        assert_eq!(decodage_complet(&morceau), decodage_complet(&attendu));
     }
 }
