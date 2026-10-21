@@ -86,11 +86,15 @@ pub fn famille_titres() -> egui::FontFamily {
     egui::FontFamily::Name(TITRES.into())
 }
 
-/// Un en-tête de section (« BIBLIOTHÈQUE ») : Orbitron, en majuscules espacées.
-pub fn titre(texte: &str) -> egui::RichText {
-    egui::RichText::new(texte.to_uppercase())
-        .text_style(egui::TextStyle::Heading)
-        .extra_letter_spacing(1.0)
+/// La police des grands titres néon (Orbitron), à la taille voulue. Si les
+/// polices n'ont pas été installées (certains tests), la police courante.
+pub fn titres(ctx: &egui::Context, taille: f32) -> egui::FontId {
+    let famille = famille_titres();
+    if ctx.fonts(|f| f.families().contains(&famille)) {
+        egui::FontId::new(taille, famille)
+    } else {
+        egui::FontId::proportional(taille)
+    }
 }
 
 /// Des chiffres (temps, durée, compteur, volume) : Share Tech Mono.
@@ -163,9 +167,9 @@ mod tests {
     }
 
     #[test]
-    fn les_titres_sont_en_majuscules_et_en_orbitron() {
+    fn les_titres_sont_en_orbitron() {
         let ctx = contexte();
-        assert_eq!(titre("Bibliothèque").text(), "BIBLIOTHÈQUE");
+        assert_eq!(titres(&ctx, 13.0).family, famille_titres());
         let style = ctx.style();
         assert_eq!(
             style.text_styles[&egui::TextStyle::Heading].family,

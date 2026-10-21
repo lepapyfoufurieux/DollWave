@@ -12,6 +12,7 @@ use crate::bibliotheque::{clic_simple, ecrire_sans_risque};
 use crate::liste::{nom_du_fichier, place_sous_la_souris, MorceauGlisse};
 use crate::systeme::fichier_de_reglage;
 use crate::tags::TagsConnus;
+use crate::theme;
 
 /// Les caractères que Windows refuse dans un nom de fichier.
 const INTERDITS: &[char] = &['\\', '/', ':', '*', '?', '"', '<', '>', '|'];
@@ -261,18 +262,22 @@ impl Playlists {
     pub fn afficher(&mut self, ui: &mut egui::Ui, tags: &TagsConnus) -> Option<Demande> {
         let mut demande = None;
 
-        ui.horizontal(|ui| {
-            ui.label(crate::police::titre("Playlists"));
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui
-                    .button("➕ Nouvelle")
-                    .on_hover_text("Créer une playlist vide, à remplir en y glissant des morceaux")
-                    .clicked()
-                {
-                    self.demander_un_nom();
-                }
-            });
+        theme::separateur(ui, theme::MAGENTA);
+        theme::entete_section(ui, "Playlists", theme::MAGENTA, |ui| {
+            let nouvelle = theme::Bouton::texte("Nouvelle")
+                .avec_icone(theme::Icone::Plus)
+                .couleur(theme::MAGENTA)
+                .petit()
+                .taille(egui::vec2(104.0, 24.0));
+            if ui
+                .add(nouvelle)
+                .on_hover_text("Créer une playlist vide, à remplir en y glissant des morceaux")
+                .clicked()
+            {
+                self.demander_un_nom();
+            }
         });
+        ui.add_space(4.0);
 
         if matches!(self.saisie, Some(Saisie::Nouvelle(_))) {
             self.champ_de_saisie(ui);
@@ -281,7 +286,10 @@ impl Playlists {
         if self.dossier.is_none() {
             ui.label("Impossible de trouver où enregistrer les playlists.");
         } else if self.toutes.is_empty() && self.saisie.is_none() {
-            ui.weak("Aucune playlist pour l'instant. Crée-en une avec « ➕ Nouvelle », puis glisses-y des morceaux depuis la bibliothèque.");
+            ui.label(
+                egui::RichText::new("Aucune playlist pour l'instant. Crée-en une avec « + Nouvelle », puis glisses-y des morceaux depuis la bibliothèque.")
+                    .color(theme::TEXTE_DISCRET),
+            );
         }
 
         egui::ScrollArea::vertical()
@@ -338,14 +346,29 @@ impl Playlists {
         // Comme un dossier de la bibliothèque : la flèche déplie la playlist
         // pour voir ses morceaux (fermée au départ).
         let id = ui.make_persistent_id(("playlist", &nom));
+        let chargee = self.chargee.as_deref() == Some(nom.as_str());
+        // Le cadre de la ligne (angle coupé en haut à droite) est dessiné
+        // sous elle, une fois sa place connue.
+        let fond = ui.painter().add(egui::Shape::Noop);
         let entete =
             egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, false)
                 .show_header(ui, |ui| {
-                    let chargee = self.chargee.as_deref() == Some(nom.as_str());
-                    let texte = format!("🎵 {} ({})", nom, self.toutes[n].morceaux.len());
-                    let etiquette = ui.selectable_label(chargee, texte).on_hover_text(
-                        "Cliquer pour écouter cette playlist (remplace la liste de lecture)",
-                    );
+                    let texte = egui::RichText::new(&nom).color(if chargee {
+                        egui::Color32::WHITE
+                    } else {
+                        theme::TEXTE
+                    });
+                    let nombre = self.toutes[n].morceaux.len();
+                    let etiquette = ui
+                        .add(
+                            egui::Label::new(texte)
+                                .truncate()
+                                .selectable(false)
+                                .sense(egui::Sense::click()),
+                        )
+                        .on_hover_text(
+                            "Cliquer pour écouter cette playlist (remplace la liste de lecture)",
+                        );
                     if clic_simple(ui, &etiquette) {
                         if let Some(fichiers) = self.lire_pour(&nom) {
                             self.chargee = Some(nom.clone());
@@ -369,12 +392,21 @@ impl Playlists {
                             self.donner_la_main = true;
                             self.a_supprimer = None;
                         }
+                        let ajouter = theme::Bouton::icone(theme::Icone::Plus)
+                            .allure(theme::Allure::Eteint)
+                            .couleur(theme::MAGENTA)
+                            .taille(egui::vec2(20.0, 20.0));
                         let bouton = ui
-                            .small_button("➕")
+                            .add(ajouter)
                             .on_hover_text("Ajouter à la suite de la liste de lecture");
                         if clic_simple(ui, &bouton) {
                             demande = self.lire_pour(&nom).map(Demande::AjouterALaListe);
                         }
+                        ui.label(
+                            crate::police::chiffres(nombre.to_string())
+                                .size(11.0)
+                                .color(theme::TEXTE_DISCRET),
+                        );
                     });
                 });
         let rangee = entete
@@ -426,6 +458,22 @@ impl Playlists {
                 a_deplacer = deposer_un_titre(ui, &nom, &lignes);
             })
             .1;
+        let cadre = rangee.response.rect.expand2(egui::vec2(4.0, 3.0));
+        let coins = theme::Coins::haut_droit(10.0);
+        let remplissage = if chargee {
+            theme::attenue(theme::MAGENTA, 40)
+        } else {
+            theme::attenue(theme::PANNEAU, 200)
+        };
+        let forme = egui::Shape::convex_polygon(
+            theme::contour(cadre, coins),
+            remplissage,
+            egui::Stroke::new(
+                1.0_f32,
+                theme::attenue(theme::MAGENTA, if chargee { 160 } else { 68 }),
+            ),
+        );
+        ui.painter().set(fond, forme);
         if let Some(i) = a_retirer {
             self.retirer_de(&nom, i);
         }
@@ -958,6 +1006,10 @@ mod tests {
         );
     }
 
+    /// La hauteur du milieu de la première playlist à l'écran (sous le
+    /// séparateur, l'en-tête « PLAYLISTS » et sa marge).
+    const PREMIERE_LIGNE: f32 = 61.0;
+
     /// Glisse un morceau de la liste de lecture (à droite) jusqu'à la
     /// hauteur `y` du panneau des playlists (à gauche), et lâche.
     fn glisser_de_la_liste_vers(y: f32, dossier: &Path) {
@@ -1002,7 +1054,7 @@ mod tests {
                 },
             ]
         };
-        // Le 1er morceau de la liste, et la 1re playlist (vers y = 30).
+        // Le 1er morceau de la liste, et la 1re playlist (vers PREMIERE_LIGNE).
         let depart = egui::pos2(380.0, 15.0);
         let arrivee = egui::pos2(60.0, y);
         image(vec![]);
@@ -1024,7 +1076,7 @@ mod tests {
         glisser_de_la_liste_vers(150.0, &dossier);
         assert!(lire(&dossier, "Soirée").unwrap().is_empty());
         // Lâché dessus : le morceau y est ajouté.
-        glisser_de_la_liste_vers(30.0, &dossier);
+        glisser_de_la_liste_vers(PREMIERE_LIGNE, &dossier);
         assert_eq!(lire(&dossier, "Soirée").unwrap(), [dossier.join("0.mp3")]);
         std::fs::remove_dir_all(&dossier).unwrap();
     }
@@ -1077,7 +1129,7 @@ mod tests {
         // pas, et « Oui » vient avant « Non ».
         let mut x = 5.0;
         while playlists.noms().len() == 2 && x < 300.0 {
-            let pos = egui::pos2(x, 30.0);
+            let pos = egui::pos2(x, PREMIERE_LIGNE);
             image(&mut playlists, clic(pos, true));
             image(&mut playlists, clic(pos, false));
             image(&mut playlists, vec![]);

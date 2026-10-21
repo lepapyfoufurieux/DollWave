@@ -127,7 +127,7 @@ impl Paroles {
             .map(|(n, (_, texte))| {
                 let (police, couleur) = if Some(n) == courante {
                     (
-                        egui::FontId::new(taille_courante, crate::police::famille_titres()),
+                        crate::police::titres(ui.ctx(), taille_courante),
                         egui::Color32::WHITE,
                     )
                 } else {

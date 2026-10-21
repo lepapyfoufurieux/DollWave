@@ -162,7 +162,7 @@ pub fn afficher(ui: &mut egui::Ui, bloc: &EnLecture) -> egui::Response {
 
     // Le titre, en grand et lumineux, coupé s'il est trop long.
     y += 10.0;
-    let titre_police = egui::FontId::new(28.0, crate::police::famille_titres());
+    let titre_police = crate::police::titres(ui.ctx(), 28.0);
     let titre = ajuster(
         ui,
         &bloc.titre.to_uppercase(),

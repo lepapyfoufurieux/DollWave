@@ -13,6 +13,7 @@ use crate::playlists::{menu_clic_droit, ChoixDuMenu, MorceauxGlisses};
 use crate::regroupement::{regrouper, Album, Regroupement};
 use crate::systeme::{dossier_musique, fichier_de_reglage};
 use crate::tags::TagsConnus;
+use crate::theme;
 
 /// Au-delà de ce nombre de résultats de recherche, on n'affiche que les
 /// premiers (sinon la fenêtre ralentirait) ; « Ajouter » les prend tous.
@@ -187,9 +188,9 @@ impl Vue {
 
     fn libelle(self) -> &'static str {
         match self {
-            Vue::Dossiers => "📁 Dossiers",
-            Vue::Artistes => "🎤 Artistes",
-            Vue::Albums => "💿 Albums",
+            Vue::Dossiers => "Dossiers",
+            Vue::Artistes => "Artistes",
+            Vue::Albums => "Albums",
         }
     }
 
@@ -315,12 +316,14 @@ impl Bibliotheque {
     /// `dans_la_liste` : les morceaux déjà dans la liste, marqués d'un ✔.
     /// `tags` : les tags des morceaux, pour les nommer et pour la recherche.
     /// `playlists` : les noms des playlists, proposés au clic droit.
+    /// `en_cours` : le morceau en lecture, écrit en jaune.
     pub fn afficher(
         &mut self,
         ui: &mut egui::Ui,
         dans_la_liste: &HashSet<&Path>,
         tags: &TagsConnus,
         playlists: &[String],
+        en_cours: Option<&Path>,
     ) -> Demandes {
         dater_le_dernier_clic(ui.ctx());
 
@@ -341,74 +344,142 @@ impl Bibliotheque {
             }
         }
 
-        ui.horizontal(|ui| {
-            ui.label(crate::police::titre("Bibliothèque"));
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui
-                    .button("📁 Changer de dossier…")
-                    .on_hover_text("Choisir le dossier où est rangée ta musique")
-                    .clicked()
-                {
-                    self.changer_de_dossier(ui.ctx());
-                }
-                if ui
-                    .button("🔄")
-                    .on_hover_text("Relire le dossier (après avoir ajouté de la musique)")
-                    .clicked()
-                {
-                    self.actualiser(ui.ctx());
-                }
-            });
+        // L'en-tête : « BIBLIOTHÈQUE », le nombre de titres, et les boutons
+        // pour relire ou changer le dossier.
+        let nombre = self.contenu.as_ref().map(|c| c.tous.len());
+        theme::entete_section(ui, "Bibliothèque", theme::CYAN, |ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
+            let petit = egui::vec2(24.0, 24.0);
+            let changer = theme::Bouton::icone(theme::Icone::Dossier)
+                .allure(theme::Allure::Eteint)
+                .taille(petit);
+            if ui
+                .add(changer)
+                .on_hover_text("Changer de dossier : choisir où est rangée ta musique")
+                .clicked()
+            {
+                self.changer_de_dossier(ui.ctx());
+            }
+            let relire = theme::Bouton::icone(theme::Icone::Actualiser)
+                .allure(theme::Allure::Eteint)
+                .taille(petit);
+            if ui
+                .add(relire)
+                .on_hover_text("Relire le dossier (après avoir ajouté de la musique)")
+                .clicked()
+            {
+                self.actualiser(ui.ctx());
+            }
+            if let Some(n) = nombre {
+                ui.add_space(4.0);
+                let texte = format!(
+                    "{} TITRE{}",
+                    espacer_les_milliers(n),
+                    if n > 1 { "S" } else { "" }
+                );
+                ui.label(
+                    crate::police::chiffres(texte)
+                        .size(11.0)
+                        .color(theme::TEXTE_DISCRET),
+                );
+            }
         });
         ui.label(
             egui::RichText::new(self.dossier.display().to_string())
                 .small()
-                .weak(),
+                .color(theme::fondu(theme::TEXTE_DISCRET, 0.8)),
         );
+        ui.add_space(4.0);
 
-        // De droite à gauche : d'abord le bouton ✖, puis le champ prend
-        // exactement la place qui reste (sans quoi le panneau s'élargirait
-        // tout seul à chaque image).
-        let ligne = egui::vec2(ui.available_width(), ui.spacing().interact_size.y);
-        let de_droite_a_gauche = egui::Layout::right_to_left(egui::Align::Center);
-        ui.allocate_ui_with_layout(ligne, de_droite_a_gauche, |ui| {
-            if !self.recherche.is_empty()
-                && ui
-                    .small_button("✖")
-                    .on_hover_text("Effacer la recherche")
-                    .clicked()
-            {
-                self.recherche.clear();
-            }
-            ui.add(
-                egui::TextEdit::singleline(&mut self.recherche)
-                    // Un nom fixe, pour que le champ garde la main quand le
-                    // bouton ✖ apparaît à côté.
-                    .id(egui::Id::new("recherche_bibliotheque"))
-                    .hint_text("🔍 Rechercher un morceau, un dossier…")
-                    .desired_width(ui.available_width()),
-            );
-        });
+        // Les onglets Dossiers / Artistes / Albums, aux angles coupés aux
+        // deux bouts, comme dans la maquette.
         ui.horizontal(|ui| {
-            for vue in Vue::TOUTES {
-                if ui
-                    .selectable_label(self.vue == vue, vue.libelle())
-                    .on_hover_text(vue.aide())
-                    .clicked()
-                    && self.vue != vue
-                {
+            ui.spacing_mut().item_spacing.x = 4.0;
+            let largeur = ((ui.available_width() - 8.0) / 3.0).floor();
+            for (n, vue) in Vue::TOUTES.into_iter().enumerate() {
+                let coins = match n {
+                    0 => theme::Coins::haut_gauche(8.0),
+                    2 => theme::Coins::bas_droit(8.0),
+                    _ => theme::Coins::AUCUN,
+                };
+                let onglet = theme::Bouton::texte(vue.libelle())
+                    .allume(self.vue == vue)
+                    .coins(coins)
+                    .taille(egui::vec2(largeur, 28.0));
+                if ui.add(onglet).on_hover_text(vue.aide()).clicked() && self.vue != vue {
                     self.vue = vue;
                     memoriser(REGLAGE_VUE, vue.code());
                 }
             }
         });
-        ui.separator();
+        ui.add_space(4.0);
+
+        // La recherche : une loupe, le champ, et ✖ pour l'effacer.
+        let hauteur = 34.0;
+        let (cadre, _) = ui.allocate_exact_size(
+            egui::vec2(ui.available_width(), hauteur),
+            egui::Sense::hover(),
+        );
+        let active = ui.memory(|m| m.has_focus(egui::Id::new("recherche_bibliotheque")));
+        ui.painter().rect_filled(cadre, 0.0, theme::FOND);
+        ui.painter().rect_stroke(
+            cadre,
+            0.0,
+            egui::Stroke::new(
+                1.0_f32,
+                theme::attenue(theme::CYAN, if active { 230 } else { 120 }),
+            ),
+        );
+        let loupe = egui::Rect::from_center_size(
+            egui::pos2(cadre.left() + 17.0, cadre.center().y),
+            egui::vec2(14.0, 14.0),
+        );
+        theme::icone(ui.painter(), theme::Icone::Recherche, loupe, theme::CYAN);
+        let champ = egui::Rect::from_min_max(
+            egui::pos2(cadre.left() + 30.0, cadre.top()),
+            egui::pos2(cadre.right() - 6.0, cadre.bottom()),
+        );
+        let mut dedans = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(champ)
+                .layout(egui::Layout::right_to_left(egui::Align::Center)),
+        );
+        // De droite à gauche : d'abord le bouton ✖, puis le champ prend
+        // exactement la place qui reste (sans quoi le panneau s'élargirait
+        // tout seul à chaque image).
+        if !self.recherche.is_empty() {
+            let effacer = theme::Bouton::icone(theme::Icone::Croix)
+                .allure(theme::Allure::Eteint)
+                .taille(egui::vec2(20.0, 20.0));
+            if dedans
+                .add(effacer)
+                .on_hover_text("Effacer la recherche")
+                .clicked()
+            {
+                self.recherche.clear();
+            }
+        }
+        let indice = egui::RichText::new("RECHERCHER UN TITRE, UN ARTISTE…")
+            .monospace()
+            .size(12.0)
+            .color(theme::TEXTE_DISCRET);
+        dedans.add(
+            egui::TextEdit::singleline(&mut self.recherche)
+                // Un nom fixe, pour que le champ garde la main quand le
+                // bouton ✖ apparaît à côté.
+                .id(egui::Id::new("recherche_bibliotheque"))
+                .frame(false)
+                .hint_text(indice)
+                .desired_width(dedans.available_width()),
+        );
+        theme::separateur(ui, theme::attenue(theme::CYAN, 90));
 
         // On met les favoris de côté le temps de dessiner les lignes, qui
         // en ont besoin pour afficher les étoiles.
         let favoris = std::mem::take(&mut self.favoris);
         let mut lignes = Lignes {
             dans_la_liste,
+            en_cours,
             tags,
             favoris: &favoris,
             playlists,
@@ -491,9 +562,12 @@ impl Bibliotheque {
         }
         if recherche.is_empty() {
             ui.horizontal(|ui| {
-                ui.label(format!("{} morceaux", contenu.tous.len()));
+                ui.label(
+                    egui::RichText::new(format!("{} morceaux", contenu.tous.len()))
+                        .color(theme::TEXTE_DISCRET),
+                );
                 let bouton = ui
-                    .small_button("➕ Tout ajouter")
+                    .add(tout_ajouter())
                     .on_hover_text("Ajouter toute la bibliothèque à la liste de lecture");
                 if clic_simple(ui, &bouton) {
                     contenu.racine.tous_les_morceaux(&mut lignes.a_ajouter);
@@ -526,7 +600,7 @@ impl Bibliotheque {
                 format!("{nombre} résultats")
             });
             let bouton = ui
-                .small_button("➕ Tout ajouter")
+                .add(tout_ajouter())
                 .on_hover_text("Ajouter tous les résultats à la liste de lecture");
             if clic_simple(ui, &bouton) {
                 // Dans l'ordre de la bibliothèque, sans faire passer les
@@ -548,8 +622,7 @@ impl Bibliotheque {
                 for &n in resultats.into_iter().take(RESULTATS_MAX) {
                     let entree = &tous[n];
                     rangee(ui, &mut hauteur, n, |ui| {
-                        ligne_morceau(ui, &entree.chemin, lignes);
-                        ui.label(egui::RichText::new(&entree.dossier).small().weak());
+                        ligne_morceau(ui, &entree.chemin, lignes, Some(&entree.dossier));
                     });
                 }
                 lignes.hauteur = hauteur;
@@ -579,6 +652,8 @@ pub struct Demandes {
 struct Lignes<'a> {
     /// Les morceaux déjà dans la liste de lecture, marqués d'un ✔.
     dans_la_liste: &'a HashSet<&'a Path>,
+    /// Le morceau en lecture, en jaune.
+    en_cours: Option<&'a Path>,
     tags: &'a TagsConnus,
     favoris: &'a HashSet<PathBuf>,
     /// Les noms des playlists, proposés au clic droit.
@@ -650,7 +725,8 @@ fn afficher_dossier(ui: &mut egui::Ui, dossier: &Dossier, lignes: &mut Lignes) {
             lignes,
             id,
             Some(&sous_dossier.chemin),
-            format!("📁 {} ({})", sous_dossier.nom, sous_dossier.total),
+            sous_dossier.nom.clone(),
+            sous_dossier.total,
             "Ajouter tout ce dossier à la liste de lecture",
             || sous_dossier.liste(),
             |ui, lignes| afficher_dossier(ui, sous_dossier, lignes),
@@ -665,7 +741,7 @@ fn afficher_morceaux(ui: &mut egui::Ui, morceaux: &[PathBuf], lignes: &mut Ligne
     let mut hauteur = lignes.hauteur;
     for morceau in favoris_d_abord(morceaux, PathBuf::as_path, lignes.favoris) {
         rangee(ui, &mut hauteur, morceau, |ui| {
-            ligne_morceau(ui, morceau, lignes)
+            ligne_morceau(ui, morceau, lignes, None)
         });
     }
     lignes.hauteur = hauteur;
@@ -674,7 +750,7 @@ fn afficher_morceaux(ui: &mut egui::Ui, morceaux: &[PathBuf], lignes: &mut Ligne
 /// La ligne d'un dossier, d'un artiste ou d'un album, qu'on peut déplier
 /// (fermée au départ) : son étoile (s'il peut être mis en favori), son nom
 /// (un clic le déplie ; on peut le glisser sur une playlist, ou faire un
-/// clic droit), et « ➕ tout ». Une fois déplié, `contenu` dessine ce qu'il
+/// clic droit), son nombre de morceaux et « + » (tout ajouter). Une fois déplié, `contenu` dessine ce qu'il
 /// contient. `morceaux` donne tous ses morceaux, dans l'ordre affiché.
 #[allow(clippy::too_many_arguments)]
 fn entete_depliable(
@@ -683,6 +759,7 @@ fn entete_depliable(
     id: egui::Id,
     favori: Option<&Path>,
     nom: String,
+    nombre: usize,
     aide_tout: &str,
     morceaux: impl Fn() -> Vec<PathBuf>,
     contenu: impl FnOnce(&mut egui::Ui, &mut Lignes),
@@ -706,28 +783,43 @@ fn entete_depliable(
         if let Some(favori) = favori {
             etoile(ui, favori, lignes);
         }
-        // Un clic sur le nom le déplie ou le replie, comme la flèche.
-        let etiquette = ui.add(
-            egui::Label::new(nom)
-                .selectable(false)
-                .sense(egui::Sense::click_and_drag()),
-        );
-        if clic_simple(ui, &etiquette) {
-            basculer = true;
-        }
-        glisser(&etiquette, &morceaux);
-        menu(
-            &etiquette,
-            lignes,
-            "✏ Modifier les tags de tous ses morceaux…",
-            false,
-            &morceaux,
-        );
-        let bouton = ui.small_button("➕ tout").on_hover_text(aide_tout);
-        if clic_simple(ui, &bouton) {
-            // Dans l'ordre affiché, sans faire passer les favoris devant.
-            lignes.a_ajouter.extend(morceaux());
-        }
+        // À droite d'abord : « + » et le nombre de morceaux ; le nom prend la
+        // place qui reste (coupé s'il est trop long).
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let tout = theme::Bouton::icone(theme::Icone::Plus)
+                .allure(theme::Allure::Eteint)
+                .taille(egui::vec2(20.0, 20.0));
+            let bouton = ui.add(tout).on_hover_text(aide_tout);
+            if clic_simple(ui, &bouton) {
+                // Dans l'ordre affiché, sans faire passer les favoris devant.
+                lignes.a_ajouter.extend(morceaux());
+            }
+            ui.label(
+                crate::police::chiffres(nombre.to_string())
+                    .size(11.0)
+                    .color(theme::TEXTE_DISCRET),
+            );
+            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                // Un clic sur le nom le déplie ou le replie, comme la flèche.
+                let etiquette = ui.add(
+                    egui::Label::new(egui::RichText::new(nom).color(theme::TEXTE))
+                        .truncate()
+                        .selectable(false)
+                        .sense(egui::Sense::click_and_drag()),
+                );
+                if clic_simple(ui, &etiquette) {
+                    basculer = true;
+                }
+                glisser(&etiquette, &morceaux);
+                menu(
+                    &etiquette,
+                    lignes,
+                    "✏ Modifier les tags de tous ses morceaux…",
+                    false,
+                    &morceaux,
+                );
+            });
+        });
     });
     if basculer {
         entete.toggle();
@@ -748,9 +840,9 @@ fn afficher_regroupement(
 ) {
     let a_lire = regroupement.pas_encore_lus.len();
     ui.horizontal(|ui| {
-        ui.label(format!("{nombre} morceaux"));
+        ui.label(egui::RichText::new(format!("{nombre} morceaux")).color(theme::TEXTE_DISCRET));
         let bouton = ui
-            .small_button("➕ Tout ajouter")
+            .add(tout_ajouter())
             .on_hover_text("Ajouter toute la bibliothèque à la liste de lecture");
         if clic_simple(ui, &bouton) {
             match vue {
@@ -788,7 +880,8 @@ fn afficher_regroupement(
                         lignes,
                         id,
                         artiste.nom.is_some().then_some(artiste.cle.as_path()),
-                        format!("🎤 {} ({})", artiste.nom(), artiste.total),
+                        artiste.nom().to_string(),
+                        artiste.total,
                         "Ajouter tous les morceaux de cet artiste à la liste de lecture",
                         || artiste.morceaux(),
                         |ui, lignes| {
@@ -807,10 +900,8 @@ fn afficher_albums(ui: &mut egui::Ui, albums: &[Album], avec_artiste: bool, lign
     for album in favoris_d_abord(albums, |a| &a.cle, lignes.favoris) {
         let id = ui.make_persistent_id(("album", &album.cle));
         let nom = match (&album.artiste, avec_artiste) {
-            (Some(artiste), true) => {
-                format!("💿 {} — {artiste} ({})", album.nom(), album.morceaux.len())
-            }
-            _ => format!("💿 {} ({})", album.nom(), album.morceaux.len()),
+            (Some(artiste), true) => format!("{} — {artiste}", album.nom()),
+            _ => album.nom().to_string(),
         };
         entete_depliable(
             ui,
@@ -818,11 +909,20 @@ fn afficher_albums(ui: &mut egui::Ui, albums: &[Album], avec_artiste: bool, lign
             id,
             album.nom.is_some().then_some(album.cle.as_path()),
             nom,
+            album.morceaux.len(),
             "Ajouter tout cet album à la liste de lecture",
             || album.morceaux.clone(),
             |ui, lignes| afficher_morceaux(ui, &album.morceaux, lignes),
         );
     }
+}
+
+/// Le petit bouton « + TOUT AJOUTER ».
+fn tout_ajouter() -> theme::Bouton {
+    theme::Bouton::texte("Tout ajouter")
+        .avec_icone(theme::Icone::Plus)
+        .petit()
+        .taille(egui::vec2(128.0, 22.0))
 }
 
 /// L'étoile devant un dossier ou un morceau : ★ s'il est en favori, ☆ sinon.
@@ -848,16 +948,64 @@ fn etoile(ui: &mut egui::Ui, chemin: &Path, lignes: &mut Lignes) {
     }
 }
 
-/// Une ligne pour un morceau : son étoile, puis son nom (d'après ses tags) ;
-/// un clic sur le nom l'ajoute à la liste de lecture.
-fn ligne_morceau(ui: &mut egui::Ui, chemin: &Path, lignes: &mut Lignes) {
-    etoile(ui, chemin, lignes);
+/// Une ligne pour un morceau : son étoile, ♪ (ou ✔ s'il est déjà dans la
+/// liste), son nom (d'après ses tags) et sa durée (ou son dossier, pour un
+/// résultat de recherche). Le morceau en lecture est en jaune. Un clic sur
+/// la ligne l'ajoute à la liste de lecture.
+fn ligne_morceau(ui: &mut egui::Ui, chemin: &Path, lignes: &mut Lignes, dossier: Option<&str>) {
     let deja = lignes.dans_la_liste.contains(chemin);
-    let texte = format!(
-        "{} {}",
-        if deja { "✔" } else { "➕" },
-        lignes.tags.libelle(chemin)
+    let courant = lignes.en_cours == Some(chemin);
+    let (rect, ligne) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), 24.0),
+        egui::Sense::click_and_drag(),
     );
+    let peintre = ui.painter();
+    if courant {
+        peintre.rect_filled(rect, 0.0, theme::attenue(theme::JAUNE, 26));
+        let bord = egui::Rect::from_min_size(rect.min, egui::vec2(2.0, rect.height()));
+        peintre.rect_filled(bord, 0.0, theme::JAUNE);
+    } else if ligne.hovered() {
+        peintre.rect_filled(rect, 0.0, theme::attenue(theme::CYAN, 16));
+    }
+    let mut dedans = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(rect.shrink2(egui::vec2(4.0, 0.0)))
+            .layout(egui::Layout::left_to_right(egui::Align::Center)),
+    );
+    let ui = &mut dedans;
+    etoile(ui, chemin, lignes);
+    let (couleur_nom, couleur_signe) = if courant {
+        (theme::JAUNE, theme::JAUNE)
+    } else {
+        (theme::fondu(theme::TEXTE, 0.85), theme::CYAN)
+    };
+    ui.label(
+        egui::RichText::new(if deja { "✔" } else { "♪" })
+            .monospace()
+            .size(12.0)
+            .color(if deja {
+                theme::fondu(couleur_signe, 0.6)
+            } else {
+                couleur_signe
+            }),
+    );
+    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        let droite = match dossier {
+            Some(dossier) => Some(egui::RichText::new(dossier).small()),
+            None => lignes
+                .tags
+                .duree(chemin)
+                .map(|d| crate::police::chiffres(crate::format_temps(d)).size(11.0)),
+        };
+        if let Some(texte) = droite {
+            ui.add(egui::Label::new(texte.color(theme::TEXTE_DISCRET)).truncate());
+        }
+        ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+            let nom = egui::RichText::new(lignes.tags.libelle(chemin)).color(couleur_nom);
+            ui.add(egui::Label::new(nom).truncate().selectable(false));
+        });
+    });
+
     let aide = if deja {
         "Déjà dans la liste de lecture (cliquer pour l'ajouter encore une fois ; glisser sur une playlist ou clic droit pour l'y ajouter)"
     } else {
@@ -865,12 +1013,9 @@ fn ligne_morceau(ui: &mut egui::Ui, chemin: &Path, lignes: &mut Lignes) {
     };
     // L'infobulle n'est préparée que si la souris est dessus.
     let tags = lignes.tags;
-    let ligne = ui
-        .selectable_label(false, texte)
-        .interact(egui::Sense::drag())
-        .on_hover_ui(|ui| {
-            ui.label(format!("{}\n\n{aide}", tags.infobulle(chemin)));
-        });
+    let ligne = ligne.on_hover_ui(|ui| {
+        ui.label(format!("{}\n\n{aide}", tags.infobulle(chemin)));
+    });
     if clic_simple(ui, &ligne) {
         lignes.a_ajouter.push(chemin.to_path_buf());
     }
@@ -932,6 +1077,20 @@ pub fn clic_simple(ui: &egui::Ui, reponse: &egui::Response) -> bool {
     });
     let repetition = precedent.is_some_and(|p| p.id == reponse.id && maintenant - p.temps < delai);
     !repetition
+}
+
+/// Un nombre écrit à la française, les milliers séparés par une espace :
+/// « 1 284 ».
+fn espacer_les_milliers(n: usize) -> String {
+    let chiffres = n.to_string();
+    let mut texte = String::with_capacity(chiffres.len() + chiffres.len() / 3);
+    for (i, c) in chiffres.chars().enumerate() {
+        if i > 0 && (chiffres.len() - i).is_multiple_of(3) {
+            texte.push(' ');
+        }
+        texte.push(c);
+    }
+    texte
 }
 
 /// Le fichier se termine-t-il par .mp3 (ou .MP3, .Mp3…) ?
@@ -1250,13 +1409,14 @@ mod tests {
             let _ = ctx.run(entree, |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| {
                     ajoutes = bibliotheque
-                        .afficher(ui, &dans_la_liste, &tags, &[])
+                        .afficher(ui, &dans_la_liste, &tags, &[], None)
                         .a_ajouter;
                 });
             });
             ajoutes
         };
-        let souris = egui::pos2(100.0, 150.0);
+        // Dans la liste, sous l'en-tête, les onglets et la recherche.
+        let souris = egui::pos2(100.0, 230.0);
         let mut t = 0.0;
         image(t, vec![]);
         // Dix crans de molette vers le bas, puis le temps que ça défile.
@@ -1353,7 +1513,7 @@ mod tests {
             let _ = ctx.run(entree, |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| {
                     ajoutes = bibliotheque
-                        .afficher(ui, &dans_la_liste, &tags, &[])
+                        .afficher(ui, &dans_la_liste, &tags, &[], None)
                         .a_ajouter;
                 });
             });
@@ -1374,7 +1534,8 @@ mod tests {
             assert!(debut.elapsed().as_secs() < 60, "tags jamais tous lus");
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
-        let souris = egui::pos2(100.0, 150.0);
+        // Dans la liste, sous l'en-tête, les onglets et la recherche.
+        let souris = egui::pos2(100.0, 230.0);
         for _ in 0..10 {
             t += 0.05;
             image(
@@ -1501,6 +1662,13 @@ mod tests {
         ecrire_reglage(&fichier, &texte_des_favoris(&HashSet::new())).unwrap();
         assert!(lire_favoris(&fichier).is_empty());
         std::fs::remove_dir_all(&racine).unwrap();
+    }
+
+    #[test]
+    fn les_milliers_sont_espaces() {
+        assert_eq!(espacer_les_milliers(7), "7");
+        assert_eq!(espacer_les_milliers(1284), "1 284");
+        assert_eq!(espacer_les_milliers(1_000_000), "1 000 000");
     }
 
     #[test]

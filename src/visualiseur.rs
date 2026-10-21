@@ -176,7 +176,7 @@ impl Visualiseur {
                 place.left_center(),
                 egui::Align2::LEFT_CENTER,
                 self.style.titre(),
-                egui::FontId::new(12.0, crate::police::famille_titres()),
+                crate::police::titres(ui.ctx(), 12.0),
                 2.0,
                 theme::MAGENTA,
                 theme::MAGENTA,

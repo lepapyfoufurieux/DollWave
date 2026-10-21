@@ -1795,11 +1795,16 @@ impl eframe::App for LecteurApp {
                     })
                     .inner;
                 let noms = self.playlists.noms();
+                // Le morceau en lecture (ou en pause), écrit en jaune.
+                let en_lecture = match (&self.morceau, self.liste.courant()) {
+                    (Some(_), Some(n)) => self.liste.fichier(n),
+                    _ => None,
+                };
                 let dans_la_liste: HashSet<&Path> =
                     self.liste.morceaux().iter().map(PathBuf::as_path).collect();
                 (
                     self.bibliotheque
-                        .afficher(ui, &dans_la_liste, &self.tags, &noms),
+                        .afficher(ui, &dans_la_liste, &self.tags, &noms, en_lecture),
                     demande,
                 )
             })

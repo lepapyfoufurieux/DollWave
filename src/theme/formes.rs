@@ -722,39 +722,30 @@ impl egui::Widget for Bouton {
 
 /// L'en-tête d'une section du panneau (« BIBLIOTHÈQUE », « PLAYLISTS ») :
 /// une petite barre lumineuse, le titre en Orbitron de la couleur de la
-/// section, et `droite` (le nombre de titres…) calé à droite. Renvoie la
-/// place restante à droite du titre, pour y mettre des boutons.
-pub fn entete_section(ui: &mut egui::Ui, titre: &str, couleur: Color32) -> Rect {
-    let hauteur = 22.0;
-    let (rect, _) = ui.allocate_exact_size(
-        egui::vec2(ui.available_width(), hauteur),
-        egui::Sense::hover(),
-    );
-    let peintre = ui.painter();
-    let barre = Rect::from_min_size(
-        egui::pos2(rect.left(), rect.center().y - 9.0),
-        egui::vec2(4.0, 18.0),
-    );
-    halo(peintre, barre, couleur, 0.8);
-    peintre.rect_filled(barre, 0.0, couleur);
-    let police = egui::FontId::new(13.0, crate::police::famille_titres());
-    let ecrit = texte_lumineux(
-        peintre,
-        egui::pos2(barre.right() + 8.0, rect.center().y),
-        egui::Align2::LEFT_CENTER,
-        &titre.to_uppercase(),
-        police,
-        2.5,
-        couleur,
-        couleur,
-    );
-    Rect::from_min_max(egui::pos2(ecrit.right() + 8.0, rect.top()), rect.max)
+/// section, puis `droite` (nombre de titres, boutons), calé à droite.
+pub fn entete_section<R>(
+    ui: &mut egui::Ui,
+    titre: &str,
+    couleur: Color32,
+    droite: impl FnOnce(&mut egui::Ui) -> R,
+) -> R {
+    ui.horizontal(|ui| {
+        ui.set_min_height(24.0);
+        let (barre, _) = ui.allocate_exact_size(egui::vec2(4.0, 18.0), egui::Sense::hover());
+        halo(ui.painter(), barre, couleur, 0.8);
+        ui.painter().rect_filled(barre, 0.0, couleur);
+        ui.add_space(2.0);
+        titre_neon(ui, titre, couleur);
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), droite)
+            .inner
+    })
+    .inner
 }
 
 /// Un titre de section en Orbitron lumineux, à sa place dans une rangée
 /// (« LISTE DE LECTURE »).
 pub fn titre_neon(ui: &mut egui::Ui, titre: &str, couleur: Color32) -> egui::Response {
-    let police = egui::FontId::new(13.0, crate::police::famille_titres());
+    let police = crate::police::titres(ui.ctx(), 13.0);
     let texte = titre.to_uppercase();
     let taille = mise_en_page(ui.ctx(), &texte, police.clone(), 2.5).size();
     let (rect, reponse) = ui.allocate_exact_size(taille, egui::Sense::hover());
