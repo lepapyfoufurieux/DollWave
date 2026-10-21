@@ -108,8 +108,8 @@ pub fn afficher(ui: &mut egui::Ui, bloc: &EnLecture) -> egui::Response {
     // Deux dégradés superposés : cyan qui s'éteint vers la droite, magenta
     // qui s'allume ; le milieu reste presque de la couleur du panneau.
     let rien = Color32::TRANSPARENT;
-    let cyan = theme::attenue(CYAN, 34);
-    let magenta = theme::attenue(MAGENTA, 30);
+    let cyan = theme::attenue(CYAN, 85);
+    let magenta = theme::attenue(MAGENTA, 75);
     theme::degrade(&peintre, &points, cyan, rien, egui::Vec2::X);
     theme::degrade(&peintre, &points, rien, magenta, egui::Vec2::X);
     let survol = reponse.hovered();

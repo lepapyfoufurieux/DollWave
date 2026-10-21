@@ -79,7 +79,7 @@ pub fn afficher(ui: &mut egui::Ui, voyants: &Voyants) {
     theme::degrade(
         peintre,
         &theme::contour(gauche, theme::Coins::AUCUN),
-        theme::attenue(CYAN, 38),
+        theme::attenue(CYAN, 95),
         rien,
         egui::vec2(1.0, 0.0),
     );
@@ -87,13 +87,13 @@ pub fn afficher(ui: &mut egui::Ui, voyants: &Voyants) {
         peintre,
         &theme::contour(droite, theme::Coins::AUCUN),
         rien,
-        theme::attenue(MAGENTA, 38),
+        theme::attenue(MAGENTA, 95),
         egui::vec2(1.0, 0.0),
     );
     peintre.hline(
         zone.x_range(),
         zone.bottom() - 0.5,
-        Stroke::new(1.0_f32, theme::attenue(CYAN, 136)),
+        Stroke::new(1.0_f32, theme::attenue(CYAN, 200)),
     );
 
     // Le logo : un petit hexagone en dégradé cyan → magenta.
