@@ -47,7 +47,9 @@ use platine::{Effet, Platine, Telecommande};
 use playlists::{Demande, Playlists};
 use raccourcis::Commande;
 use sortie::{Sortie, Veilleur};
-use systeme::{fichier_de_reglage, Boite, Demarrage, ZoneDeNotification};
+use systeme::{
+    fichier_de_reglage, Boite, ControlesMedia, Demarrage, EtatMedia, ZoneDeNotification,
+};
 use tags::TagsConnus;
 use visualiseur::Visualiseur;
 
@@ -194,6 +196,8 @@ struct LecteurApp {
     tags: TagsConnus,
     // L'icône près de l'horloge (sous Windows), où se range la fenêtre réduite.
     zone: ZoneDeNotification,
+    /// Les touches multimédia du clavier (voir systeme/media.rs).
+    media: ControlesMedia,
     // Les fichiers à ouvrir donnés au lancement, puis par les lancements
     // suivants (double-clic sur un MP3 alors que le lecteur est ouvert).
     boite: Boite,
@@ -356,6 +360,7 @@ impl LecteurApp {
             visualiseur: Visualiseur::new(),
             tags: TagsConnus::new(ctx),
             zone: ZoneDeNotification::new(ctx),
+            media: ControlesMedia::new(),
             boite: Boite::vide(),
             derniere_ouverture: None,
             pochette: None,
@@ -1775,6 +1780,10 @@ impl eframe::App for LecteurApp {
         for commande in self.zone.surveiller(ctx, frame) {
             self.executer(commande);
         }
+        // Les touches multimédia du clavier, même en arrière-plan.
+        for commande in self.media.surveiller(ctx, frame) {
+            self.executer(commande);
+        }
 
         self.recevoir_depot(ctx);
         self.suivre_le_chargement();
@@ -1976,6 +1985,11 @@ impl eframe::App for LecteurApp {
         self.surveiller_sortie(Instant::now());
 
         self.suivre_la_fin();
+        self.media.etat(match self.etat() {
+            Etat::Arrete => EtatMedia::Arrete,
+            Etat::Pause => EtatMedia::Pause,
+            Etat::Chargement | Etat::Lecture => EtatMedia::Lecture,
+        });
 
         // Pendant la lecture (ou en pause, le temps que les barres retombent),
         // on redessine à chaque image de l'écran pour que le visualiseur soit fluide.

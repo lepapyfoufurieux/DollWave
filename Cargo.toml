@@ -31,6 +31,7 @@ interprocess = "2.4"
 ureq = "3.4.2"
 serde_json = "1.0.154"
 regex = "1.13.1"
+souvlaki = { version = "0.8.3", default-features = false, features = ["use_zbus"] }
 
 # Seulement sous Windows (voir src/systeme/windows.rs).
 [target.'cfg(windows)'.dependencies]
