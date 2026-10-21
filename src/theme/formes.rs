@@ -5,7 +5,7 @@
 //! Tout est dessiné avec les formes simples d'egui (polygones, traits,
 //! maillages colorés) : rien à charger, et peu de calcul à chaque image.
 
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use eframe::egui::{self, epaint, Color32, Pos2, Rect, Shape, Stroke, Vec2};
 
@@ -20,6 +20,9 @@ pub fn intensite() -> f32 {
 /// fort). Elle bat pendant la lecture et reste à 1 sinon (écran figé).
 static PULSATION: AtomicU32 = AtomicU32::new(0x3F80_0000); // 1.0
 
+/// Les lignes d'écran (effet vieux moniteur) sont-elles affichées ?
+static LIGNES: AtomicBool = AtomicBool::new(true);
+
 /// La respiration des lueurs animées en ce moment (voir `PULSATION`).
 pub fn pulsation() -> f32 {
     f32::from_bits(PULSATION.load(Ordering::Relaxed))
@@ -30,11 +33,17 @@ pub fn fixer_pulsation(valeur: f32) {
     PULSATION.store(valeur.clamp(0.0, 1.0).to_bits(), Ordering::Relaxed);
 }
 
+/// Affiche ou cache les lignes d'écran.
+pub fn fixer_lignes(affichees: bool) {
+    LIGNES.store(affichees, Ordering::Relaxed);
+}
+
 /// Des lignes d'écran sur `zone` : une ligne sombre d'un pixel toutes les
 /// `ecart` points, d'opacité `opacite` (0 à 255).
+/// Rien si l'option est décochée.
 pub fn lignes_d_ecran(peintre: &egui::Painter, zone: Rect, ecart: f32, opacite: f32) {
     let alpha = (opacite * intensite()).round().min(255.0);
-    if alpha < 1.0 {
+    if !LIGNES.load(Ordering::Relaxed) || alpha < 1.0 {
         return;
     }
     let trait_ = Stroke::new(1.0_f32, Color32::from_black_alpha(alpha as u8));

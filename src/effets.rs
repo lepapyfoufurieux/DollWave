@@ -1,10 +1,17 @@
 //! Les effets du thème néon (étape 8) : lignes d'écran façon vieux moniteur,
 //! et lueurs qui respirent pendant la lecture (en pause, tout se fige).
+//!
+//! Les lignes d'écran se cochent dans ⚙ Options ; le choix est mémorisé
+//! dans le dossier de réglages (lignes_ecran.txt : « oui » ou « non »).
 
 use eframe::egui;
 
+use crate::bibliotheque::memoriser;
+use crate::systeme::fichier_de_reglage;
 use crate::theme;
 
+/// Le fichier où l'on mémorise si les lignes d'écran sont affichées.
+const REGLAGE_LIGNES: &str = "lignes_ecran.txt";
 /// La durée d'une respiration des lueurs, en secondes.
 const PERIODE: f32 = 2.4;
 /// Lignes d'écran sur toute la fenêtre : une ligne sombre toutes les 4 points,
@@ -12,13 +19,30 @@ const PERIODE: f32 = 2.4;
 const ECART_FENETRE: f32 = 4.0;
 const OPACITE_FENETRE: f32 = 31.0;
 
-#[derive(Default)]
 pub struct Effets {
+    /// Les lignes d'écran sont-elles affichées ?
+    pub lignes: bool,
     /// Où en est la respiration des lueurs (en secondes).
     phase: f32,
 }
 
 impl Effets {
+    /// Les effets tels qu'on les a laissés au dernier lancement.
+    pub fn charger() -> Self {
+        let lire = |nom| fichier_de_reglage(nom).and_then(|f| std::fs::read_to_string(f).ok());
+        let effets = Self {
+            lignes: lignes_depuis(lire(REGLAGE_LIGNES).as_deref()),
+            phase: 0.0,
+        };
+        effets.appliquer();
+        effets
+    }
+
+    /// Transmet le réglage au thème, qui dessine les lignes.
+    fn appliquer(&self) {
+        theme::fixer_lignes(self.lignes);
+    }
+
     /// À chaque image : la respiration des lueurs avance seulement pendant
     /// la lecture. Sinon, elles restent allumées en plein, sans bouger.
     pub fn avancer(&mut self, ecoule: f32, en_lecture: bool) {
@@ -38,6 +62,18 @@ impl Effets {
         let peintre = ctx.layer_painter(calque);
         theme::lignes_d_ecran(&peintre, ctx.screen_rect(), ECART_FENETRE, OPACITE_FENETRE);
     }
+
+    /// Le réglage des effets, dans le menu ⚙ Options.
+    pub fn menu(&mut self, ui: &mut egui::Ui) {
+        if ui
+            .checkbox(&mut self.lignes, "Lignes d'écran")
+            .on_hover_text("De fines lignes sombres, comme sur un vieux moniteur")
+            .changed()
+        {
+            memoriser(REGLAGE_LIGNES, if self.lignes { "oui" } else { "non" });
+            self.appliquer();
+        }
+    }
 }
 
 /// La respiration des lueurs à ce moment de la période : de 1 (au début)
@@ -46,9 +82,21 @@ fn respiration(phase: f32) -> f32 {
     0.5 + 0.5 * (phase / PERIODE * std::f32::consts::TAU).cos()
 }
 
+/// Lit le fichier des lignes d'écran : affichées sauf si l'on a mis « non ».
+fn lignes_depuis(texte: Option<&str>) -> bool {
+    texte.is_none_or(|t| t.trim() != "non")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn les_reglages_se_relisent() {
+        assert!(lignes_depuis(None));
+        assert!(lignes_depuis(Some("oui\n")));
+        assert!(!lignes_depuis(Some("non\n")));
+    }
 
     #[test]
     fn la_respiration_va_de_1_a_0_et_revient() {
@@ -59,7 +107,10 @@ mod tests {
 
     #[test]
     fn en_pause_les_lueurs_ne_bougent_plus() {
-        let mut effets = Effets::default();
+        let mut effets = Effets {
+            lignes: true,
+            phase: 0.0,
+        };
         effets.avancer(PERIODE / 2.0, true);
         assert!(
             theme::pulsation() < 1e-6,

@@ -342,7 +342,7 @@ impl LecteurApp {
             position_glissee: None,
             volume: 0.5,
             muet: false,
-            effets: effets::Effets::default(),
+            effets: effets::Effets::charger(),
             freinage: option_memorisee(REGLAGE_FREINAGE),
             scratch: option_memorisee(REGLAGE_SCRATCH),
             egalisation: option_memorisee(REGLAGE_EGALISATION),
@@ -839,6 +839,8 @@ impl LecteurApp {
         {
             memoriser_option(REGLAGE_PAROLES, self.afficher_paroles);
         }
+        ui.separator();
+        self.effets.menu(ui);
     }
 
     /// Le facteur du volume égalisé pour le morceau en cours : 1 si
