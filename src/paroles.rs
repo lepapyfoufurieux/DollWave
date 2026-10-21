@@ -108,12 +108,12 @@ impl Paroles {
     }
 
     /// Dessine les paroles dans `cadre` (par-dessus la pochette), la phrase
-    /// en cours au milieu, en blanc ; les autres en gris autour. Le texte
-    /// glisse doucement d'une phrase à l'autre.
-    pub fn afficher(&self, ui: &egui::Ui, cadre: egui::Rect, position: f32) {
+    /// en cours au milieu, plus grande ; les autres plus discrètes autour.
+    /// Le texte glisse doucement d'une phrase à l'autre.
+    pub fn afficher(&self, ui: &egui::Ui, cadre: egui::Rect, position: f32, teintes: Teintes) {
         let peintre = ui.painter_at(cadre);
-        // La pochette est assombrie pour que le texte se lise bien.
-        peintre.rect_filled(cadre, 0.0, egui::Color32::from_black_alpha(170));
+        // Un voile sur la pochette, pour que le texte se lise bien.
+        peintre.rect_filled(cadre, 0.0, teintes.voile);
 
         let courante = self.ligne_courante(position);
         let largeur = cadre.width() - 32.0;
@@ -124,9 +124,9 @@ impl Paroles {
             .enumerate()
             .map(|(n, (_, texte))| {
                 let (taille, couleur) = if Some(n) == courante {
-                    (taille_courante, egui::Color32::WHITE)
+                    (taille_courante, teintes.texte)
                 } else {
-                    (taille, egui::Color32::from_gray(150))
+                    (taille, teintes.autres)
                 };
                 // Une phrase vide (passage instrumental) garde sa place.
                 let texte = if texte.is_empty() {
@@ -173,6 +173,92 @@ impl Paroles {
             peintre.galley(egui::pos2(cadre.center().x, y), galet, egui::Color32::WHITE);
         }
     }
+}
+
+/// Les couleurs des paroles, choisies d'après la pochette pour bien
+/// ressortir : un voile posé sur la pochette, la couleur de la phrase en
+/// cours et celle des autres phrases.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Teintes {
+    pub voile: egui::Color32,
+    pub texte: egui::Color32,
+    pub autres: egui::Color32,
+}
+
+impl Teintes {
+    /// Sans pochette : texte blanc sur fond noir (rien à voiler).
+    pub const SANS_POCHETTE: Self = Self {
+        voile: egui::Color32::TRANSPARENT,
+        texte: egui::Color32::WHITE,
+        autres: egui::Color32::from_gray(140),
+    };
+
+    /// Les couleurs pour une pochette dont la couleur moyenne est `moyenne`.
+    /// Pochette sombre : voile noir et texte très clair ; pochette claire :
+    /// voile blanc et texte très foncé. Le texte garde un peu de la couleur
+    /// de la pochette, pour aller avec elle.
+    pub fn pour(moyenne: egui::Color32) -> Self {
+        let (extreme, voile) = if luminance(moyenne) > SEUIL_CLAIR {
+            (egui::Color32::BLACK, egui::Color32::from_white_alpha(150))
+        } else {
+            (egui::Color32::WHITE, egui::Color32::from_black_alpha(150))
+        };
+        let fond = melanger(moyenne, opaque(voile), voile.a() as f32 / 255.0);
+        let texte = melanger(moyenne, extreme, 0.88);
+        Self {
+            voile,
+            texte,
+            autres: melanger(fond, texte, 0.6),
+        }
+    }
+}
+
+/// Au-dessus de cette luminance (0 = noir, 1 = blanc), une couleur se lit
+/// mieux avec du texte noir qu'avec du texte blanc.
+const SEUIL_CLAIR: f32 = 0.18;
+
+/// La couleur moyenne d'une image (on n'en regarde qu'un point sur
+/// plusieurs : c'est bien assez et beaucoup plus rapide).
+pub fn couleur_moyenne(image: &egui::ColorImage) -> egui::Color32 {
+    let pas = (image.pixels.len() / 10_000).max(1);
+    let (mut r, mut v, mut b, mut n) = (0u64, 0u64, 0u64, 0u64);
+    for pixel in image.pixels.iter().step_by(pas) {
+        r += pixel.r() as u64;
+        v += pixel.g() as u64;
+        b += pixel.b() as u64;
+        n += 1;
+    }
+    if n == 0 {
+        return egui::Color32::BLACK;
+    }
+    egui::Color32::from_rgb((r / n) as u8, (v / n) as u8, (b / n) as u8)
+}
+
+/// La luminance d'une couleur telle que l'œil la perçoit, de 0 (noir) à 1
+/// (blanc). Le vert paraît bien plus clair que le bleu.
+fn luminance(couleur: egui::Color32) -> f32 {
+    let lineaire = |c: u8| {
+        let c = c as f32 / 255.0;
+        if c <= 0.04045 {
+            c / 12.92
+        } else {
+            ((c + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    0.2126 * lineaire(couleur.r()) + 0.7152 * lineaire(couleur.g()) + 0.0722 * lineaire(couleur.b())
+}
+
+/// `a` mélangé à `b` : 0 = que `a`, 1 = que `b`.
+fn melanger(a: egui::Color32, b: egui::Color32, part_de_b: f32) -> egui::Color32 {
+    let m = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * part_de_b).round() as u8;
+    egui::Color32::from_rgb(m(a.r(), b.r()), m(a.g(), b.g()), m(a.b(), b.b()))
+}
+
+/// La couleur pleine d'un voile (egui range ses couleurs transparentes
+/// « prémultipliées »).
+fn opaque(voile: egui::Color32) -> egui::Color32 {
+    let [r, v, b, _] = voile.to_srgba_unmultiplied();
+    egui::Color32::from_rgb(r, v, b)
 }
 
 /// Un moment « mm:ss », « mm:ss.cc » (ou « mm:ss:cc »), en secondes. Rien
@@ -299,10 +385,56 @@ mod tests {
                 egui::CentralPanel::default().show(ctx, |ui| {
                     let cadre =
                         egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(200.0, 200.0));
-                    paroles.afficher(ui, cadre, position);
+                    paroles.afficher(ui, cadre, position, Teintes::SANS_POCHETTE);
                 });
             });
         }
+    }
+
+    /// Le rapport de contraste entre deux couleurs (1 = aucun, 21 = noir
+    /// sur blanc). On vise au moins 4,5 pour du texte, comme sur le web.
+    fn contraste(a: egui::Color32, b: egui::Color32) -> f32 {
+        let (a, b) = (luminance(a) + 0.05, luminance(b) + 0.05);
+        a.max(b) / a.min(b)
+    }
+
+    #[test]
+    fn le_texte_ressort_sur_toutes_les_couleurs_de_pochette() {
+        let niveaux = (0..=255).step_by(15).map(|n| n as u8);
+        for r in niveaux.clone() {
+            for v in niveaux.clone() {
+                for b in niveaux.clone() {
+                    let moyenne = egui::Color32::from_rgb(r, v, b);
+                    let teintes = Teintes::pour(moyenne);
+                    let a = teintes.voile.a() as f32 / 255.0;
+                    let fond = melanger(moyenne, opaque(teintes.voile), a);
+                    let (c, autres) = (
+                        contraste(teintes.texte, fond),
+                        contraste(teintes.autres, fond),
+                    );
+                    assert!(c >= 7.0, "{moyenne:?} : contraste {c}");
+                    assert!(autres >= 3.0, "{moyenne:?} : autres phrases {autres}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn pochette_claire_texte_fonce_pochette_sombre_texte_clair() {
+        let claire = Teintes::pour(egui::Color32::from_rgb(240, 230, 200));
+        assert!(luminance(claire.texte) < 0.05);
+        let sombre = Teintes::pour(egui::Color32::from_rgb(30, 20, 60));
+        assert!(luminance(sombre.texte) > 0.7);
+        assert_eq!(Teintes::SANS_POCHETTE.texte, egui::Color32::WHITE);
+    }
+
+    #[test]
+    fn couleur_moyenne_d_une_image() {
+        let mut image = egui::ColorImage::new([10, 10], egui::Color32::from_rgb(200, 0, 0));
+        for pixel in &mut image.pixels[50..] {
+            *pixel = egui::Color32::from_rgb(0, 0, 100);
+        }
+        assert_eq!(couleur_moyenne(&image), egui::Color32::from_rgb(100, 0, 50));
     }
 
     #[test]
