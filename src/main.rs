@@ -34,7 +34,7 @@ use editeur_tags::EditeurTags;
 use egalisation::VolumesConnus;
 use liste::{Action, ListeDeLecture};
 use morceau::Morceau;
-use paroles::{Paroles, Teintes};
+use paroles::Paroles;
 use platine::{Effet, Platine, Telecommande};
 use playlists::{Demande, Playlists};
 use raccourcis::Commande;
@@ -123,10 +123,6 @@ const REGLAGE_ENCHAINEMENT: &str = "fondu_enchaine.txt";
 /// Le petit fichier où l'on mémorise si les paroles (.lrc) sont affichées.
 const REGLAGE_PAROLES: &str = "paroles.txt";
 
-/// Une pochette lue dans le fichier, avec les couleurs des paroles qui
-/// vont avec (rien si le fichier n'en a pas).
-type PochetteLue = Option<(egui::ColorImage, Teintes)>;
-
 /// L'état de l'application.
 struct LecteurApp {
     // La sortie son (haut-parleurs, casque…). Rien si aucune n'a pu être ouverte.
@@ -191,8 +187,7 @@ struct LecteurApp {
     derniere_ouverture: Option<Instant>,
     // La pochette du morceau en cours, et le fichier dont elle vient (pour
     // ne la relire que quand le morceau change). Rien si le fichier n'en a pas.
-    // (Avec les couleurs des paroles qui vont avec.)
-    pochette: Option<(PathBuf, Option<(egui::TextureHandle, Teintes)>)>,
+    pochette: Option<(PathBuf, Option<egui::TextureHandle>)>,
     // Affiche-t-on les paroles synchronisées (fichier .lrc à côté du MP3) ?
     afficher_paroles: bool,
     // Les paroles du morceau en cours, et le fichier dont elles viennent
@@ -205,7 +200,7 @@ struct LecteurApp {
     // Le morceau qu'on est en train d'ouvrir, en arrière-plan.
     chargement: Option<Chargement>,
     // La pochette du morceau qu'on est en train de lire, en arrière-plan.
-    pochette_en_cours: Option<(PathBuf, Receiver<PochetteLue>)>,
+    pochette_en_cours: Option<(PathBuf, Receiver<Option<egui::ColorImage>>)>,
     // La fenêtre « Modifier les tags », quand elle est ouverte.
     editeur: Option<EditeurTags>,
     // Pour redessiner la fenêtre quand un travail en arrière-plan est fini.
@@ -1232,9 +1227,8 @@ impl LecteurApp {
             if demandee == chemin {
                 match reception.try_recv() {
                     Ok(image) => {
-                        let texture = image.map(|(image, teintes)| {
-                            let options = egui::TextureOptions::LINEAR;
-                            (ctx.load_texture("pochette", image, options), teintes)
+                        let texture = image.map(|image| {
+                            ctx.load_texture("pochette", image, egui::TextureOptions::LINEAR)
                         });
                         self.pochette = Some((chemin.to_path_buf(), texture));
                         self.pochette_en_cours = None;
@@ -1258,11 +1252,7 @@ impl LecteurApp {
         let (envoi, reception) = mpsc::channel();
         let (fichier, ctx) = (chemin.to_path_buf(), ctx.clone());
         std::thread::spawn(move || {
-            let pochette = tags::lire_pochette(&fichier).map(|image| {
-                let teintes = Teintes::de_la_pochette(&image);
-                (image, teintes)
-            });
-            let _ = envoi.send(pochette);
+            let _ = envoi.send(tags::lire_pochette(&fichier));
             ctx.request_repaint();
         });
         self.pochette_en_cours = Some((chemin.to_path_buf(), reception));
@@ -1282,9 +1272,8 @@ impl LecteurApp {
     }
 
     /// La pochette du morceau en cours, centrée sous le visualiseur, avec
-    /// ses paroles par-dessus s'il en a, dans des couleurs qui ressortent
-    /// sur la pochette. (Sans pochette, les paroles s'affichent en blanc sur
-    /// un fond noir de la même taille.)
+    /// ses paroles par-dessus s'il en a. (Sans pochette, les paroles
+    /// s'affichent sur un fond noir de la même taille.)
     fn afficher_pochette(&self, ui: &mut egui::Ui, position: f32) {
         let pochette = match &self.pochette {
             Some((_, Some(pochette))) => Some(pochette),
@@ -1304,18 +1293,15 @@ impl LecteurApp {
             .clamp(POCHETTE_MIN, POCHETTE_MAX);
         ui.vertical_centered(|ui| {
             let (cadre, _) = ui.allocate_exact_size(egui::vec2(cote, cote), egui::Sense::hover());
-            let teintes = match pochette {
-                Some((pochette, teintes)) => {
-                    egui::Image::new(pochette).paint_at(ui, cadre);
-                    *teintes
-                }
+            match pochette {
+                Some(pochette) => egui::Image::new(pochette).paint_at(ui, cadre),
                 None => {
-                    ui.painter().rect_filled(cadre, 0.0, egui::Color32::BLACK);
-                    Teintes::SANS_POCHETTE
+                    let fond = egui::Color32::BLACK;
+                    ui.painter().rect_filled(cadre, 0.0, fond);
                 }
-            };
+            }
             if let Some(paroles) = paroles {
-                paroles.afficher(ui, cadre, position, teintes);
+                paroles.afficher(ui, cadre, position);
             }
         });
     }
