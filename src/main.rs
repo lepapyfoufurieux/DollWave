@@ -17,6 +17,7 @@ mod regroupement;
 mod sortie;
 mod systeme;
 mod tags;
+mod theme;
 mod visualiseur;
 
 use std::collections::HashSet;
@@ -302,6 +303,7 @@ impl Etat {
 impl LecteurApp {
     fn new(ctx: &egui::Context) -> Self {
         police::installer(ctx);
+        theme::installer(ctx);
         let (sortie, message) = match Sortie::ouvrir() {
             Ok(sortie) => (Some(sortie), String::new()),
             Err(e) => (None, format!("Aucune sortie audio disponible : {e}")),
@@ -1366,6 +1368,9 @@ impl eframe::App for LecteurApp {
         self.suivre_l_egalisation();
         self.preparer_l_enchainement();
 
+        // Le fond nuit quadrillé, sous tous les panneaux.
+        theme::dessiner_fond(ctx);
+
         // À gauche, la bibliothèque. Un clic sur un morceau (ou sur « ➕ tout »)
         // l'ajoute à la liste de lecture. En bas, les playlists.
         let (demandes, demande) = egui::SidePanel::left("bibliotheque")
@@ -1376,6 +1381,7 @@ impl eframe::App for LecteurApp {
                 // Les playlists d'abord, pour qu'elles se réservent le bas du
                 // panneau ; la bibliothèque prend la place qui reste au-dessus.
                 let demande = egui::TopBottomPanel::bottom("playlists")
+                    .frame(theme::cadre_interieur(ui.style()))
                     .resizable(true)
                     .default_height(240.0)
                     .height_range(110.0..=500.0)
@@ -1427,7 +1433,9 @@ impl eframe::App for LecteurApp {
         // La zone de la liste de lecture : la molette y fait défiler la liste,
         // pas changer le volume.
         let mut zone_liste = egui::Rect::NOTHING;
-        let panneau = egui::CentralPanel::default().show(ctx, |ui| {
+        // Fond transparent : le quadrillage se voit derrière.
+        let centre = egui::CentralPanel::default().frame(theme::cadre_central(&ctx.style()));
+        let panneau = centre.show(ctx, |ui| {
             let en_cours = match (&self.morceau, self.liste.courant()) {
                 (Some(_), Some(n)) => self.liste.fichier(n).map(Path::to_path_buf),
                 _ => None,
@@ -1562,7 +1570,7 @@ impl eframe::App for LecteurApp {
 
             if !self.message.is_empty() {
                 ui.add_space(8.0);
-                ui.colored_label(egui::Color32::LIGHT_RED, &self.message);
+                ui.colored_label(theme::ERREUR, &self.message);
             }
             if self.depots.en_cours() {
                 ui.add_space(8.0);

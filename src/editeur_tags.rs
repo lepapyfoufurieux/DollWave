@@ -286,7 +286,7 @@ impl EditeurTags {
 
         if let Some(erreur) = &self.erreur {
             ui.add_space(6.0);
-            ui.colored_label(egui::Color32::LIGHT_RED, erreur);
+            ui.colored_label(crate::theme::ERREUR, erreur);
         }
 
         ui.add_space(8.0);
@@ -341,7 +341,7 @@ impl EditeurTags {
                 .show(ui, |ui| {
                     for (chemin, erreur) in &avancement.echecs {
                         ui.colored_label(
-                            egui::Color32::LIGHT_RED,
+                            crate::theme::ERREUR,
                             format!("{} : {erreur}", nom_du_fichier(chemin)),
                         );
                     }
