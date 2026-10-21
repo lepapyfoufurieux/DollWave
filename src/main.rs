@@ -10,6 +10,7 @@ mod hud;
 mod infos_fichier;
 mod liste;
 mod morceau;
+mod onde;
 mod paroles;
 mod platine;
 mod playlists;
@@ -1052,34 +1053,78 @@ impl LecteurApp {
         // (Pas pendant le freinage : le morceau est déjà arrêté.)
         let telecommande = self.platine_active().filter(|t| !t.freine()).cloned();
 
-        ui.add_enabled_ui(telecommande.is_some(), |ui| {
-            ui.horizontal(|ui| {
-                // Le curseur prend toute la largeur, moins la place du texte des temps.
-                ui.spacing_mut().slider_width = (ui.available_width() - 90.0).max(50.0);
-                // Sans morceau, la plage serait vide (0 à 0) et egui placerait le
-                // curseur au milieu : on garde au moins 1 seconde pour qu'il soit à gauche.
-                let fin = duree_s.max(1.0);
-                let reponse = ui.add(egui::Slider::new(&mut secondes, 0.0..=fin).show_value(false));
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 14.0;
+            let temps = egui::FontId::monospace(15.0);
+            let ecoule = format_temps(Duration::from_secs_f32(secondes));
+            let total = match duree {
+                Some(d) => format_temps(d),
+                None => "--:--".to_string(),
+            };
+            let place_temps = egui::vec2(48.0, onde::HAUTEUR);
+            let (zone, _) = ui.allocate_exact_size(place_temps, egui::Sense::hover());
+            theme::texte_lumineux(
+                ui.painter(),
+                zone.right_center(),
+                egui::Align2::RIGHT_CENTER,
+                &ecoule,
+                temps.clone(),
+                0.0,
+                theme::CYAN,
+                theme::CYAN,
+            );
 
-                if let Some(telecommande) = &telecommande {
-                    if reponse.dragged() {
-                        self.glisser(telecommande, secondes);
-                    } else if self.position_glissee.take().is_some() || reponse.changed() {
-                        // Relâchement après un glissement, ou simple clic : on s'y rend
-                        // et la lecture reprend normalement.
-                        telecommande.aller_a(secondes);
-                    }
-                }
-
-                let total = match duree {
-                    Some(d) => format_temps(d),
-                    None => "--:--".to_string(),
-                };
-                ui.label(police::chiffres(format!(
-                    "{} / {total}",
-                    format_temps(Duration::from_secs_f32(secondes))
-                )));
+            let largeur = (ui.available_width() - place_temps.x - 14.0).max(50.0);
+            let (zone, reponse) = ui.allocate_exact_size(
+                egui::vec2(largeur, onde::HAUTEUR),
+                if telecommande.is_some() {
+                    egui::Sense::click_and_drag()
+                } else {
+                    egui::Sense::hover()
+                },
+            );
+            let fraction = if duree_s > 0.0 {
+                secondes / duree_s
+            } else {
+                0.0
+            };
+            let nombre = onde::nombre_de_barres(zone.width() - 8.0);
+            let barres = self.morceau.clone().and_then(|m| {
+                self.visualiseur
+                    .apercu_de(&m)
+                    .map(|a| onde::barres_de_l_apercu(a, nombre))
             });
+            onde::dessiner_progression(
+                ui.painter(),
+                zone,
+                barres.as_deref(),
+                fraction,
+                telecommande.is_some(),
+            );
+
+            if let Some(telecommande) = &telecommande {
+                let souris = reponse.interact_pointer_pos();
+                if let Some(x) = souris.map(|p| p.x).filter(|_| reponse.dragged()) {
+                    secondes = onde::fraction_sous(zone, x) * duree_s;
+                    self.glisser(telecommande, secondes);
+                } else if self.position_glissee.take().is_some() {
+                    // Relâchement après un glissement : on s'y rend et la
+                    // lecture reprend normalement.
+                    telecommande.aller_a(secondes);
+                } else if let Some(x) = souris.map(|p| p.x).filter(|_| reponse.clicked()) {
+                    // Simple clic : on saute à cet endroit.
+                    telecommande.aller_a(onde::fraction_sous(zone, x) * duree_s);
+                }
+            }
+
+            let (zone, _) = ui.allocate_exact_size(place_temps, egui::Sense::hover());
+            ui.painter().text(
+                zone.left_center(),
+                egui::Align2::LEFT_CENTER,
+                total,
+                temps,
+                theme::TEXTE_DISCRET,
+            );
         });
     }
 }
@@ -1113,16 +1158,20 @@ impl LecteurApp {
         }
     }
 
-    /// Le réglage du volume : un bouton pour couper le son, un curseur et le
-    /// pourcentage. Il reste utilisable même sans morceau, pour le préparer.
+    /// Le réglage du volume : un bouton pour couper le son, 20 segments
+    /// (cyan → jaune → magenta) et le pourcentage. Il reste utilisable même
+    /// sans morceau, pour le préparer.
     fn reglage_du_volume(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            let icone = if self.muet || self.volume == 0.0 {
-                "🔇"
+            ui.spacing_mut().item_spacing.x = 10.0;
+            let muet = self.muet || self.volume == 0.0;
+            let icone = if muet {
+                theme::Icone::Muet
             } else {
-                "🔊"
+                theme::Icone::Son
             };
-            let bouton = ui.button(icone).on_hover_text(if self.muet {
+            let bouton = theme::Bouton::icone(icone).taille(egui::vec2(34.0, 34.0));
+            let bouton = ui.add(bouton).on_hover_text(if self.muet {
                 "Remettre le son"
             } else {
                 "Couper le son"
@@ -1133,13 +1182,14 @@ impl LecteurApp {
                 change = true;
             }
 
-            let reponse = ui.add(egui::Slider::new(&mut self.volume, 0.0..=1.0).show_value(false));
-            if reponse.changed() {
-                // Bouger le curseur remet le son, comme sur la plupart des lecteurs.
+            if let Some(volume) = onde::segments_du_volume(ui, self.volume, self.muet) {
+                // Toucher au volume remet le son, comme sur la plupart des lecteurs.
+                self.volume = volume;
                 self.muet = false;
                 change = true;
             }
-            ui.label(police::chiffres(format!("{:.0} %", self.volume * 100.0)));
+            let texte = format!("{:.0} %", self.volume * 100.0);
+            ui.label(police::chiffres(texte).color(theme::CYAN).size(14.0));
 
             if change {
                 self.appliquer_volume();

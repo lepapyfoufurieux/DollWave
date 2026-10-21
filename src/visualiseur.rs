@@ -189,7 +189,8 @@ impl Visualiseur {
     /// calcul en arrière-plan (il faut décoder tout le morceau) : en attendant,
     /// il n'y a rien à dessiner.
     /// Si on change de morceau avant la fin, le calcul de l'ancien s'arrête.
-    fn apercu_de(&mut self, morceau: &Arc<Morceau>) -> Option<&[(f32, f32)]> {
+    /// (Sert aussi à la barre de progression, qui dessine tout le morceau.)
+    pub fn apercu_de(&mut self, morceau: &Arc<Morceau>) -> Option<&[(f32, f32)]> {
         let deja_lance =
             matches!(&self.apercu, Some((m, _)) if std::ptr::eq(m.as_ptr(), Arc::as_ptr(morceau)));
         if !deja_lance {
