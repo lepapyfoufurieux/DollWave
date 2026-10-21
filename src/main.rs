@@ -6,6 +6,7 @@ mod depot;
 mod ecriture_tags;
 mod editeur_tags;
 mod egalisation;
+mod hud;
 mod infos_fichier;
 mod liste;
 mod morceau;
@@ -1320,35 +1321,120 @@ impl LecteurApp {
 }
 
 impl LecteurApp {
-    /// Sous la pochette, en petit : la qualité et la taille du morceau en
-    /// cours (« MP3 · 320 kbit/s · 44,1 kHz · stéréo · 8,4 Mo »). Un clic
-    /// ouvre la fenêtre « Infos du fichier ».
-    fn ligne_des_infos(&mut self, ui: &mut egui::Ui) {
-        let en_cours = match (&self.morceau, self.liste.courant()) {
-            (Some(_), Some(n)) => self.liste.fichier(n).map(Path::to_path_buf),
-            _ => None,
+    /// Le bloc « En lecture » : état, titre, artiste, album, et les infos
+    /// techniques. Un clic ouvre la fenêtre « Infos du fichier ».
+    fn bloc_en_lecture(&mut self, ui: &mut egui::Ui, en_cours: Option<&Path>) {
+        let etat = self.etat();
+        let compteur = self.liste.compteur(&self.tags);
+        // « Titre 3 / 12 · 47 min » : le bloc ne garde que « Titre 3 / 12 ».
+        let compteur = compteur
+            .split(" · ")
+            .next()
+            .filter(|c| c.starts_with("Titre"))
+            .map(str::to_string);
+        let (titre, artiste, album, infos) = match en_cours {
+            Some(chemin) => {
+                let (titre, artiste) = self.tags.titre_et_artiste(chemin);
+                let infos = self.infos.demander(ui.ctx(), chemin);
+                (titre, artiste, self.tags.album(chemin), infos)
+            }
+            None => ("Aucun morceau".to_string(), None, None, None),
         };
-        let Some(chemin) = en_cours else {
-            return;
+        let gain = self
+            .egalisation
+            .then(|| en_cours.and_then(|chemin| self.volumes.gain(chemin)));
+        let sortie = self.sortie.as_ref().and_then(|s| s.nom.as_deref());
+        let bloc = hud::EnLecture {
+            etat: etat.texte().trim_end_matches('…').to_string(),
+            voyant: etat == Etat::Lecture,
+            compteur,
+            titre,
+            artiste,
+            album,
+            techniques: hud::infos_techniques(infos.as_ref(), gain, sortie),
         };
-        let Some(infos) = self.infos.demander(ui.ctx(), &chemin) else {
-            return;
-        };
-        ui.add_space(4.0);
-        let clic = ui
-            .vertical_centered(|ui| {
-                ui.add(
-                    egui::Label::new(egui::RichText::new(infos_fichier::resume(&infos)).weak())
-                        .selectable(false)
-                        .sense(egui::Sense::click()),
-                )
-                .on_hover_text("ℹ Infos du fichier (débit, taille, emplacement)")
-                .clicked()
-            })
-            .inner;
-        if clic {
-            self.fenetre_infos = Some(FenetreInfos::ouvrir(ui.ctx(), chemin, &self.tags));
+        let mut aide = "ℹ Infos du fichier (débit, taille, emplacement)".to_string();
+        if let Some(infos) = &infos {
+            aide = format!("{}\n{aide}", infos_fichier::resume(infos));
         }
+        if hud::afficher(ui, &bloc).on_hover_text(aide).clicked() {
+            if let Some(chemin) = en_cours {
+                self.fenetre_infos = Some(FenetreInfos::ouvrir(
+                    ui.ctx(),
+                    chemin.to_path_buf(),
+                    &self.tags,
+                ));
+            }
+        }
+    }
+
+    /// Les boutons de lecture néon : ⏮, le gros bouton Lecture hexagonal,
+    /// Pause, Stop, ⏭, puis Aléa et Boucle.
+    fn boutons_de_lecture(&mut self, ui: &mut egui::Ui) {
+        use theme::{Allure, Bouton, Coins, Icone};
+        let carre = egui::vec2(44.0, 44.0);
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 8.0;
+            // Les boutons de lecture ne sont actifs que si la liste contient des morceaux.
+            ui.add_enabled_ui(!self.liste.est_vide(), |ui| {
+                let bouton = Bouton::icone(Icone::Precedent)
+                    .coins(Coins::haut_gauche(10.0))
+                    .taille(carre);
+                if ui.add(bouton).on_hover_text("Morceau précédent").clicked() {
+                    self.precedent();
+                }
+                let bouton = Bouton::icone(Icone::Lecture)
+                    .allure(Allure::Hexagone)
+                    .taille(egui::vec2(64.0, 64.0));
+                if ui.add(bouton).on_hover_text("Lecture").clicked() {
+                    self.lecture();
+                }
+                let bouton = Bouton::icone(Icone::Pause).taille(carre);
+                if ui.add(bouton).on_hover_text("Pause").clicked() {
+                    self.pause();
+                }
+                let bouton = Bouton::icone(Icone::Stop).taille(carre);
+                if ui.add(bouton).on_hover_text("Stop").clicked() {
+                    self.arreter();
+                }
+                let bouton = Bouton::icone(Icone::Suivant)
+                    .coins(Coins::bas_droit(10.0))
+                    .taille(carre);
+                if ui.add(bouton).on_hover_text("Morceau suivant").clicked() {
+                    self.suivant();
+                }
+            });
+            ui.add_space(10.0);
+            // La lecture aléatoire se règle à tout moment, même liste vide.
+            let aleatoire = self.liste.aleatoire();
+            let bouton = Bouton::texte("Aléa")
+                .avec_icone(Icone::Aleatoire)
+                .couleur(theme::MAGENTA)
+                .allume(aleatoire)
+                .taille(egui::vec2(86.0, 32.0));
+            let bouton = ui.add(bouton).on_hover_text(if aleatoire {
+                "Lecture aléatoire : activée"
+            } else {
+                "Lecture aléatoire : désactivée"
+            });
+            if bouton.clicked() {
+                self.liste.changer_aleatoire(!aleatoire);
+            }
+            let repetition = self.liste.repetition();
+            let bouton = Bouton::texte("Boucle")
+                .avec_icone(Icone::Boucle)
+                .couleur(theme::MAGENTA)
+                .allume(repetition)
+                .taille(egui::vec2(98.0, 32.0));
+            let bouton = ui.add(bouton).on_hover_text(if repetition {
+                "Répétition de la liste : activée"
+            } else {
+                "Répétition de la liste : désactivée"
+            });
+            if bouton.clicked() {
+                self.liste.changer_repetition(!repetition);
+            }
+        });
     }
 }
 
@@ -1496,59 +1582,13 @@ impl eframe::App for LecteurApp {
             };
             self.zone
                 .infobulle(en_cours.is_some().then_some(nom.as_str()));
-            ui.label(format!("Morceau : {nom}"));
-            if let Some(album) = en_cours.as_deref().and_then(|c| self.tags.album(c)) {
-                ui.label(format!("Album : {album}"));
-            }
-            ui.label(format!("État : {}", self.etat().texte()));
+            self.bloc_en_lecture(ui, en_cours.as_deref());
 
             ui.add_space(8.0);
             self.barre_de_progression(ui);
             ui.add_space(8.0);
 
-            ui.horizontal(|ui| {
-                // Les boutons de lecture ne sont actifs que si la liste contient des morceaux.
-                ui.add_enabled_ui(!self.liste.est_vide(), |ui| {
-                    if ui.button("⏮").on_hover_text("Morceau précédent").clicked() {
-                        self.precedent();
-                    }
-                    if ui.button("▶ Lecture").clicked() {
-                        self.lecture();
-                    }
-                    if ui.button("⏸ Pause").clicked() {
-                        self.pause();
-                    }
-                    if ui.button("⏹ Stop").clicked() {
-                        self.arreter();
-                    }
-                    if ui.button("⏭").on_hover_text("Morceau suivant").clicked() {
-                        self.suivant();
-                    }
-                });
-                // La lecture aléatoire se règle à tout moment, même liste vide.
-                let aleatoire = self.liste.aleatoire();
-                let bouton = ui
-                    .selectable_label(aleatoire, "🔀")
-                    .on_hover_text(if aleatoire {
-                        "Lecture aléatoire : activée"
-                    } else {
-                        "Lecture aléatoire : désactivée"
-                    });
-                if bouton.clicked() {
-                    self.liste.changer_aleatoire(!aleatoire);
-                }
-                let repetition = self.liste.repetition();
-                let bouton = ui
-                    .selectable_label(repetition, "🔁")
-                    .on_hover_text(if repetition {
-                        "Répétition de la liste : activée"
-                    } else {
-                        "Répétition de la liste : désactivée"
-                    });
-                if bouton.clicked() {
-                    self.liste.changer_repetition(!repetition);
-                }
-            });
+            self.boutons_de_lecture(ui);
 
             ui.add_space(8.0);
             self.reglage_du_volume(ui);
@@ -1616,7 +1656,6 @@ impl eframe::App for LecteurApp {
             self.visualiseur
                 .afficher(ui, self.morceau.as_ref(), position, en_lecture);
             self.afficher_pochette(ui, position);
-            self.ligne_des_infos(ui);
 
             if !self.message.is_empty() {
                 ui.add_space(8.0);

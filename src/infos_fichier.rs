@@ -340,7 +340,7 @@ fn avec_espaces(nombre: u64) -> String {
     texte
 }
 
-/// La petite ligne sous la pochette : « MP3 · 320 kbit/s · 44,1 kHz ·
+/// Le résumé du fichier (infobulle du bloc « En lecture ») : « MP3 · 320 kbit/s · 44,1 kHz ·
 /// stéréo · 8,4 Mo ».
 pub fn resume(infos: &Infos) -> String {
     let mut morceaux = vec!["MP3".to_string()];
