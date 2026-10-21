@@ -7,10 +7,12 @@
 use std::path::{Path, PathBuf};
 
 mod instance;
+mod media;
 #[cfg(windows)]
 mod windows;
 
 pub use instance::{demarrer, Boite, Demarrage};
+pub use media::{ControlesMedia, EtatMedia};
 #[cfg(windows)]
 pub use windows::{autoriser_le_premier_plan, ZoneDeNotification};
 

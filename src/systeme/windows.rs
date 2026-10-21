@@ -345,7 +345,7 @@ pub fn autoriser_le_premier_plan() {
 }
 
 /// La fenêtre du lecteur, telle que Windows la connaît.
-fn fenetre(frame: &eframe::Frame) -> Option<HWND> {
+pub(super) fn fenetre(frame: &eframe::Frame) -> Option<HWND> {
     match frame.window_handle().ok()?.as_raw() {
         RawWindowHandle::Win32(fenetre) => Some(fenetre.hwnd.get() as HWND),
         _ => None,
