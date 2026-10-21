@@ -831,7 +831,7 @@ fn etoile(ui: &mut egui::Ui, chemin: &Path, lignes: &mut Lignes) {
     let favori = lignes.favoris.contains(chemin);
     let (texte, aide) = if favori {
         (
-            egui::RichText::new("★").color(egui::Color32::GOLD),
+            egui::RichText::new("★").color(crate::theme::JAUNE),
             "Retirer des favoris",
         )
     } else {

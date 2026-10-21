@@ -13,6 +13,7 @@ use rustfft::{num_complex::Complex, Fft, FftPlanner};
 use crate::bibliotheque::memoriser;
 use crate::morceau::Morceau;
 use crate::systeme::fichier_de_reglage;
+use crate::theme;
 
 /// Nombre d'échantillons analysés pour les barres. Plus c'est grand, plus les
 /// graves sont précis, mais plus les barres réagissent lentement.
@@ -149,7 +150,7 @@ impl Visualiseur {
         let (reponse, peintre) = ui.allocate_painter(taille, egui::Sense::hover());
         let zone = reponse.rect;
         peintre.rect_filled(zone, 4.0, ui.visuals().extreme_bg_color);
-        let couleur = ui.visuals().selection.bg_fill;
+        let couleur = theme::CYAN;
         let dt = ui.input(|i| i.stable_dt);
         if morceau.is_none() {
             self.apercu = None; // plus de morceau (arrêt, liste vidée)
@@ -176,8 +177,8 @@ impl Visualiseur {
             }
             Style::FormeOnde => {
                 if let Some(apercu) = morceau.and_then(|m| self.apercu_de(m)) {
-                    let grise = ui.visuals().weak_text_color();
-                    let curseur = ui.visuals().strong_text_color();
+                    let grise = theme::TEXTE_DISCRET;
+                    let curseur = theme::JAUNE;
                     dessiner_forme_onde(&peintre, zone, apercu, position, couleur, grise, curseur);
                 }
             }
