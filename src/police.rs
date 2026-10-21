@@ -81,7 +81,8 @@ fn definitions() -> egui::FontDefinitions {
     polices
 }
 
-fn famille_titres() -> egui::FontFamily {
+/// La famille des titres (Orbitron), pour les grands titres dessinés à la main.
+pub fn famille_titres() -> egui::FontFamily {
     egui::FontFamily::Name(TITRES.into())
 }
 

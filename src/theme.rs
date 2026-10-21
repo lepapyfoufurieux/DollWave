@@ -5,6 +5,12 @@
 //! étapes (polices, cadres, HUD…) piochent au même endroit. Le thème est
 //! toujours sombre, même si Windows est réglé en mode clair.
 
+#[allow(dead_code)] // Les outils servent à partir de l'étape 4 (bloc « En lecture »).
+mod formes;
+
+#[allow(unused_imports)]
+pub use formes::*;
+
 use eframe::egui::{self, Color32, Stroke};
 
 /// Le fond de la fenêtre : bleu nuit presque noir.
