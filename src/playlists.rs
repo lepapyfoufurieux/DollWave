@@ -380,11 +380,19 @@ impl Playlists {
                     }
                     // Les boutons, calés à droite.
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.small_button("🗑").on_hover_text("Supprimer").clicked() {
+                        let petit = |icone| {
+                            theme::Bouton::icone(icone)
+                                .allure(theme::Allure::Eteint)
+                                .couleur(theme::MAGENTA)
+                                .taille(egui::vec2(20.0, 20.0))
+                        };
+                        let supprimer = petit(theme::Icone::Corbeille);
+                        if ui.add(supprimer).on_hover_text("Supprimer").clicked() {
                             self.a_supprimer = Some(nom.clone());
                             self.saisie = None;
                         }
-                        if ui.small_button("✏").on_hover_text("Renommer").clicked() {
+                        let renommer = petit(theme::Icone::Crayon);
+                        if ui.add(renommer).on_hover_text("Renommer").clicked() {
                             self.saisie = Some(Saisie::Renommer {
                                 ancien: nom.clone(),
                                 texte: nom.clone(),
@@ -392,12 +400,8 @@ impl Playlists {
                             self.donner_la_main = true;
                             self.a_supprimer = None;
                         }
-                        let ajouter = theme::Bouton::icone(theme::Icone::Plus)
-                            .allure(theme::Allure::Eteint)
-                            .couleur(theme::MAGENTA)
-                            .taille(egui::vec2(20.0, 20.0));
                         let bouton = ui
-                            .add(ajouter)
+                            .add(petit(theme::Icone::Plus))
                             .on_hover_text("Ajouter à la suite de la liste de lecture");
                         if clic_simple(ui, &bouton) {
                             demande = self.lire_pour(&nom).map(Demande::AjouterALaListe);

@@ -76,11 +76,6 @@ pub struct Coins(pub [f32; 4]);
 impl Coins {
     pub const AUCUN: Coins = Coins([0.0; 4]);
 
-    /// Le même angle coupé partout.
-    pub fn tous(taille: f32) -> Self {
-        Coins([taille; 4])
-    }
-
     /// En haut à gauche et en bas à droite, comme les cadres de la maquette.
     pub fn diagonale(taille: f32) -> Self {
         Coins([taille, 0.0, taille, 0.0])
@@ -248,12 +243,12 @@ pub fn lueur_contour(
     }
 }
 
-/// Un cadre néon : fond (uni ou dégradé), contour, et une lueur si `lueur` > 0.
+/// Un cadre néon : fond uni (transparent : aucun), contour, et une lueur si `lueur` > 0.
 pub fn cadre(
     peintre: &egui::Painter,
     rect: Rect,
     coins: Coins,
-    fond: Fond,
+    fond: Color32,
     contour_: Stroke,
     lueur: f32,
 ) {
@@ -261,25 +256,12 @@ pub fn cadre(
         lueur_contour(peintre, rect, coins, contour_.color, lueur);
     }
     let points = contour(rect, coins);
-    match fond {
-        Fond::Aucun => {}
-        Fond::Uni(couleur) => {
-            peintre.add(Shape::convex_polygon(points.clone(), couleur, Stroke::NONE));
-        }
-        Fond::Degrade(debut, fin, direction) => degrade(peintre, &points, debut, fin, direction),
+    if fond.a() > 0 {
+        peintre.add(Shape::convex_polygon(points.clone(), fond, Stroke::NONE));
     }
     if contour_.width > 0.0 {
         peintre.add(Shape::closed_line(points, contour_));
     }
-}
-
-/// Le fond d'un cadre.
-#[derive(Clone, Copy, Debug)]
-pub enum Fond {
-    Aucun,
-    Uni(Color32),
-    /// Couleur de départ, d'arrivée, et sens du dégradé.
-    Degrade(Color32, Color32, Vec2),
 }
 
 /// Met en page un texte sur une ligne, lettres écartées de `espacement`.
@@ -363,6 +345,8 @@ pub enum Icone {
     Croix,
     Dossier,
     Actualiser,
+    Crayon,
+    Corbeille,
 }
 
 /// Dessine une icône dans `rect` (un carré, de préférence), de `couleur`.
@@ -480,6 +464,26 @@ pub fn icone(peintre: &egui::Painter, icone: Icone, rect: Rect, couleur: Color32
         Icone::Actualiser => vec![
             Shape::line(arc(p(9.0, 9.0), 5.5 * echelle, -2.6, 2.0), trait_),
             ligne(vec![p(10.0, 1.5), p(13.5, 3.8), p(10.5, 6.5)]),
+        ],
+        Icone::Crayon => vec![
+            Shape::closed_line(
+                vec![
+                    p(12.0, 3.0),
+                    p(15.0, 6.0),
+                    p(7.0, 14.0),
+                    p(3.5, 14.5),
+                    p(4.0, 11.0),
+                ],
+                trait_,
+            ),
+            ligne(vec![p(10.5, 4.5), p(13.5, 7.5)]),
+        ],
+        Icone::Corbeille => vec![
+            ligne(vec![p(3.0, 5.0), p(15.0, 5.0)]),
+            ligne(vec![p(7.0, 5.0), p(7.5, 3.0), p(10.5, 3.0), p(11.0, 5.0)]),
+            ligne(vec![p(4.5, 5.0), p(5.5, 15.0), p(12.5, 15.0), p(13.5, 5.0)]),
+            ligne(vec![p(7.5, 8.0), p(7.5, 12.5)]),
+            ligne(vec![p(10.5, 8.0), p(10.5, 12.5)]),
         ],
     };
     peintre.extend(formes);
@@ -672,7 +676,7 @@ impl egui::Widget for Bouton {
                     peintre,
                     rect,
                     self.coins,
-                    Fond::Uni(fondu(fond, attenuation)),
+                    fondu(fond, attenuation),
                     Stroke::new(1.0_f32, bord),
                     if survol { 0.8 } else { 0.0 },
                 );
@@ -684,7 +688,7 @@ impl egui::Widget for Bouton {
                     peintre,
                     rect,
                     self.coins,
-                    Fond::Uni(fondu(fond, attenuation)),
+                    fondu(fond, attenuation),
                     Stroke::new(1.0_f32, c),
                     if survol { 1.2 } else { 0.8 },
                 );
@@ -701,7 +705,7 @@ impl egui::Widget for Bouton {
                     peintre,
                     rect,
                     self.coins,
-                    Fond::Uni(fond),
+                    fond,
                     Stroke::new(1.0_f32, bord),
                     0.0,
                 );
@@ -856,7 +860,7 @@ mod tests {
         assert_eq!(points.len(), 6);
         assert_eq!(points[0], egui::pos2(0.0, 10.0));
         assert_eq!(points[1], egui::pos2(10.0, 0.0));
-        assert_eq!(contour(carre(), Coins::tous(8.0)).len(), 8);
+        assert_eq!(contour(carre(), Coins([8.0; 4])).len(), 8);
         // Un angle trop grand est ramené à la moitié du petit côté.
         let points = contour(carre(), Coins::haut_gauche(500.0));
         assert_eq!(points[0], egui::pos2(0.0, 20.0));

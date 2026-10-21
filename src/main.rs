@@ -1,6 +1,7 @@
 // En version finale (release), on cache la fenêtre de console noire sous Windows.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod bandeau;
 mod bibliotheque;
 mod depot;
 mod ecriture_tags;
@@ -1782,6 +1783,20 @@ impl eframe::App for LecteurApp {
         let en_lecture = self.platine_active().is_some_and(Telecommande::tourne);
         self.effets.avancer(ctx.input(|i| i.stable_dt), en_lecture);
         self.effets.dessiner(ctx);
+
+        // En haut, le bandeau néon (logo et voyants), sur toute la largeur.
+        let voyants = bandeau::Voyants {
+            sortie: self.sortie.is_some(),
+            bibliotheque: self.bibliotheque.nombre_de_titres().is_some_and(|n| n > 0),
+            liste: !self.liste.est_vide(),
+            morceau: self.morceau.is_some(),
+            lecture: en_lecture,
+        };
+        egui::TopBottomPanel::top("bandeau")
+            .exact_height(bandeau::HAUTEUR)
+            .frame(egui::Frame::none())
+            .show_separator_line(false)
+            .show(ctx, |ui| bandeau::afficher(ui, &voyants));
 
         // À gauche, la bibliothèque. Un clic sur un morceau (ou sur « ➕ tout »)
         // l'ajoute à la liste de lecture. En bas, les playlists.

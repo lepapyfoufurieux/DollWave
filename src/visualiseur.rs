@@ -156,7 +156,7 @@ impl Visualiseur {
             ui.painter(),
             cadre,
             theme::Coins::autre_diagonale(16.0),
-            theme::Fond::Uni(theme::FOND),
+            theme::FOND,
             egui::Stroke::new(1.0_f32, theme::attenue(theme::MAGENTA, 110)),
             0.0,
         );

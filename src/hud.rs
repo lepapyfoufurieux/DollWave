@@ -5,7 +5,7 @@
 use eframe::egui::{self, Color32, Rect, Stroke};
 
 use crate::infos_fichier::{Debit, Infos};
-use crate::theme::{self, Coins, Fond, CYAN, JAUNE, MAGENTA, PANNEAU, TEXTE, TEXTE_DISCRET};
+use crate::theme::{self, Coins, CYAN, JAUNE, MAGENTA, PANNEAU, TEXTE, TEXTE_DISCRET};
 
 /// La hauteur du bloc.
 const HAUTEUR: f32 = 118.0;
@@ -103,7 +103,7 @@ pub fn afficher(ui: &mut egui::Ui, bloc: &EnLecture) -> egui::Response {
     let peintre = ui.painter_at(rect.expand(12.0));
     let coins = Coins::diagonale(18.0);
     // Le fond : un dégradé discret du cyan (à gauche) vers le magenta (à droite).
-    theme::cadre(&peintre, rect, coins, Fond::Uni(PANNEAU), Stroke::NONE, 0.0);
+    theme::cadre(&peintre, rect, coins, PANNEAU, Stroke::NONE, 0.0);
     let points = theme::contour(rect, coins);
     // Deux dégradés superposés : cyan qui s'éteint vers la droite, magenta
     // qui s'allume ; le milieu reste presque de la couleur du panneau.

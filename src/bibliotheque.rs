@@ -312,6 +312,11 @@ impl Bibliotheque {
         self.actualiser(ctx);
     }
 
+    /// Le nombre de MP3 de la bibliothèque (rien tant qu'elle n'est pas lue).
+    pub fn nombre_de_titres(&self) -> Option<usize> {
+        self.contenu.as_ref().map(|c| c.tous.len())
+    }
+
     /// Dessine la bibliothèque. Renvoie ce qu'on y a demandé en cliquant.
     /// `dans_la_liste` : les morceaux déjà dans la liste, marqués d'un ✔.
     /// `tags` : les tags des morceaux, pour les nommer et pour la recherche.
@@ -346,7 +351,7 @@ impl Bibliotheque {
 
         // L'en-tête : « BIBLIOTHÈQUE », le nombre de titres, et les boutons
         // pour relire ou changer le dossier.
-        let nombre = self.contenu.as_ref().map(|c| c.tous.len());
+        let nombre = self.nombre_de_titres();
         theme::entete_section(ui, "Bibliothèque", theme::CYAN, |ui| {
             ui.spacing_mut().item_spacing.x = 4.0;
             let petit = egui::vec2(24.0, 24.0);
