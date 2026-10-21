@@ -48,7 +48,13 @@ pub fn normaliser(texte: &str) -> String {
     let texte = texte.to_lowercase().replace('&', " and ");
     let texte: String = texte
         .chars()
-        .map(|c| if c.is_alphanumeric() || c == '_' || c.is_whitespace() { c } else { ' ' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '_' || c.is_whitespace() {
+                c
+            } else {
+                ' '
+            }
+        })
         .collect();
     texte.split_whitespace().collect::<Vec<_>>().join(" ")
 }
@@ -106,10 +112,13 @@ pub fn nettoyer(texte: &str) -> String {
     static NUMERO: LazyLock<Regex> = LazyLock::new(|| regex(r"^\s*\d{1,3}\s*[.\-_)]\s*")); // 01. / 01 - / 01)
     static NUMERO_ESPACE: LazyLock<Regex> = LazyLock::new(|| regex(r"^\s*\d{1,3}\s+(\D)")); // « 01 titre »
     static ENTRE_PARENTHESES: LazyLock<Regex> = LazyLock::new(|| {
-        regex(&format!(r"(?i)[\(\[\{{][^\)\]\}}]*{MENTIONS}[^\)\]\}}]*[\)\]\}}]"))
+        regex(&format!(
+            r"(?i)[\(\[\{{][^\)\]\}}]*{MENTIONS}[^\)\]\}}]*[\)\]\}}]"
+        ))
     });
     static BARRE: LazyLock<Regex> = LazyLock::new(|| regex(r"\s[|｜]\s.*$")); // « titre | blabla »
-    static TIRET: LazyLock<Regex> = LazyLock::new(|| regex(&format!(r"(?i)\s+-\s+{MENTIONS}\b.*$")));
+    static TIRET: LazyLock<Regex> =
+        LazyLock::new(|| regex(&format!(r"(?i)\s+-\s+{MENTIONS}\b.*$")));
 
     let texte = texte.replace('_', " ");
     let texte = NUMERO.replace(&texte, "");
@@ -202,8 +211,7 @@ fn ajouter(liste: &mut Vec<String>, valeur: &str) {
 /// dossiers.
 pub fn preparer(chemin: &Path, tags: &Tags) -> Recherche {
     static TIRET: LazyLock<Regex> = LazyLock::new(|| regex(r"\s+[-–—]\s+"));
-    static GUILLEMETS: LazyLock<Regex> =
-        LazyLock::new(|| regex(r#"['"‘“]([^'"’”]{1,80})['"’”]"#));
+    static GUILLEMETS: LazyLock<Regex> = LazyLock::new(|| regex(r#"['"‘“]([^'"’”]{1,80})['"’”]"#));
     static TOPIC: LazyLock<Regex> = LazyLock::new(|| regex(r"(?i)\s*-\s*topic$"));
     static CHAINE: LazyLock<Regex> = LazyLock::new(|| regex(r"(?i)(vevo|official)$"));
 
@@ -290,14 +298,22 @@ pub fn lire_reponse(json: &str) -> Vec<Candidat> {
     reponses
         .iter()
         .filter_map(|r| {
-            let texte = |cle: &str| r.get(cle).and_then(|v| v.as_str()).unwrap_or_default().to_string();
+            let texte = |cle: &str| {
+                r.get(cle)
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string()
+            };
             let paroles = texte("syncedLyrics");
             (!paroles.trim().is_empty()).then(|| Candidat {
                 id: r.get("id").and_then(|v| v.as_i64()).unwrap_or_default(),
                 artiste: texte("artistName"),
                 titre: texte("trackName"),
                 album: texte("albumName"),
-                duree: r.get("duration").and_then(|v| v.as_f64()).unwrap_or_default(),
+                duree: r
+                    .get("duration")
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or_default(),
                 paroles,
             })
         })
@@ -364,7 +380,10 @@ pub fn recherches_a_faire(recherche: &Recherche) -> Vec<Vec<(&'static str, Strin
     let mut liste = Vec::new();
     for titre in &recherche.titres {
         for artiste in recherche.artistes.iter().take(2) {
-            liste.push(vec![("track_name", titre.clone()), ("artist_name", artiste.clone())]);
+            liste.push(vec![
+                ("track_name", titre.clone()),
+                ("artist_name", artiste.clone()),
+            ]);
         }
         let libre = match recherche.artistes.first() {
             Some(artiste) => format!("{artiste} {titre}"),
@@ -487,7 +506,10 @@ fn demander_a_lrclib(
         }
         match requete.call() {
             Ok(mut reponse) => {
-                let json = reponse.body_mut().read_to_string().map_err(|e| e.to_string())?;
+                let json = reponse
+                    .body_mut()
+                    .read_to_string()
+                    .map_err(|e| e.to_string())?;
                 return Ok(lire_reponse(&json));
             }
             Err(ureq::Error::StatusCode(404)) => return Ok(Vec::new()),
@@ -540,7 +562,8 @@ impl Generation {
             ..Progression::default()
         }));
         let arreter = Arc::new(AtomicBool::new(false));
-        let (pour_le_travail, stop, ctx) = (Arc::clone(&progression), Arc::clone(&arreter), ctx.clone());
+        let (pour_le_travail, stop, ctx) =
+            (Arc::clone(&progression), Arc::clone(&arreter), ctx.clone());
         std::thread::spawn(move || {
             let agent: ureq::Agent = ureq::Agent::config_builder()
                 .user_agent(AGENT)
@@ -604,7 +627,12 @@ fn generer(
         redessiner();
 
         let recherche = preparer(chemin, &tags::lire(chemin));
-        let resultat = chercher(&recherche, &mut demander, || arreter.load(Ordering::Relaxed), pause);
+        let resultat = chercher(
+            &recherche,
+            &mut demander,
+            || arreter.load(Ordering::Relaxed),
+            pause,
+        );
         let mut etat = etat();
         match resultat {
             Ok(Resultat::Trouve {
@@ -638,8 +666,10 @@ fn generer(
                 echecs_de_suite += 1;
                 if echecs_de_suite >= ECHECS_DE_SUITE_MAX {
                     etat.faits += 1;
-                    etat.interruption =
-                        Some("LRCLIB ne répond pas : la connexion Internet est peut-être coupée.".to_string());
+                    etat.interruption = Some(
+                        "LRCLIB ne répond pas : la connexion Internet est peut-être coupée."
+                            .to_string(),
+                    );
                     break;
                 }
             }
@@ -670,13 +700,12 @@ mod tests {
 
     fn tags(titre: &str, artiste: &str, album: &str, secondes: u64) -> Tags {
         let texte = |t: &str| (!t.is_empty()).then(|| t.to_string());
-        Tags {
-            titre: texte(titre),
-            artiste: texte(artiste),
-            album: texte(album),
-            duree: Some(Duration::from_secs(secondes)),
-            ..Tags::default()
-        }
+        let mut tags = Tags::default();
+        tags.titre = texte(titre);
+        tags.artiste = texte(artiste);
+        tags.album = texte(album);
+        tags.duree = Some(Duration::from_secs(secondes));
+        tags
     }
 
     fn candidat(id: i64, artiste: &str, titre: &str, duree: f64) -> Candidat {
@@ -704,14 +733,23 @@ mod tests {
         assert_eq!(nettoyer("07 - Titre"), "Titre");
         assert_eq!(nettoyer("3) Titre"), "Titre");
         assert_eq!(nettoyer("12 Titre"), "Titre");
-        assert_eq!(nettoyer("Artiste - Titre (Official Video)"), "Artiste - Titre");
+        assert_eq!(
+            nettoyer("Artiste - Titre (Official Video)"),
+            "Artiste - Titre"
+        );
         assert_eq!(nettoyer("Artiste - Titre [HD]"), "Artiste - Titre");
-        assert_eq!(nettoyer("Artiste - Titre (Lyric Video) [4K]"), "Artiste - Titre");
+        assert_eq!(
+            nettoyer("Artiste - Titre (Lyric Video) [4K]"),
+            "Artiste - Titre"
+        );
         assert_eq!(nettoyer("Titre | Chaîne YouTube"), "Titre");
         assert_eq!(nettoyer("Titre - Official Music Video"), "Titre");
         assert_eq!(nettoyer("Artiste_-_Titre_(Audio)"), "Artiste - Titre");
         // Ce qui n'est pas une mention reste.
-        assert_eq!(nettoyer("Artiste - Titre (Remix)"), "Artiste - Titre (Remix)");
+        assert_eq!(
+            nettoyer("Artiste - Titre (Remix)"),
+            "Artiste - Titre (Remix)"
+        );
         // Un nombre suivi de chiffres n'est pas un numéro de piste.
         assert_eq!(nettoyer("1999"), "1999");
     }
@@ -730,7 +768,11 @@ mod tests {
         let cas = [
             ("abcd", "bcde", 0.75),
             ("tequila coma", "tequila", 0.736_842_105_263_157_9),
-            ("bohemian rhapsody", "bohemian rapsody", 0.969_696_969_696_969_7),
+            (
+                "bohemian rhapsody",
+                "bohemian rapsody",
+                0.969_696_969_696_969_7,
+            ),
             ("abc", "xyz", 0.0),
             ("the beatles", "beatles the", 0.636_363_636_363_636_4),
             ("aaab", "abaa", 0.5),
@@ -738,7 +780,10 @@ mod tests {
         ];
         for (a, b, attendu) in cas {
             let r = ressemblance(a, b);
-            assert!((r - attendu).abs() < 1e-9, "{a} / {b} : {r} au lieu de {attendu}");
+            assert!(
+                (r - attendu).abs() < 1e-9,
+                "{a} / {b} : {r} au lieu de {attendu}"
+            );
         }
     }
 
@@ -755,9 +800,20 @@ mod tests {
     #[test]
     fn utilise_aussi_les_tags() {
         let chemin = Path::new("M/Daft Punk/Discovery/01 One More Time.mp3");
-        let r = preparer(chemin, &tags("One More Time (feat. Romanthony)", "Daft Punk", "Discovery", 320));
+        let r = preparer(
+            chemin,
+            &tags(
+                "One More Time (feat. Romanthony)",
+                "Daft Punk",
+                "Discovery",
+                320,
+            ),
+        );
         assert_eq!(r.artistes, ["Daft Punk"]);
-        assert_eq!(r.titres, ["One More Time", "One More Time (feat. Romanthony)"]);
+        assert_eq!(
+            r.titres,
+            ["One More Time", "One More Time (feat. Romanthony)"]
+        );
         assert_eq!(r.album, "Discovery");
     }
 
@@ -768,7 +824,9 @@ mod tests {
             titres: vec!["T1".into(), "T2".into()],
             ..Recherche::default()
         };
-        let p = |l: &[(&str, &str)]| l.iter().map(|(c, v)| (*c, v.to_string())).collect::<Vec<_>>();
+        fn p(l: &[(&'static str, &str)]) -> Vec<(&'static str, String)> {
+            l.iter().map(|(c, v)| (*c, v.to_string())).collect()
+        }
         assert_eq!(
             recherches_a_faire(&r),
             vec![
@@ -797,7 +855,10 @@ mod tests {
         let decale = noter(&candidat(2, "Daft Punk", "One More Time", 340.0), &r);
         assert!((decale.totale - (0.6 + 0.25 + 0.15 * 0.5)).abs() < 1e-9);
         // Artiste contenu dans un nom plus long : compte comme le même.
-        let duo = noter(&candidat(3, "Daft Punk & Romanthony", "One More Time", 320.0), &r);
+        let duo = noter(
+            &candidat(3, "Daft Punk & Romanthony", "One More Time", 320.0),
+            &r,
+        );
         assert_eq!(duo.artiste, 1.0);
     }
 
@@ -825,7 +886,10 @@ mod tests {
             }
         );
         assert_eq!(
-            choisir(vec![candidat(1, "Daft Punk", "Around the World", 320.0)], &r),
+            choisir(
+                vec![candidat(1, "Daft Punk", "Around the World", 320.0)],
+                &r
+            ),
             Resultat::Rejete("Daft Punk — Around the World".into())
         );
         assert_eq!(choisir(Vec::new(), &r), Resultat::Introuvable);
@@ -865,9 +929,20 @@ mod tests {
             Duration::ZERO,
         );
         assert_eq!(appels, 1);
-        assert!(matches!(resultat, Ok(Resultat::Trouve { a_verifier: false, .. })));
+        assert!(matches!(
+            resultat,
+            Ok(Resultat::Trouve {
+                a_verifier: false,
+                ..
+            })
+        ));
         // Bouton « Arrêter » : on n'interroge plus LRCLIB.
-        let resultat = chercher(&r, |_| panic!("ne doit pas chercher"), || true, Duration::ZERO);
+        let resultat = chercher(
+            &r,
+            |_| panic!("ne doit pas chercher"),
+            || true,
+            Duration::ZERO,
+        );
         assert_eq!(resultat, Err(Interruption::Arretee));
     }
 
@@ -920,7 +995,10 @@ mod tests {
             || {},
         );
         let p = progression.into_inner().unwrap();
-        assert_eq!(std::fs::read_to_string(fichier_lrc(&deja)).unwrap(), "mes paroles");
+        assert_eq!(
+            std::fs::read_to_string(fichier_lrc(&deja)).unwrap(),
+            "mes paroles"
+        );
         assert!(std::fs::read_to_string(fichier_lrc(&nouveau))
             .unwrap()
             .ends_with("[00:01.00]Digital Love\n"));
@@ -934,7 +1012,9 @@ mod tests {
     #[test]
     fn s_arrete_si_lrclib_ne_repond_pas() {
         let dossier = dossier_de_test("reseau");
-        let morceaux: Vec<PathBuf> = (1..=5).map(|n| dossier.join(format!("A - T{n}.mp3"))).collect();
+        let morceaux: Vec<PathBuf> = (1..=5)
+            .map(|n| dossier.join(format!("A - T{n}.mp3")))
+            .collect();
         let progression = Mutex::new(Progression::default());
         let mut appels = 0;
         generer(
