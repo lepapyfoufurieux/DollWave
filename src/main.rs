@@ -5,6 +5,7 @@ mod bibliotheque;
 mod depot;
 mod ecriture_tags;
 mod editeur_tags;
+mod egalisation;
 mod liste;
 mod morceau;
 mod platine;
@@ -29,6 +30,7 @@ use rodio::Sink;
 
 use bibliotheque::{memoriser, Bibliotheque};
 use editeur_tags::EditeurTags;
+use egalisation::VolumesConnus;
 use liste::{Action, ListeDeLecture};
 use morceau::Morceau;
 use platine::{Effet, Platine, Telecommande};
@@ -66,6 +68,18 @@ const REGLAGE_FREINAGE: &str = "freinage.txt";
 /// Le petit fichier où l'on mémorise si le scratch s'entend quand on fait
 /// glisser la barre de progression (« oui » ou « non »).
 const REGLAGE_SCRATCH: &str = "scratch.txt";
+/// Le petit fichier où l'on mémorise si le volume égalisé est activé (« oui » ou « non »).
+const REGLAGE_EGALISATION: &str = "volume_egalise.txt";
+/// Le petit fichier où l'on mémorise si le volume mesuré est écrit dans les
+/// MP3 (« oui » ou « non » ; désactivé tant qu'on ne l'a pas coché).
+const REGLAGE_ECRITURE_VOLUME: &str = "ecrire_volume.txt";
+/// Volume égalisé : facteur appliqué tant que le volume du morceau n'est pas
+/// encore connu (mesure en cours). La plupart des morceaux récents sont
+/// mixés fort : on les baisse déjà à moitié en attendant.
+const FACTEUR_INCONNU: f32 = 0.5;
+/// Volume égalisé : en plus du morceau en cours, on mesure à l'avance ce
+/// nombre de morceaux qui le suivent dans la liste.
+const A_MESURER_A_L_AVANCE: usize = 5;
 /// Durée du fondu enchaîné : la fin d'un morceau se mélange au début du
 /// suivant pendant ce temps (moins si l'un des deux est très court).
 const DUREE_ENCHAINEMENT: Duration = Duration::from_secs(3);
@@ -111,6 +125,15 @@ struct LecteurApp {
     // Quand on fait glisser la barre de progression, la musique suit-elle
     // la souris (bruit de scratch) ? Sinon, elle continue et saute au lâcher.
     scratch: bool,
+    // Tous les morceaux sonnent-ils aussi fort (volume égalisé) ?
+    egalisation: bool,
+    // Le volume de chaque morceau, lu dans ses tags ou mesuré en arrière-plan.
+    volumes: VolumesConnus,
+    // Le volume mesuré est-il aussi écrit dans les MP3 (tags ReplayGain) ?
+    ecrire_volume: bool,
+    // Le morceau en cours et la taille de la liste lors de la dernière
+    // demande de volumes : on ne redemande que quand ça change.
+    volumes_demandes: Option<(Option<usize>, usize)>,
     // À la fin d'un morceau, se mélange-t-il au début du suivant (fondu enchaîné) ?
     enchainement: bool,
     // Pendant un fondu enchaîné : le morceau qui finit, en train de s'éteindre.
@@ -241,6 +264,10 @@ impl LecteurApp {
             Err(e) => (None, format!("Aucune sortie audio disponible : {e}")),
         };
         let maintenant = Instant::now();
+        let volumes = VolumesConnus::new(ctx);
+        // (Pendant les tests, jamais : ils jouent des fichiers du projet.)
+        let ecrire_volume = !cfg!(test) && option_cochee(REGLAGE_ECRITURE_VOLUME);
+        volumes.ecrire_dans_les_fichiers(ecrire_volume);
         Self {
             sortie,
             veilleur: Veilleur::new(maintenant),
@@ -256,6 +283,10 @@ impl LecteurApp {
             muet: false,
             freinage: option_memorisee(REGLAGE_FREINAGE),
             scratch: option_memorisee(REGLAGE_SCRATCH),
+            egalisation: option_memorisee(REGLAGE_EGALISATION),
+            volumes,
+            ecrire_volume,
+            volumes_demandes: None,
             enchainement: option_memorisee(REGLAGE_ENCHAINEMENT),
             sortant: None,
             a_suivre: None,
@@ -450,6 +481,8 @@ impl LecteurApp {
     ) -> Result<(), Box<dyn std::error::Error>> {
         let sortie = self.sortie.as_ref().ok_or("pas de sortie audio")?;
         let sink = Sink::try_new(&sortie.handle)?;
+        // Le volume égalisé est réglé avant le premier son.
+        telecommande.egaliser(self.facteur_egalisation());
         sink.append(platine);
         self.sink = Some(sink);
         self.appliquer_volume();
@@ -655,6 +688,38 @@ impl LecteurApp {
             memoriser_option(REGLAGE_SCRATCH, self.scratch);
         }
         if ui
+            .checkbox(&mut self.egalisation, "Volume égalisé")
+            .on_hover_text(
+                "Tous les morceaux sonnent aussi fort, d'un album à l'autre. Le volume \
+                 de chaque morceau vient de ses tags ReplayGain s'il en a ; sinon, le \
+                 lecteur le mesure une fois et s'en souvient. Le curseur de volume \
+                 s'applique par-dessus.",
+            )
+            .changed()
+        {
+            memoriser_option(REGLAGE_EGALISATION, self.egalisation);
+            self.volumes_demandes = None;
+        }
+        ui.indent("ecrire_volume", |ui| {
+            ui.add_enabled_ui(self.egalisation, |ui| {
+                if ui
+                    .checkbox(&mut self.ecrire_volume, "Écrire le volume dans les MP3")
+                    .on_hover_text(
+                        "Le volume mesuré par le lecteur est aussi écrit dans le fichier \
+                         (tags ReplayGain), pour que d'autres lecteurs (téléphone, \
+                         foobar2000, MusicBee…) en profitent. Seuls les morceaux \
+                         écoutés (et les suivants de la liste) sont concernés ; les \
+                         tags ReplayGain déjà présents ne sont jamais changés.",
+                    )
+                    .changed()
+                {
+                    memoriser_option(REGLAGE_ECRITURE_VOLUME, self.ecrire_volume);
+                    self.volumes.ecrire_dans_les_fichiers(self.ecrire_volume);
+                    self.volumes_demandes = None;
+                }
+            });
+        });
+        if ui
             .checkbox(&mut self.enchainement, "Fondu enchaîné")
             .on_hover_text(
                 "À la fin d'un morceau, il se mélange au début du suivant pendant \
@@ -666,6 +731,42 @@ impl LecteurApp {
             if !self.enchainement {
                 self.a_suivre = None;
             }
+        }
+    }
+
+    /// Le facteur du volume égalisé pour le morceau en cours : 1 si
+    /// l'option est décochée, `FACTEUR_INCONNU` tant qu'il n'est pas mesuré.
+    fn facteur_egalisation(&self) -> f32 {
+        if !self.egalisation {
+            return 1.0;
+        }
+        self.liste
+            .courant()
+            .and_then(|n| self.liste.fichier(n))
+            .and_then(|chemin| self.volumes.gain(chemin))
+            .unwrap_or(FACTEUR_INCONNU)
+    }
+
+    /// Demande le volume du morceau en cours (en urgence) et des suivants,
+    /// et l'applique à la platine dès qu'il est connu.
+    fn suivre_l_egalisation(&mut self) {
+        let demande = (self.liste.courant(), self.liste.morceaux().len());
+        if self.egalisation && self.volumes_demandes != Some(demande) {
+            self.volumes_demandes = Some(demande);
+            if let Some(courant) = demande.0 {
+                // Le vrai morceau suivant d'abord (en aléatoire, celui déjà
+                // tiré au sort), puis ceux qui suivent dans la liste.
+                let a_suivre = self.liste.a_suivre();
+                let morceaux = self.liste.morceaux();
+                let ensuite = (1..=A_MESURER_A_L_AVANCE.min(morceaux.len().saturating_sub(1)))
+                    .map(|ecart| (courant + ecart) % morceaux.len());
+                let numeros = std::iter::once(courant).chain(a_suivre).chain(ensuite);
+                self.volumes
+                    .demander(numeros.map(|n| morceaux[n].as_path()));
+            }
+        }
+        if let Some(telecommande) = &self.telecommande {
+            telecommande.egaliser(self.facteur_egalisation());
         }
     }
 
@@ -1094,6 +1195,17 @@ fn option_memorisee(fichier: &str) -> bool {
     option_depuis(texte.as_deref())
 }
 
+/// Une option désactivée par défaut est-elle cochée ? Seulement si on l'a cochée.
+fn option_cochee(fichier: &str) -> bool {
+    let texte = fichier_de_reglage(fichier).and_then(|f| std::fs::read_to_string(f).ok());
+    option_cochee_depuis(texte.as_deref())
+}
+
+/// Lit le fichier d'une option désactivée par défaut.
+fn option_cochee_depuis(texte: Option<&str>) -> bool {
+    texte.is_some_and(|t| t.trim() == "oui")
+}
+
 /// Lit le fichier d'une option : activée par défaut (pas de fichier, ou
 /// fichier illisible).
 fn option_depuis(texte: Option<&str>) -> bool {
@@ -1131,6 +1243,7 @@ impl eframe::App for LecteurApp {
 
         self.recevoir_depot(ctx);
         self.suivre_le_chargement();
+        self.suivre_l_egalisation();
         self.preparer_l_enchainement();
 
         // À gauche, la bibliothèque. Un clic sur un morceau (ou sur « ➕ tout »)
@@ -1592,6 +1705,13 @@ mod tests {
         assert!(!option_depuis(Some("non\n")));
     }
 
+    #[test]
+    fn une_option_desactivee_par_defaut_attend_qu_on_la_coche() {
+        assert!(!option_cochee_depuis(None));
+        assert!(option_cochee_depuis(Some("oui\n")));
+        assert!(!option_cochee_depuis(Some("non\n")));
+    }
+
     /// Stop avec le freinage : le morceau est tout de suite « Arrêté », le
     /// son ralentit pendant environ 1 s puis tout s'arrête, sans passer au
     /// morceau suivant. Sans freinage, en pause ou au second Stop : on coupe
@@ -1783,6 +1903,59 @@ mod tests {
         assert_eq!(duree_de_l_enchainement(s(200), s(180)), s(3));
         assert_eq!(duree_de_l_enchainement(s(4), s(180)), s(2));
         assert_eq!(duree_de_l_enchainement(s(200), s(2)), s(1));
+    }
+
+    /// Volume égalisé et fondu enchaîné : pendant le fondu, chaque morceau
+    /// garde son propre volume égalisé (celui qui s'éteint n'est pas
+    /// réglé au volume du nouveau). (Seulement sur un PC qui a du son.)
+    #[test]
+    fn le_volume_egalise_suit_chaque_morceau_pendant_le_fondu() {
+        let ctx = egui::Context::default();
+        let _tour = mon_tour();
+        let mut app = LecteurApp::new(&ctx);
+        if app.sortie.is_none() {
+            return; // pas de son sur ce PC (machine de test)
+        }
+        let fort = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/glissando.mp3");
+        let dossier = std::env::temp_dir().join("lecteur_mp3_test_egalisation_fondu");
+        std::fs::create_dir_all(&dossier).unwrap();
+        let calme = dossier.join("calme.mp3");
+        std::fs::copy(&fort, &calme).unwrap();
+        let mesure = |gain_db| egalisation::Mesure {
+            gain_db,
+            crete: 0.1,
+        };
+        app.volumes.fixer(&fort, mesure(-6.0));
+        app.volumes.fixer(&calme, mesure(3.0));
+        let (gain_fort, gain_calme) = (mesure(-6.0).gain(), mesure(3.0).gain());
+
+        app.liste.ajouter(vec![fort.clone(), calme.clone()]);
+        app.liste.choisir(0);
+        app.morceau = Some(Morceau::charger(&fort, &AtomicBool::new(false)).unwrap());
+        app.egalisation = true;
+        app.enchainement = true;
+        app.demarrer(false).unwrap();
+        let premier = app.telecommande.clone().unwrap();
+        assert_eq!(premier.egalisation(), Some(gain_fort));
+
+        let debut = Instant::now();
+        while app.sortant.is_none() {
+            assert!(debut.elapsed() < Duration::from_secs(5), "pas de fondu");
+            std::thread::sleep(Duration::from_millis(5));
+            app.preparer_l_enchainement();
+            app.suivre_l_egalisation();
+            app.suivre_la_fin();
+        }
+        app.suivre_l_egalisation();
+        let second = app.telecommande.clone().unwrap();
+        assert_eq!(second.egalisation(), Some(gain_calme));
+        assert_eq!(premier.egalisation(), Some(gain_fort));
+
+        // Option décochée : le morceau en cours revient au volume d'origine.
+        app.egalisation = false;
+        app.suivre_l_egalisation();
+        assert_eq!(second.egalisation(), Some(1.0));
+        app.stop();
     }
 
     /// Avec le fondu enchaîné, un peu avant la fin, le morceau suivant est
