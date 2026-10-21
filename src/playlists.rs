@@ -262,7 +262,7 @@ impl Playlists {
         let mut demande = None;
 
         ui.horizontal(|ui| {
-            ui.strong("Playlists");
+            ui.label(crate::police::titre("Playlists"));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui
                     .button("➕ Nouvelle")

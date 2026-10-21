@@ -342,7 +342,7 @@ impl Bibliotheque {
         }
 
         ui.horizontal(|ui| {
-            ui.strong("Bibliothèque");
+            ui.label(crate::police::titre("Bibliothèque"));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui
                     .button("📁 Changer de dossier…")
