@@ -1064,10 +1064,10 @@ impl LecteurApp {
                     Some(d) => format_temps(d),
                     None => "--:--".to_string(),
                 };
-                ui.label(format!(
+                ui.label(police::chiffres(format!(
                     "{} / {total}",
                     format_temps(Duration::from_secs_f32(secondes))
-                ));
+                )));
             });
         });
     }
@@ -1126,7 +1126,7 @@ impl LecteurApp {
                 self.muet = false;
                 change = true;
             }
-            ui.label(format!("{:.0} %", self.volume * 100.0));
+            ui.label(police::chiffres(format!("{:.0} %", self.volume * 100.0)));
 
             if change {
                 self.appliquer_volume();
@@ -1501,10 +1501,10 @@ impl eframe::App for LecteurApp {
 
             ui.add_space(8.0);
             ui.horizontal(|ui| {
-                ui.strong("Liste de lecture");
+                ui.label(police::titre("Liste de lecture"));
                 let compteur = self.liste.compteur(&self.tags);
                 if !compteur.is_empty() {
-                    ui.weak(compteur);
+                    ui.label(police::chiffres(compteur).weak());
                 }
                 if ui
                     .small_button("📂 Autre fichier…")

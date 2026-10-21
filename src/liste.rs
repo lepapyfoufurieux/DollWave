@@ -441,7 +441,7 @@ impl ListeDeLecture {
                         if let Some(duree) = tags.duree(fichier) {
                             ui.with_layout(
                                 egui::Layout::right_to_left(egui::Align::Center),
-                                |ui| ui.weak(format_temps(duree)),
+                                |ui| ui.label(crate::police::chiffres(format_temps(duree)).weak()),
                             );
                         }
                         // Un clic suffit. Pour egui, un double-clic, c'est deux
