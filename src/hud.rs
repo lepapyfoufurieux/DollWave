@@ -141,9 +141,13 @@ pub fn afficher(ui: &mut egui::Ui, bloc: &EnLecture) -> egui::Response {
             &peintre,
             Rect::from_center_size(voyant, egui::vec2(8.0, 8.0)),
             JAUNE,
-            0.7,
+            0.3 + 0.6 * theme::pulsation(),
         );
-        peintre.circle_filled(voyant, 4.0, JAUNE);
+        peintre.circle_filled(
+            voyant,
+            4.0,
+            theme::fondu(JAUNE, 0.6 + 0.4 * theme::pulsation()),
+        );
     } else {
         peintre.circle_stroke(voyant, 3.5, Stroke::new(1.0_f32, theme::fondu(JAUNE, 0.6)));
     }

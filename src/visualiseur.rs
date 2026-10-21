@@ -237,6 +237,8 @@ impl Visualiseur {
                 }
             }
         }
+        // Les lignes d'écran, plus marquées ici que sur le reste de la fenêtre.
+        theme::lignes_d_ecran(&peintre, zone, 3.0, 71.0);
     }
 
     /// Le résumé de la forme d'onde du morceau. La première fois, on lance son

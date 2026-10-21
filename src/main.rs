@@ -5,6 +5,7 @@ mod bibliotheque;
 mod depot;
 mod ecriture_tags;
 mod editeur_tags;
+mod effets;
 mod egalisation;
 mod hud;
 mod infos_fichier;
@@ -163,6 +164,8 @@ struct LecteurApp {
     muet: bool,
     // Au Stop et à la Pause, le son ralentit-il comme un vinyle qu'on arrête
     // à la main (et accélère-t-il à la Lecture) ?
+    // Les effets néon : lignes d'écran, lueurs qui respirent, intensité.
+    effets: effets::Effets,
     freinage: bool,
     // Quand on fait glisser la barre de progression, la musique suit-elle
     // la souris (bruit de scratch) ? Sinon, elle continue et saute au lâcher.
@@ -338,6 +341,7 @@ impl LecteurApp {
             position_glissee: None,
             volume: 0.5,
             muet: false,
+            effets: effets::Effets::charger(),
             freinage: option_memorisee(REGLAGE_FREINAGE),
             scratch: option_memorisee(REGLAGE_SCRATCH),
             egalisation: option_memorisee(REGLAGE_EGALISATION),
@@ -834,6 +838,8 @@ impl LecteurApp {
         {
             memoriser_option(REGLAGE_PAROLES, self.afficher_paroles);
         }
+        ui.separator();
+        self.effets.menu(ui);
     }
 
     /// Le facteur du volume égalisé pour le morceau en cours : 1 si
@@ -1386,6 +1392,7 @@ impl LecteurApp {
         if let Some(paroles) = paroles {
             paroles.afficher(ui, cadre, position);
         }
+        theme::lignes_d_ecran(&peintre, cadre, 3.0, 56.0);
         peintre.rect_stroke(
             cadre,
             0.0,
@@ -1769,8 +1776,12 @@ impl eframe::App for LecteurApp {
         self.suivre_l_egalisation();
         self.preparer_l_enchainement();
 
-        // Le fond nuit quadrillé, sous tous les panneaux.
+        // Le fond nuit quadrillé, sous tous les panneaux ; les lignes d'écran
+        // par-dessus. Les lueurs respirent seulement pendant la lecture.
         theme::dessiner_fond(ctx);
+        let en_lecture = self.platine_active().is_some_and(Telecommande::tourne);
+        self.effets.avancer(ctx.input(|i| i.stable_dt), en_lecture);
+        self.effets.dessiner(ctx);
 
         // À gauche, la bibliothèque. Un clic sur un morceau (ou sur « ➕ tout »)
         // l'ajoute à la liste de lecture. En bas, les playlists.
