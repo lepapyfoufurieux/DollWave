@@ -8,6 +8,7 @@ mod ecriture_tags;
 mod editeur_tags;
 mod effets;
 mod egalisation;
+mod generer_paroles;
 mod hud;
 mod infos_fichier;
 mod liste;
@@ -1842,6 +1843,12 @@ impl eframe::App for LecteurApp {
         }
         if let Some((nom, morceaux)) = demandes.vers_playlist {
             self.playlists.ajouter_a(&nom, &morceaux);
+        }
+        // Le morceau en cours vient de recevoir ses paroles : on les relit.
+        if let Some((chemin, _)) = &self.paroles {
+            if demandes.paroles_ecrites.contains(chemin) {
+                self.paroles = None;
+            }
         }
         if let Some(chemins) = demandes.tags_a_modifier {
             self.editeur = Some(EditeurTags::ouvrir(ctx, chemins, &self.tags));
