@@ -37,6 +37,8 @@ const TRANCHES_PAR_SECONDE: u32 = 100;
 const FENETRE: f32 = 30.0;
 /// Hauteur de la zone de dessin, en points.
 const HAUTEUR: f32 = 150.0;
+/// La marge entre le cadre néon et ce qu'il contient.
+const MARGE: f32 = 12.0;
 /// Le petit fichier où l'on mémorise le style choisi
 /// (%APPDATA%\lecteur_mp3\visualiseur.txt).
 const REGLAGE_STYLE: &str = "visualiseur.txt";
@@ -54,6 +56,15 @@ pub enum Style {
 
 impl Style {
     const TOUS: [Style; 3] = [Style::Barres, Style::Oscilloscope, Style::FormeOnde];
+
+    /// Le titre du cadre, en néon, pour ce style.
+    fn titre(self) -> &'static str {
+        match self {
+            Style::Barres => "SPECTRE",
+            Style::Oscilloscope => "OSCILLOSCOPE",
+            Style::FormeOnde => "FORME D'ONDE",
+        }
+    }
 
     fn nom(self) -> &'static str {
         match self {
@@ -124,7 +135,8 @@ impl Visualiseur {
         self.style != Style::Barres || self.barres.iter().all(|&b| b <= 0.0)
     }
 
-    /// Dessine le menu de choix puis le visualiseur.
+    /// Dessine le cadre du visualiseur : son titre (« SPECTRE »), le menu de
+    /// choix du style à droite, puis l'image qui bouge.
     /// `position` : où en est la lecture (en secondes). `en_lecture` : faux si
     /// la musique est en pause ou arrêtée (les barres retombent alors à zéro).
     pub fn afficher(
@@ -134,22 +146,64 @@ impl Visualiseur {
         position: f32,
         en_lecture: bool,
     ) {
+        // Le cadre néon, magenta, aux angles coupés en haut à droite et en bas à gauche.
+        let cadre = egui::Rect::from_min_size(
+            ui.available_rect_before_wrap().min,
+            egui::vec2(ui.available_width(), HAUTEUR + 2.0 * MARGE + 32.0),
+        );
+        ui.allocate_rect(cadre, egui::Sense::hover());
+        theme::cadre(
+            ui.painter(),
+            cadre,
+            theme::Coins::autre_diagonale(16.0),
+            theme::Fond::Uni(theme::FOND),
+            egui::Stroke::new(1.0_f32, theme::attenue(theme::MAGENTA, 110)),
+            0.0,
+        );
+        let mut dedans = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(cadre.shrink(MARGE))
+                .layout(egui::Layout::top_down(egui::Align::Min)),
+        );
+        let ui = &mut dedans;
+
         let avant = self.style;
-        egui::ComboBox::from_label("Visualiseur")
-            .selected_text(self.style.nom())
-            .show_ui(ui, |ui| {
-                for style in Style::TOUS {
-                    ui.selectable_value(&mut self.style, style, style.nom());
-                }
+        ui.horizontal(|ui| {
+            ui.set_min_height(24.0);
+            let (place, _) = ui.allocate_exact_size(egui::vec2(140.0, 24.0), egui::Sense::hover());
+            theme::texte_lumineux(
+                ui.painter(),
+                place.left_center(),
+                egui::Align2::LEFT_CENTER,
+                self.style.titre(),
+                egui::FontId::new(12.0, crate::police::famille_titres()),
+                2.0,
+                theme::MAGENTA,
+                theme::MAGENTA,
+            );
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                egui::ComboBox::from_id_salt("style_du_visualiseur")
+                    .selected_text(self.style.nom().to_uppercase())
+                    .show_ui(ui, |ui| {
+                        for style in Style::TOUS {
+                            ui.selectable_value(&mut self.style, style, style.nom());
+                        }
+                    });
             });
+        });
         if self.style != avant {
             memoriser(REGLAGE_STYLE, self.style.code());
         }
+        ui.add_space(6.0);
 
         let taille = egui::vec2(ui.available_width(), HAUTEUR);
         let (reponse, peintre) = ui.allocate_painter(taille, egui::Sense::hover());
         let zone = reponse.rect;
-        peintre.rect_filled(zone, 4.0, ui.visuals().extreme_bg_color);
+        peintre.hline(
+            zone.x_range(),
+            zone.bottom(),
+            egui::Stroke::new(1.0_f32, theme::attenue(theme::CYAN, 110)),
+        );
         let couleur = theme::CYAN;
         let dt = ui.input(|i| i.stable_dt);
         if morceau.is_none() {
@@ -263,14 +317,40 @@ fn dessiner_barres(
     barres: &[f32],
     couleur: egui::Color32,
 ) {
+    // Chaque barre : un dégradé cyan (en bas) → magenta (en haut, à pleine
+    // hauteur), une lueur magenta, et un petit chapeau jaune.
     let largeur = zone.width() / barres.len() as f32;
+    let lueur = theme::intensite();
     for (i, &hauteur) in barres.iter().enumerate() {
+        if hauteur <= 0.0 {
+            continue;
+        }
         let gauche = zone.left() + i as f32 * largeur;
+        let haut = zone.bottom() - hauteur * (zone.height() - 6.0);
         let barre = egui::Rect::from_min_max(
-            egui::pos2(gauche + 1.0, zone.bottom() - hauteur * zone.height()),
-            egui::pos2(gauche + largeur - 1.0, zone.bottom()),
+            egui::pos2(gauche + 1.5, haut),
+            egui::pos2(gauche + largeur - 1.5, zone.bottom()),
         );
-        peintre.rect_filled(barre, 1.0, couleur);
+        if lueur > 0.0 {
+            peintre.rect_filled(
+                barre.expand(1.5 * lueur),
+                0.0,
+                theme::attenue(theme::MAGENTA, (40.0 * lueur.min(1.5)) as u8),
+            );
+        }
+        let sommet = theme::melange(couleur, theme::MAGENTA, hauteur);
+        theme::degrade(
+            peintre,
+            &theme::contour(barre, theme::Coins::AUCUN),
+            couleur,
+            sommet,
+            -egui::Vec2::Y,
+        );
+        let chapeau = egui::Rect::from_min_max(
+            egui::pos2(barre.left(), haut - 6.0),
+            egui::pos2(barre.right(), haut - 3.0),
+        );
+        peintre.rect_filled(chapeau, 0.0, theme::JAUNE);
     }
 }
 
@@ -291,6 +371,14 @@ fn dessiner_oscilloscope(
             )
         })
         .collect();
+    // Un trait large et transparent dessous fait la lueur.
+    let points: Vec<egui::Pos2> = points;
+    if theme::intensite() > 0.0 {
+        peintre.add(egui::Shape::line(
+            points.clone(),
+            egui::Stroke::new(5.0_f32, theme::fondu(couleur, 0.18 * theme::intensite())),
+        ));
+    }
     peintre.add(egui::Shape::line(
         points,
         egui::Stroke::new(1.5_f32, couleur),
@@ -391,6 +479,8 @@ mod tests {
         let mut visualiseur = Visualiseur::new();
         visualiseur.style = Style::Barres;
         let ctx = egui::Context::default();
+        // Les polices néon (le titre « SPECTRE », la phrase en cours) en ont besoin.
+        crate::police::installer(&ctx);
         let image = |visualiseur: &mut Visualiseur, en_lecture: bool| {
             let _ = ctx.run(egui::RawInput::default(), |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| {
@@ -417,6 +507,8 @@ mod tests {
         let mut visualiseur = Visualiseur::new();
         visualiseur.style = Style::FormeOnde;
         let ctx = egui::Context::default();
+        // Les polices néon (le titre « SPECTRE », la phrase en cours) en ont besoin.
+        crate::police::installer(&ctx);
         let image = |visualiseur: &mut Visualiseur, morceau: Option<&Arc<Morceau>>| {
             let _ = ctx.run(egui::RawInput::default(), |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| {

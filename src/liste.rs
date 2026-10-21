@@ -10,9 +10,13 @@ use eframe::egui;
 use crate::format_temps;
 use crate::playlists::{menu_clic_droit, ChoixDuMenu};
 use crate::tags::TagsConnus;
+use crate::theme;
 
-/// Hauteur maximale de la liste à l'écran ; au-delà, on fait défiler.
+/// Hauteur maximale de la liste quand la place ne manque pas ; au-delà, on
+/// fait défiler.
 const HAUTEUR_MAX: f32 = 160.0;
+/// La hauteur d'une ligne de la liste.
+const HAUTEUR_LIGNE: f32 = 28.0;
 
 /// Ce que l'utilisateur a demandé en cliquant dans la liste.
 pub enum Action {
@@ -382,35 +386,91 @@ impl ListeDeLecture {
         let defiler = self.courant != self.courant_affiche;
         self.courant_affiche = self.courant;
         egui::ScrollArea::vertical()
-            .max_height(HAUTEUR_MAX)
+            // Toute la place qu'on lui laisse (au moins HAUTEUR_MAX).
+            .max_height(ui.available_height().max(HAUTEUR_MAX))
             .auto_shrink([false, true])
             .show(ui, |ui| {
                 let mut hauteur = self.hauteur_ligne;
                 for (n, fichier) in self.morceaux.iter().enumerate() {
                     let en_cours = self.courant == Some(n);
                     let (place, _) = rangee(ui, &mut hauteur, n, |ui| {
-                        if ui.small_button("✖").on_hover_text("Retirer").clicked() {
-                            action = Some(Action::Retirer(n));
-                        }
-                        if ui
-                            .add_enabled(!en_cours, egui::Button::new("⏭").small())
-                            .on_hover_text("Lire ensuite")
-                            .clicked()
-                        {
-                            a_lire_ensuite = Some(n);
-                        }
-                        let texte = format!("{}. {}", n + 1, tags.libelle(fichier));
-                        // Le morceau qu'on est en train de glisser est grisé.
-                        let texte = if glisse == Some(n) {
-                            egui::RichText::new(texte).weak()
+                        // Toute la ligne réagit : un clic lance le morceau ; si
+                        // on bouge la souris en gardant le bouton appuyé, on le
+                        // glisse ailleurs. Les boutons, ajoutés après, passent devant.
+                        let (rect, ligne) = ui.allocate_exact_size(
+                            egui::vec2(ui.available_width(), HAUTEUR_LIGNE),
+                            egui::Sense::click_and_drag(),
+                        );
+                        let glissee = glisse == Some(n);
+                        dessiner_fond_de_ligne(
+                            ui,
+                            rect,
+                            en_cours,
+                            ligne.hovered() && glisse.is_none(),
+                        );
+                        let mut dedans = ui.new_child(
+                            egui::UiBuilder::new()
+                                .max_rect(rect.shrink2(egui::vec2(8.0, 0.0)))
+                                .layout(egui::Layout::left_to_right(egui::Align::Center)),
+                        );
+                        let ui = &mut dedans;
+                        let couleur_numero = if en_cours {
+                            theme::MAGENTA
                         } else {
-                            egui::RichText::new(texte)
+                            theme::TEXTE_DISCRET
                         };
-                        // Un clic lance le morceau ; si on bouge la souris en
-                        // gardant le bouton appuyé, on le glisse ailleurs.
-                        let ligne = ui
-                            .selectable_label(en_cours, texte)
-                            .interact(egui::Sense::drag());
+                        let (place_numero, _) =
+                            ui.allocate_exact_size(egui::vec2(24.0, 16.0), egui::Sense::hover());
+                        ui.painter().text(
+                            place_numero.left_center(),
+                            egui::Align2::LEFT_CENTER,
+                            format!("{:02}", n + 1),
+                            egui::FontId::monospace(12.0),
+                            couleur_numero,
+                        );
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.spacing_mut().item_spacing.x = 4.0;
+                            let petit = egui::vec2(20.0, 20.0);
+                            let retirer = theme::Bouton::icone(theme::Icone::Croix)
+                                .allure(theme::Allure::Eteint)
+                                .taille(petit);
+                            if ui.add(retirer).on_hover_text("Retirer").clicked() {
+                                action = Some(Action::Retirer(n));
+                            }
+                            let ensuite = theme::Bouton::icone(theme::Icone::Suivant)
+                                .allure(theme::Allure::Eteint)
+                                .taille(petit);
+                            if ui
+                                .add_enabled(!en_cours, ensuite)
+                                .on_hover_text("Lire ensuite")
+                                .clicked()
+                            {
+                                a_lire_ensuite = Some(n);
+                            }
+                            if let Some(duree) = tags.duree(fichier) {
+                                ui.label(
+                                    crate::police::chiffres(format_temps(duree))
+                                        .size(12.0)
+                                        .color(theme::TEXTE_DISCRET),
+                                );
+                            }
+                            ui.with_layout(
+                                egui::Layout::left_to_right(egui::Align::Center),
+                                |ui| {
+                                    // Le morceau qu'on est en train de glisser est grisé ;
+                                    // celui en cours est en gras… ou presque : en blanc.
+                                    let texte = egui::RichText::new(tags.libelle(fichier));
+                                    let texte = if glissee {
+                                        texte.weak()
+                                    } else if en_cours {
+                                        texte.color(egui::Color32::WHITE)
+                                    } else {
+                                        texte.color(theme::TEXTE)
+                                    };
+                                    ui.add(egui::Label::new(texte).truncate().selectable(false));
+                                },
+                            );
+                        });
                         if ligne.drag_started() {
                             egui::DragAndDrop::set_payload(
                                 ui.ctx(),
@@ -443,12 +503,6 @@ impl ListeDeLecture {
                                 ui.label(tags.infobulle(fichier));
                             })
                         };
-                        if let Some(duree) = tags.duree(fichier) {
-                            ui.with_layout(
-                                egui::Layout::right_to_left(egui::Align::Center),
-                                |ui| ui.label(crate::police::chiffres(format_temps(duree)).weak()),
-                            );
-                        }
                         // Un clic suffit. Pour egui, un double-clic, c'est deux
                         // clics : le second tombe sur le morceau devenu le
                         // morceau en cours, ce qui ne le relance pas (voir main.rs).
@@ -509,6 +563,30 @@ impl ListeDeLecture {
             egui::DragAndDrop::clear_payload(ui.ctx());
             self.deplacer(de, vers);
         }
+    }
+}
+
+/// Le fond d'une ligne : le morceau en cours est surligné en magenta (dégradé
+/// et barre à gauche), les autres ont juste une fine barre cyan.
+fn dessiner_fond_de_ligne(ui: &egui::Ui, rect: egui::Rect, en_cours: bool, survol: bool) {
+    let peintre = ui.painter();
+    let barre = egui::Rect::from_min_size(rect.min, egui::vec2(3.0, rect.height()));
+    if en_cours {
+        let points = theme::contour(rect, theme::Coins::AUCUN);
+        let debut = theme::attenue(theme::MAGENTA, 64);
+        theme::degrade(
+            peintre,
+            &points,
+            debut,
+            egui::Color32::TRANSPARENT,
+            egui::Vec2::X,
+        );
+        peintre.rect_filled(barre, 0.0, theme::MAGENTA);
+    } else {
+        if survol {
+            peintre.rect_filled(rect, 0.0, theme::attenue(theme::CYAN, 18));
+        }
+        peintre.rect_filled(barre, 0.0, theme::attenue(theme::CYAN, 40));
     }
 }
 
@@ -1119,6 +1197,9 @@ mod tests {
         ]
     }
 
+    /// La place d'une ligne : sa hauteur et l'écart avec la suivante.
+    const H: f32 = HAUTEUR_LIGNE + 3.0;
+
     /// Glisse le morceau à la hauteur `de` jusqu'à la position `vers`, en
     /// plusieurs petits pas, puis lâche. Renvoie les actions demandées.
     fn glisser_de(l: &mut ListeDeLecture, de: f32, vers: egui::Pos2) -> Vec<Action> {
@@ -1144,14 +1225,13 @@ mod tests {
 
     #[test]
     fn glisser_un_morceau_change_sa_place() {
-        // Les lignes font une vingtaine de pixels de haut : on attrape la
-        // première et on la lâche tout en bas de la liste.
+        // On attrape la première ligne et on la lâche tout en bas de la liste.
         let mut l = liste(4);
-        let actions = glisser_de(&mut l, 15.0, egui::pos2(70.0, 4.0 * 21.0 + 2.0));
+        let actions = glisser_de(&mut l, 15.0, egui::pos2(70.0, 4.0 * H + 2.0));
         assert!(actions.is_empty(), "un glisser ne lance pas de morceau");
         assert_eq!(noms(&l), ["1.mp3", "2.mp3", "3.mp3", "0.mp3"]);
         // Et le dernier, on le remonte en haut.
-        let actions = glisser_de(&mut l, 3.0 * 21.0 + 10.0, egui::pos2(70.0, 3.0));
+        let actions = glisser_de(&mut l, 3.0 * H + 10.0, egui::pos2(70.0, 3.0));
         assert!(actions.is_empty());
         assert_eq!(noms(&l), ["0.mp3", "1.mp3", "2.mp3", "3.mp3"]);
     }
@@ -1162,8 +1242,8 @@ mod tests {
     fn glisser_dans_une_longue_liste() {
         let mut petite = liste(6);
         let mut longue = liste(1000);
-        glisser_de(&mut petite, 15.0, egui::pos2(70.0, 3.0 * 21.0 + 2.0));
-        glisser_de(&mut longue, 15.0, egui::pos2(70.0, 3.0 * 21.0 + 2.0));
+        glisser_de(&mut petite, 15.0, egui::pos2(70.0, 3.0 * H + 2.0));
+        glisser_de(&mut longue, 15.0, egui::pos2(70.0, 3.0 * H + 2.0));
         assert_ne!(noms(&petite)[0], "0.mp3", "le morceau a bougé");
         assert_eq!(noms(&longue)[..5], noms(&petite)[..5]);
         assert_eq!(noms(&longue).len(), 1000);
@@ -1172,7 +1252,8 @@ mod tests {
     #[test]
     fn lacher_hors_de_la_liste_ne_change_rien() {
         let mut l = liste(4);
-        glisser_de(&mut l, 15.0, egui::pos2(70.0, 290.0));
+        // Bien en dessous de la liste (qui prend toute la hauteur laissée).
+        glisser_de(&mut l, 15.0, egui::pos2(70.0, 400.0));
         assert_eq!(noms(&l), ["0.mp3", "1.mp3", "2.mp3", "3.mp3"]);
     }
 
@@ -1183,7 +1264,7 @@ mod tests {
         let mut l = liste(3);
         let ctx = egui::Context::default();
         let tags = TagsConnus::new(&ctx);
-        let depart = egui::pos2(70.0, 36.0); // le 2e morceau
+        let depart = egui::pos2(70.0, 1.5 * H); // le 2e morceau
         image(&mut l, &ctx, &tags, 0.0, vec![]);
         image(&mut l, &ctx, &tags, 0.02, bouton(depart, true));
         for i in 1..=10 {

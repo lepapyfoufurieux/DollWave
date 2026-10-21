@@ -751,6 +751,26 @@ pub fn entete_section(ui: &mut egui::Ui, titre: &str, couleur: Color32) -> Rect 
     Rect::from_min_max(egui::pos2(ecrit.right() + 8.0, rect.top()), rect.max)
 }
 
+/// Un titre de section en Orbitron lumineux, à sa place dans une rangée
+/// (« LISTE DE LECTURE »).
+pub fn titre_neon(ui: &mut egui::Ui, titre: &str, couleur: Color32) -> egui::Response {
+    let police = egui::FontId::new(13.0, crate::police::famille_titres());
+    let texte = titre.to_uppercase();
+    let taille = mise_en_page(ui.ctx(), &texte, police.clone(), 2.5).size();
+    let (rect, reponse) = ui.allocate_exact_size(taille, egui::Sense::hover());
+    texte_lumineux(
+        ui.painter(),
+        rect.left_center(),
+        egui::Align2::LEFT_CENTER,
+        &texte,
+        police,
+        2.5,
+        couleur,
+        couleur,
+    );
+    reponse
+}
+
 /// Un trait horizontal qui s'éteint sur les bords (séparateur néon).
 pub fn separateur(ui: &mut egui::Ui, couleur: Color32) {
     let (rect, _) =
