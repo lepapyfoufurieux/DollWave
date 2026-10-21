@@ -3,6 +3,7 @@
 use eframe::egui::{self, Key, Modifiers};
 
 /// Ce qu'une touche demande au lecteur.
+#[derive(Debug, PartialEq)]
 pub enum Commande {
     LecturePause,
     Stop,
