@@ -605,6 +605,7 @@ impl Generation {
 }
 
 /// Le travail lui-même : chaque morceau sans .lrc, l'un après l'autre.
+#[allow(clippy::too_many_arguments)]
 fn generer(
     morceaux: &[PathBuf],
     rangement: &Rangement,
