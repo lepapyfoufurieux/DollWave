@@ -986,6 +986,8 @@ impl LecteurApp {
             {
                 self.message_paroles = systeme::ouvrir_le_dossier(&rangement.dossier).err();
             }
+        });
+        ui.horizontal(|ui| {
             if ui
                 .small_button("🔁 Réessayer les introuvables")
                 .on_hover_text(
