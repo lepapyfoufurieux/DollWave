@@ -20,6 +20,7 @@ use std::time::Duration;
 use eframe::egui;
 use regex::Regex;
 
+use crate::introuvables::{self, Introuvables};
 use crate::paroles::Rangement;
 use crate::reseau::{self, Echec};
 use crate::tags::{self, Tags};
@@ -531,6 +532,9 @@ pub struct Progression {
     pub trouves: usize,
     /// Les morceaux qui avaient déjà un .lrc.
     pub deja_presents: usize,
+    /// Les morceaux déjà cherchés sans succès il y a moins de 30 jours :
+    /// sautés.
+    pub deja_cherches: usize,
     pub introuvables: Vec<PathBuf>,
     /// Trouvés, mais avec une durée assez différente (version clip ?).
     pub a_verifier: Vec<PathBuf>,
@@ -573,6 +577,7 @@ impl Generation {
                 &rangement,
                 &pour_le_travail,
                 &stop,
+                &mut Introuvables::du_lecteur(introuvables::PAROLES),
                 |p| demander_a_lrclib(&agent, p, &stop),
                 PAUSE_ENTRE_RECHERCHES,
                 || ctx.request_repaint(),
@@ -605,6 +610,7 @@ fn generer(
     rangement: &Rangement,
     progression: &Mutex<Progression>,
     arreter: &AtomicBool,
+    memoire: &mut Introuvables,
     mut demander: impl FnMut(&[(&str, String)]) -> Result<Vec<Candidat>, Echec>,
     pause: Duration,
     redessiner: impl Fn(),
@@ -619,6 +625,13 @@ fn generer(
         if rangement.trouver(chemin).is_some() {
             let mut etat = etat();
             etat.deja_presents += 1;
+            etat.faits += 1;
+            continue;
+        }
+        let cle = chemin.to_string_lossy();
+        if memoire.deja_cherche(&cle, introuvables::maintenant()) {
+            let mut etat = etat();
+            etat.deja_cherches += 1;
             etat.faits += 1;
             continue;
         }
@@ -655,6 +668,7 @@ fn generer(
             Ok(Resultat::Rejete(_) | Resultat::Introuvable) => {
                 echecs_de_suite = 0;
                 etat.introuvables.push(chemin.clone());
+                memoire.noter(&cle, introuvables::maintenant());
             }
             Err(Interruption::Arretee) => {
                 etat.interruption = Some("Arrêté.".to_string());
@@ -1043,6 +1057,7 @@ mod tests {
             &rangement,
             &progression,
             &AtomicBool::new(false),
+            &mut Introuvables::en_memoire(),
             |p| {
                 let titre = &p[0].1;
                 Ok(if titre.contains("Digital Love") {
@@ -1080,6 +1095,53 @@ mod tests {
     }
 
     #[test]
+    fn un_morceau_introuvable_n_est_pas_recherche_la_fois_suivante() {
+        let dossier = dossier_de_test("memoire");
+        let morceaux = [dossier.join("A - Rien.mp3")];
+        let mut memoire = Introuvables::en_memoire();
+        let mut appels = 0;
+        for _ in 0..2 {
+            let progression = Mutex::new(Progression::default());
+            generer(
+                &morceaux,
+                &rangement_de_test(&dossier),
+                &progression,
+                &AtomicBool::new(false),
+                &mut memoire,
+                |_| {
+                    appels += 1;
+                    Ok(Vec::new())
+                },
+                Duration::ZERO,
+                || {},
+            );
+            let p = progression.into_inner().unwrap();
+            assert_eq!(p.faits, 1);
+            assert_eq!(p.introuvables.len() + p.deja_cherches, 1);
+        }
+        let apres_le_premier_passage =
+            recherches_a_faire(&preparer(&morceaux[0], &Tags::default())).len();
+        assert_eq!(appels, apres_le_premier_passage);
+    }
+
+    #[test]
+    fn une_erreur_reseau_n_est_pas_notee_comme_introuvable() {
+        let dossier = dossier_de_test("memoire-503");
+        let mut memoire = Introuvables::en_memoire();
+        generer(
+            &[dossier.join("A - T.mp3")],
+            &rangement_de_test(&dossier),
+            &Mutex::new(Progression::default()),
+            &AtomicBool::new(false),
+            &mut memoire,
+            |_| Err(Echec::SiteIndisponible("http status: 503".to_string())),
+            Duration::ZERO,
+            || {},
+        );
+        assert_eq!(memoire.len(), 0);
+    }
+
+    #[test]
     fn s_arrete_si_lrclib_ne_repond_pas() {
         let dossier = dossier_de_test("reseau");
         let morceaux: Vec<PathBuf> = (1..=5)
@@ -1092,6 +1154,7 @@ mod tests {
             &rangement_de_test(&dossier),
             &progression,
             &AtomicBool::new(false),
+            &mut Introuvables::en_memoire(),
             |_| {
                 appels += 1;
                 Err(Echec::SansReponse("pas de connexion".to_string()))
@@ -1119,6 +1182,7 @@ mod tests {
             &rangement_de_test(&dossier),
             &progression,
             &AtomicBool::new(false),
+            &mut Introuvables::en_memoire(),
             |_| Err(Echec::SiteIndisponible("http status: 503".to_string())),
             Duration::ZERO,
             || {},
