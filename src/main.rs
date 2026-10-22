@@ -217,6 +217,8 @@ struct LecteurApp {
     pochette: Option<(PathBuf, Option<egui::TextureHandle>)>,
     // Affiche-t-on les paroles synchronisées (fichier .lrc à côté du MP3) ?
     afficher_paroles: bool,
+    // L'erreur d'ouverture du dossier des paroles, affichée dans les options.
+    message_paroles: Option<String>,
     // Les paroles du morceau en cours, et le fichier dont elles viennent
     // (pour ne relire le .lrc que quand le morceau change). Rien sans .lrc.
     paroles: Option<(PathBuf, Option<Paroles>)>,
@@ -386,6 +388,7 @@ impl LecteurApp {
             derniere_ouverture: None,
             pochette: None,
             afficher_paroles: option_memorisee(REGLAGE_PAROLES),
+            message_paroles: None,
             paroles: None,
             message,
             depots: depot::Depots::default(),
@@ -927,15 +930,35 @@ impl LecteurApp {
             .checkbox(&mut self.afficher_paroles, "Paroles")
             .on_hover_text(
                 "Si un fichier .lrc porte le même nom que le MP3 (chanson.mp3 → \
-                 chanson.lrc, dans le même dossier), ses paroles défilent sur la \
-                 pochette en même temps que la musique",
+                 chanson.lrc, à côté du MP3 ou dans le dossier des paroles), ses \
+                 paroles défilent sur la pochette en même temps que la musique",
             )
             .changed()
         {
             memoriser_option(REGLAGE_PAROLES, self.afficher_paroles);
         }
+        self.options_paroles(ui);
         ui.separator();
         self.effets.menu(ui);
+    }
+
+    /// Sous la case « Paroles » : ouvrir le dossier des paroles.
+    fn options_paroles(&mut self, ui: &mut egui::Ui) {
+        let Some(rangement) = paroles::Rangement::du_lecteur() else {
+            return;
+        };
+        ui.horizontal(|ui| {
+            if ui
+                .small_button("📂 Dossier des paroles")
+                .on_hover_text(rangement.dossier.display().to_string())
+                .clicked()
+            {
+                self.message_paroles = systeme::ouvrir_le_dossier(&rangement.dossier).err();
+            }
+        });
+        if let Some(message) = &self.message_paroles {
+            ui.label(egui::RichText::new(message).small().weak());
+        }
     }
 
     /// Le facteur du volume égalisé pour le morceau en cours : 1 si

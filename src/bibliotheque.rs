@@ -557,7 +557,8 @@ impl Bibliotheque {
             )
             .on_hover_text(
                 "Chercher sur Internet (LRCLIB) les paroles synchronisées des morceaux \
-                 qui n'ont pas encore de fichier .lrc, et les ranger à côté des MP3.\n\
+                 qui n'ont pas encore de fichier .lrc, et les ranger dans le dossier \
+                 des paroles du lecteur (pas dans ta Musique).\n\
                  Les .lrc qui existent déjà ne sont jamais remplacés.",
             );
         if bouton.clicked() {

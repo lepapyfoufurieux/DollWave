@@ -1,6 +1,7 @@
 //! Le bouton « Paroles » de la bibliothèque : pour chaque MP3 qui n'a pas
 //! encore de .lrc, on cherche ses paroles synchronisées sur LRCLIB
-//! (https://lrclib.net, gratuit, sans compte) et on les range à côté du MP3.
+//! (https://lrclib.net, gratuit, sans compte) et on les range dans notre
+//! dossier des paroles (voir paroles.rs), pas dans le dossier Musique.
 //!
 //! C'est le script generer_lrc.py de Luce, repris tel quel en Rust :
 //! - on devine plusieurs titres et artistes possibles (nom du fichier
@@ -19,7 +20,7 @@ use std::time::Duration;
 use eframe::egui;
 use regex::Regex;
 
-use crate::paroles::fichier_lrc;
+use crate::paroles::Rangement;
 use crate::tags::{self, Tags};
 
 const API: &str = "https://lrclib.net/api";
@@ -570,8 +571,15 @@ impl Generation {
                 .timeout_global(Some(Duration::from_secs(20)))
                 .build()
                 .into();
+            let Some(rangement) = Rangement::du_lecteur() else {
+                let mut p = pour_le_travail.lock().unwrap_or_else(|e| e.into_inner());
+                p.interruption = Some("Dossier des paroles introuvable.".to_string());
+                p.fini = true;
+                return;
+            };
             generer(
                 &morceaux,
+                &rangement,
                 &pour_le_travail,
                 &stop,
                 |p| demander_a_lrclib(&agent, p),
@@ -603,6 +611,7 @@ impl Generation {
 /// Le travail lui-même : chaque morceau sans .lrc, l'un après l'autre.
 fn generer(
     morceaux: &[PathBuf],
+    rangement: &Rangement,
     progression: &Mutex<Progression>,
     arreter: &AtomicBool,
     mut demander: impl FnMut(&[(&str, String)]) -> Result<Vec<Candidat>, String>,
@@ -616,8 +625,7 @@ fn generer(
             etat().interruption = Some("Arrêté.".to_string());
             break;
         }
-        let lrc = fichier_lrc(chemin);
-        if lrc.exists() {
+        if rangement.trouver(chemin).is_some() {
             let mut etat = etat();
             etat.deja_presents += 1;
             etat.faits += 1;
@@ -642,7 +650,7 @@ fn generer(
             }) => {
                 echecs_de_suite = 0;
                 let texte = contenu_du_lrc(chemin, &recherche, &paroles, &source);
-                match ecrire_sans_remplacer(&lrc, &texte) {
+                match ecrire_sans_remplacer(&rangement.place(chemin), &texte) {
                     Ok(()) => {
                         etat.trouves += 1;
                         etat.nouveaux.push(chemin.clone());
@@ -684,9 +692,13 @@ fn generer(
 }
 
 /// Écrit le .lrc, sauf s'il existe déjà (créé entre-temps par un autre
-/// logiciel) : on ne remplace jamais des paroles existantes.
+/// logiciel) : on ne remplace jamais des paroles existantes. Crée les
+/// sous-dossiers qui manquent.
 fn ecrire_sans_remplacer(fichier: &Path, texte: &str) -> std::io::Result<()> {
     use std::io::Write;
+    if let Some(dossier) = fichier.parent() {
+        std::fs::create_dir_all(dossier)?;
+    }
     let mut f = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -697,6 +709,16 @@ fn ecrire_sans_remplacer(fichier: &Path, texte: &str) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::paroles::fichier_lrc;
+
+    /// Un rangement de test : la « Musique » et le dossier des paroles sont
+    /// deux sous-dossiers de `dossier`.
+    fn rangement_de_test(dossier: &Path) -> Rangement {
+        Rangement {
+            dossier: dossier.join("paroles"),
+            musique: dossier.join("Musique"),
+        }
+    }
 
     fn tags(titre: &str, artiste: &str, album: &str, secondes: u64) -> Tags {
         let texte = |t: &str| (!t.is_empty()).then(|| t.to_string());
@@ -970,17 +992,30 @@ mod tests {
     #[test]
     fn genere_sans_jamais_ecraser() {
         let dossier = dossier_de_test("ecraser");
-        let deja = dossier.join("Daft Punk - One More Time.mp3");
-        let nouveau = dossier.join("Daft Punk - Digital Love.mp3");
-        let inconnu = dossier.join("Personne - Rien du tout.mp3");
-        for f in [&deja, &nouveau, &inconnu] {
+        let rangement = rangement_de_test(&dossier);
+        let album = rangement.musique.join("Daft Punk");
+        std::fs::create_dir_all(&album).unwrap();
+        let deja = album.join("Daft Punk - One More Time.mp3");
+        let deja_range = album.join("Daft Punk - Aerodynamic.mp3");
+        let nouveau = album.join("Daft Punk - Digital Love.mp3");
+        let inconnu = album.join("Personne - Rien du tout.mp3");
+        for f in [&deja, &deja_range, &nouveau, &inconnu] {
             std::fs::write(f, b"pas vraiment un mp3").unwrap();
         }
         std::fs::write(fichier_lrc(&deja), "mes paroles").unwrap();
+        let place_deja_range = rangement.place(&deja_range);
+        std::fs::create_dir_all(place_deja_range.parent().unwrap()).unwrap();
+        std::fs::write(&place_deja_range, "déjà rangées").unwrap();
 
         let progression = Mutex::new(Progression::default());
         generer(
-            &[deja.clone(), nouveau.clone(), inconnu.clone()],
+            &[
+                deja.clone(),
+                deja_range.clone(),
+                nouveau.clone(),
+                inconnu.clone(),
+            ],
+            &rangement,
             &progression,
             &AtomicBool::new(false),
             |p| {
@@ -999,11 +1034,21 @@ mod tests {
             std::fs::read_to_string(fichier_lrc(&deja)).unwrap(),
             "mes paroles"
         );
-        assert!(std::fs::read_to_string(fichier_lrc(&nouveau))
+        assert_eq!(
+            std::fs::read_to_string(&place_deja_range).unwrap(),
+            "déjà rangées"
+        );
+        // Le nouveau .lrc est dans notre dossier, pas dans la Musique.
+        assert!(!fichier_lrc(&nouveau).exists());
+        assert_eq!(
+            rangement.place(&nouveau),
+            dossier.join("paroles/Daft Punk/Daft Punk - Digital Love.lrc")
+        );
+        assert!(std::fs::read_to_string(rangement.place(&nouveau))
             .unwrap()
             .ends_with("[00:01.00]Digital Love\n"));
-        assert!(!fichier_lrc(&inconnu).exists());
-        assert_eq!((p.faits, p.trouves, p.deja_presents), (3, 1, 1));
+        assert!(!fichier_lrc(&inconnu).exists() && !rangement.place(&inconnu).exists());
+        assert_eq!((p.faits, p.trouves, p.deja_presents), (4, 1, 2));
         assert_eq!(p.introuvables, [inconnu]);
         assert_eq!(p.nouveaux, [nouveau]);
         assert!(p.fini && p.interruption.is_none());
@@ -1019,6 +1064,7 @@ mod tests {
         let mut appels = 0;
         generer(
             &morceaux,
+            &rangement_de_test(&dossier),
             &progression,
             &AtomicBool::new(false),
             |_| {
