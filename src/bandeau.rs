@@ -1,5 +1,5 @@
 //! Le bandeau néon en haut de la fenêtre (étape 9), qui sert aussi de barre
-//! de titre : logo hexagonal, « LECTEUR//MP3 », la version, les voyants
+//! de titre : l'icône du lecteur, « LECTEUR//MP3 », la version, les voyants
 //! « SYS.OK ▮▮▮▮▯ » qui disent ce qui marche, puis les boutons Réduire,
 //! Agrandir et ✕. On le glisse pour déplacer la fenêtre ; un double-clic
 //! l'agrandit.
@@ -13,6 +13,23 @@ use crate::theme::{self, CYAN, ERREUR, FOND, JAUNE, MAGENTA, TEXTE, TEXTE_DISCRE
 pub const HAUTEUR: f32 = 38.0;
 /// La largeur de chacun des trois boutons de la fenêtre.
 const LARGEUR_BOUTON: f32 = 46.0;
+
+/// La taille du logo, en haut à gauche.
+const TAILLE_LOGO: f32 = 26.0;
+
+/// L'icône du lecteur, chargée une seule fois puis gardée par egui.
+fn texture_logo(ctx: &egui::Context) -> Option<egui::TextureHandle> {
+    let id = egui::Id::new("logo du bandeau");
+    if let Some(texture) = ctx.data(|d| d.get_temp::<egui::TextureHandle>(id)) {
+        return Some(texture);
+    }
+    let (pixels, largeur, hauteur) = crate::systeme::icone_petite()?;
+    let image =
+        egui::ColorImage::from_rgba_unmultiplied([largeur as usize, hauteur as usize], &pixels);
+    let texture = ctx.load_texture("logo", image, egui::TextureOptions::LINEAR);
+    ctx.data_mut(|d| d.insert_temp(id, texture.clone()));
+    Some(texture)
+}
 
 /// Les trois boutons de la fenêtre, à droite du bandeau.
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -124,19 +141,20 @@ pub fn afficher(ui: &mut egui::Ui, voyants: &Voyants) {
         Stroke::new(1.0_f32, theme::attenue(CYAN, 200)),
     );
 
-    // Le logo : un petit hexagone en dégradé cyan → magenta.
+    // Le logo : l'icône du lecteur, la même que dans la barre des tâches.
     let milieu = zone.center().y;
     let logo = Rect::from_center_size(
         egui::pos2(zone.left() + 23.0, milieu),
-        egui::vec2(18.0, 18.0),
+        egui::vec2(TAILLE_LOGO, TAILLE_LOGO),
     );
-    theme::degrade(
-        peintre,
-        &theme::hexagone(logo),
-        CYAN,
-        MAGENTA,
-        egui::vec2(1.0, 1.0),
-    );
+    if let Some(texture) = texture_logo(&ctx) {
+        peintre.image(
+            texture.id(),
+            logo,
+            Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+            Color32::WHITE,
+        );
+    }
 
     // « LECTEUR//MP3 » : cyan, les deux barres en magenta.
     let titre = crate::police::titres(ui.ctx(), 14.0);
