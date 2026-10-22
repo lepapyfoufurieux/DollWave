@@ -169,7 +169,7 @@ pub fn lire_pochette_brute(chemin: &Path) -> Option<Vec<u8>> {
 }
 
 /// Ouvre le fichier avec symphonia, sans décoder la musique, et passe ses
-/// tags et sa durée à `lire`. Rien si ce n'est pas un MP3 lisible.
+/// tags et sa durée à `lire`. Rien si ce n'est pas un fichier audio lisible.
 fn ouvrir<T>(
     chemin: &Path,
     lire: impl FnOnce(Option<&MetadataRevision>, Option<Duration>) -> T,
@@ -177,7 +177,9 @@ fn ouvrir<T>(
     let fichier = File::open(chemin).ok()?;
     let source = MediaSourceStream::new(Box::new(fichier), Default::default());
     let mut indice = Hint::new();
-    indice.with_extension("mp3");
+    if let Some(extension) = chemin.extension().and_then(|e| e.to_str()) {
+        indice.with_extension(extension);
+    }
     let mut sonde = symphonia::default::get_probe()
         .format(
             &indice,

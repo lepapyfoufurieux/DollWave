@@ -7,7 +7,7 @@ use std::sync::mpsc::{self, Receiver};
 
 use eframe::egui;
 
-use crate::bibliotheque::{est_un_mp3, mp3_du_dossier};
+use crate::bibliotheque::{est_un_morceau, morceaux_du_dossier};
 
 /// Les fichiers et dossiers que l'utilisateur vient de lâcher dans la
 /// fenêtre (vide la plupart du temps).
@@ -28,8 +28,8 @@ pub fn mp3_deposes(elements: Vec<PathBuf>) -> Vec<PathBuf> {
     let mut fichiers = Vec::new();
     for element in elements {
         if element.is_dir() {
-            fichiers.extend(mp3_du_dossier(&element));
-        } else if est_un_mp3(&element) {
+            fichiers.extend(morceaux_du_dossier(&element));
+        } else if est_un_morceau(&element) {
             fichiers.push(element);
         }
     }
