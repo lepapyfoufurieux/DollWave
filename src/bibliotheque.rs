@@ -1027,10 +1027,11 @@ fn afficher_morceaux(ui: &mut egui::Ui, morceaux: &[PathBuf], lignes: &mut Ligne
 }
 
 /// La ligne d'un dossier, d'un artiste ou d'un album, qu'on peut déplier
-/// (fermée au départ) : son étoile (s'il peut être mis en favori), son nom
-/// (un clic le déplie ; on peut le glisser sur une playlist, ou faire un
-/// clic droit), son nombre de morceaux et « + » (tout ajouter). Une fois déplié, `contenu` dessine ce qu'il
-/// contient. `morceaux` donne tous ses morceaux, dans l'ordre affiché.
+/// (fermée au départ) : son étoile (s'il peut être mis en favori), son nom,
+/// son nombre de morceaux et « + » (tout ajouter). Un clic n'importe où sur
+/// la ligne la déplie ; on peut aussi la glisser sur une playlist, ou faire
+/// un clic droit. Une fois déplié, `contenu` dessine ce qu'il contient.
+/// `morceaux` donne tous ses morceaux, dans l'ordre affiché.
 #[allow(clippy::too_many_arguments)]
 fn entete_depliable(
     ui: &mut egui::Ui,
@@ -1057,7 +1058,27 @@ fn entete_depliable(
             }
         }
     }
-    let mut basculer = false;
+    // Toute la ligne réagit au clic (déplier), au glisser et au clic droit.
+    // Elle est posée avant la flèche, l'étoile et « + » : ceux-ci, par-dessus,
+    // gardent leur propre clic.
+    let hauteur = lignes
+        .hauteur_entete
+        .unwrap_or(ui.spacing().interact_size.y);
+    let ligne = ui.interact(
+        egui::Rect::from_min_size(ui.cursor().min, egui::vec2(ui.available_width(), hauteur)),
+        id.with("ligne"),
+        egui::Sense::click_and_drag(),
+    );
+    // Un clic sur la ligne la déplie ou la replie, comme la flèche.
+    let basculer = clic_simple(ui, &ligne);
+    glisser(&ligne, &morceaux);
+    menu(
+        &ligne,
+        lignes,
+        "✏ Modifier les tags de tous ses morceaux…",
+        false,
+        &morceaux,
+    );
     // Le fond de survol, dessiné sous l'en-tête une fois sa place connue.
     let fond = ui.painter().add(egui::Shape::Noop);
     let mut entete = etat.show_header(ui, |ui| {
@@ -1081,23 +1102,10 @@ fn entete_depliable(
                     .color(theme::TEXTE_DISCRET),
             );
             ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                // Un clic sur le nom le déplie ou le replie, comme la flèche.
-                let etiquette = ui.add(
+                ui.add(
                     egui::Label::new(egui::RichText::new(nom).color(theme::TEXTE))
                         .truncate()
-                        .selectable(false)
-                        .sense(egui::Sense::click_and_drag()),
-                );
-                if clic_simple(ui, &etiquette) {
-                    basculer = true;
-                }
-                glisser(&etiquette, &morceaux);
-                menu(
-                    &etiquette,
-                    lignes,
-                    "✏ Modifier les tags de tous ses morceaux…",
-                    false,
-                    &morceaux,
+                        .selectable(false),
                 );
             });
         });
@@ -1105,10 +1113,10 @@ fn entete_depliable(
     if basculer {
         entete.toggle();
     }
-    let (_, ligne, _) = entete.body(|ui| contenu(ui, lignes));
-    theme::fond_de_survol(ui, fond, ligne.response.rect);
+    let (_, dessinee, _) = entete.body(|ui| contenu(ui, lignes));
+    theme::fond_de_survol(ui, fond, dessinee.response.rect);
     if replie {
-        lignes.hauteur_entete = Some(ligne.response.rect.height());
+        lignes.hauteur_entete = Some(dessinee.response.rect.height());
     }
 }
 
@@ -1963,5 +1971,107 @@ mod tests {
         assert!(!est_un_morceau(Path::new("a.lrc")));
         assert!(!est_un_morceau(Path::new("a.mp3.txt")));
         assert!(!est_un_morceau(Path::new("mp3")));
+    }
+
+    /// Affiche un dossier « abba » (2 morceaux) dans un panneau de 400 px de
+    /// large, clique à l'abscisse `x` sur sa ligne, puis dit s'il s'est
+    /// déplié, si son étoile a été cliquée et combien de morceaux sont à
+    /// ajouter à la liste de lecture.
+    fn cliquer_sur_la_ligne_du_dossier(nom: &str, x: f32) -> (bool, bool, usize) {
+        let racine = dossier_de_test(nom);
+        std::fs::create_dir_all(racine.join("abba")).unwrap();
+        for f in ["abba/1.mp3", "abba/2.mp3"] {
+            std::fs::write(racine.join(f), b"").unwrap();
+        }
+        let contenu = Contenu::lire(&racine);
+        let ctx = egui::Context::default();
+        let tags = TagsConnus::new(&ctx);
+        let dans_la_liste = HashSet::new();
+        let favoris = HashSet::new();
+        let (mut ouvert, mut etoile, mut a_ajouter) = (false, false, 0);
+        let mut t = 0.0;
+        let mut image = |events: Vec<egui::Event>| {
+            t += 0.02;
+            let entree = egui::RawInput {
+                time: Some(t),
+                events,
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(400.0, 300.0),
+                )),
+                ..Default::default()
+            };
+            let _ = ctx.run(entree, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    let id = ui.make_persistent_id(&contenu.racine.sous_dossiers[0].chemin);
+                    let mut lignes = Lignes {
+                        dans_la_liste: &dans_la_liste,
+                        en_cours: None,
+                        tags: &tags,
+                        favoris: &favoris,
+                        playlists: &[],
+                        a_ajouter: Vec::new(),
+                        etoile: None,
+                        vers_playlist: None,
+                        tags_a_modifier: None,
+                        infos_a_voir: None,
+                        hauteur: None,
+                        hauteur_entete: None,
+                    };
+                    afficher_dossier(ui, &contenu.racine, &mut lignes);
+                    etoile |= lignes.etoile.is_some();
+                    a_ajouter += lignes.a_ajouter.len();
+                    ouvert = egui::collapsing_header::CollapsingState::load_with_default_open(
+                        ui.ctx(),
+                        id,
+                        false,
+                    )
+                    .is_open();
+                });
+            });
+        };
+        let bouton = |pressed: bool| egui::Event::PointerButton {
+            pos: egui::pos2(x, 17.0),
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        image(vec![]);
+        // Bouton enfoncé dès l'arrivée de la souris, avant qu'une bulle
+        // d'aide ne s'affiche par-dessus.
+        image(vec![
+            egui::Event::PointerMoved(egui::pos2(x, 17.0)),
+            bouton(true),
+        ]);
+        image(vec![bouton(false)]);
+        image(vec![]);
+        std::fs::remove_dir_all(&racine).unwrap();
+        (ouvert, etoile, a_ajouter)
+    }
+
+    #[test]
+    fn un_clic_n_importe_ou_sur_la_ligne_deplie_le_dossier() {
+        // Sur le nom, et dans le vide entre le nom et le nombre de morceaux.
+        assert_eq!(
+            cliquer_sur_la_ligne_du_dossier("clic_nom", 50.0),
+            (true, false, 0)
+        );
+        assert_eq!(
+            cliquer_sur_la_ligne_du_dossier("clic_vide", 250.0),
+            (true, false, 0)
+        );
+    }
+
+    #[test]
+    fn l_etoile_et_le_plus_gardent_leur_action() {
+        // ☆ juste après la flèche, « + » tout à droite : ils ne déplient pas.
+        assert_eq!(
+            cliquer_sur_la_ligne_du_dossier("clic_etoile", 30.0),
+            (false, true, 0)
+        );
+        assert_eq!(
+            cliquer_sur_la_ligne_du_dossier("clic_plus", 380.0),
+            (false, false, 2)
+        );
     }
 }
