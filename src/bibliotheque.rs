@@ -314,14 +314,6 @@ impl Bibliotheque {
         self.contenu.as_ref().map(|c| c.tous.len())
     }
 
-    /// Tous les morceaux de la bibliothèque (aucun tant qu'elle n'est pas lue).
-    pub fn morceaux(&self) -> Vec<PathBuf> {
-        self.contenu
-            .as_ref()
-            .map(|c| c.tous.iter().map(|e| e.chemin.clone()).collect())
-            .unwrap_or_default()
-    }
-
     /// Dessine la bibliothèque. Renvoie ce qu'on y a demandé en cliquant.
     /// `dans_la_liste` : les morceaux déjà dans la liste, marqués d'un ✔.
     /// `tags` : les tags des morceaux, pour les nommer et pour la recherche.

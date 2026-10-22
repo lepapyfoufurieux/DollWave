@@ -34,10 +34,6 @@ pub fn fichier_lrc(mp3: &Path) -> PathBuf {
     mp3.with_extension("lrc")
 }
 
-/// Ce que le lecteur écrit dans l'en-tête des .lrc qu'il crée (voir
-/// generer_paroles.rs) : c'est ainsi qu'on les reconnaît.
-const MARQUE_DU_LECTEUR: &str = "[by:LRCLIB";
-
 /// Où sont rangées les paroles créées par le lecteur.
 pub struct Rangement {
     /// Notre dossier des paroles.
@@ -101,54 +97,6 @@ impl Rangement {
             .into_iter()
             .find(|f| f.is_file())
     }
-
-    /// Range dans notre dossier les .lrc qu'une ancienne version du lecteur
-    /// avait créés à côté des MP3. Ceux de l'utilisateur ne bougent pas.
-    pub fn ranger_les_anciens(&self, morceaux: &[PathBuf]) -> Bilan {
-        let mut bilan = Bilan::default();
-        for mp3 in morceaux {
-            let ancien = fichier_lrc(mp3);
-            let Ok(octets) = std::fs::read(&ancien) else {
-                continue;
-            };
-            if !decoder(&octets).contains(MARQUE_DU_LECTEUR) {
-                continue;
-            }
-            let nouveau = self.place(mp3);
-            let resultat = if nouveau.exists() {
-                // Déjà rangé (copie d'avant) : on garde celui de notre dossier.
-                std::fs::remove_file(&ancien)
-            } else {
-                deplacer(&ancien, &nouveau)
-            };
-            match resultat {
-                Ok(()) => bilan.ranges += 1,
-                Err(erreur) => bilan.erreurs.push((ancien, erreur.to_string())),
-            }
-        }
-        bilan
-    }
-}
-
-/// Le résultat du rangement des anciens .lrc.
-#[derive(Debug, Default)]
-pub struct Bilan {
-    pub ranges: usize,
-    pub erreurs: Vec<(PathBuf, String)>,
-}
-
-/// Déplace un fichier en créant les dossiers qui manquent. Si la Musique
-/// n'est pas sur le même disque que notre dossier, Windows refuse de
-/// simplement le déplacer : on le copie puis on efface l'original.
-fn deplacer(de: &Path, vers: &Path) -> std::io::Result<()> {
-    if let Some(dossier) = vers.parent() {
-        std::fs::create_dir_all(dossier)?;
-    }
-    if std::fs::rename(de, vers).is_err() {
-        std::fs::copy(de, vers)?;
-        std::fs::remove_file(de)?;
-    }
-    Ok(())
 }
 
 /// Les paroles d'un MP3, si un .lrc l'accompagne, à côté de lui ou dans
@@ -513,7 +461,7 @@ mod tests {
     }
 
     #[test]
-    fn trouve_et_range_les_anciens() {
+    fn trouve_le_lrc_a_cote_puis_dans_notre_dossier() {
         let dossier =
             std::env::temp_dir().join(format!("paroles_rangement_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dossier);
@@ -521,51 +469,16 @@ mod tests {
             dossier: dossier.join("paroles"),
             musique: dossier.join("Musique"),
         };
-        let album = rangement.musique.join("Album");
-        std::fs::create_dir_all(&album).unwrap();
-        let a_nous = album.join("a nous.mp3");
-        let a_elle = album.join("a elle.mp3");
-        let en_double = album.join("en double.mp3");
-        let sans = album.join("sans.mp3");
-        let ecrire = |f: &Path, texte: &str| {
-            std::fs::create_dir_all(f.parent().unwrap()).unwrap();
-            std::fs::write(f, texte).unwrap();
-        };
-        ecrire(
-            &fichier_lrc(&a_nous),
-            "[ar:A]\n[by:LRCLIB : A — B]\n[00:01.00]la",
-        );
-        ecrire(&fichier_lrc(&a_elle), "[00:01.00]mes paroles");
-        ecrire(&fichier_lrc(&en_double), "[by:LRCLIB : X]\n[00:01.00]vieux");
-        ecrire(
-            &rangement.place(&en_double),
-            "[by:LRCLIB : X]\n[00:01.00]rangé",
-        );
-
+        let mp3 = rangement.musique.join("Album").join("chanson.mp3");
+        assert_eq!(rangement.trouver(&mp3), None);
+        let range = rangement.place(&mp3);
+        std::fs::create_dir_all(range.parent().unwrap()).unwrap();
+        std::fs::write(&range, "[00:01.00]rangé").unwrap();
+        assert_eq!(rangement.trouver(&mp3), Some(range));
         // Celui à côté du MP3 passe en premier.
-        assert_eq!(rangement.trouver(&en_double), Some(fichier_lrc(&en_double)));
-        assert_eq!(rangement.trouver(&sans), None);
-
-        let bilan = rangement.ranger_les_anciens(&[
-            a_nous.clone(),
-            a_elle.clone(),
-            en_double.clone(),
-            sans.clone(),
-        ]);
-        assert_eq!(bilan.ranges, 2);
-        assert!(bilan.erreurs.is_empty());
-        // Les nôtres ont quitté la Musique…
-        assert!(!fichier_lrc(&a_nous).exists() && !fichier_lrc(&en_double).exists());
-        assert_eq!(rangement.trouver(&a_nous), Some(rangement.place(&a_nous)));
-        assert!(std::fs::read_to_string(rangement.place(&a_nous))
-            .unwrap()
-            .ends_with("[00:01.00]la"));
-        // …sans écraser celui qui était déjà rangé…
-        assert!(std::fs::read_to_string(rangement.place(&en_double))
-            .unwrap()
-            .ends_with("rangé"));
-        // …et celui de l'utilisatrice n'a pas bougé.
-        assert_eq!(rangement.trouver(&a_elle), Some(fichier_lrc(&a_elle)));
+        std::fs::create_dir_all(mp3.parent().unwrap()).unwrap();
+        std::fs::write(fichier_lrc(&mp3), "[00:01.00]à côté").unwrap();
+        assert_eq!(rangement.trouver(&mp3), Some(fichier_lrc(&mp3)));
         std::fs::remove_dir_all(&dossier).unwrap();
     }
 }

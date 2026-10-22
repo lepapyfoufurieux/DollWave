@@ -217,8 +217,7 @@ struct LecteurApp {
     pochette: Option<(PathBuf, Option<egui::TextureHandle>)>,
     // Affiche-t-on les paroles synchronisées (fichier .lrc à côté du MP3) ?
     afficher_paroles: bool,
-    // Le résultat du dernier clic sur « Ranger les anciens .lrc » (ou une
-    // erreur d'ouverture du dossier des paroles), affiché dans les options.
+    // L'erreur d'ouverture du dossier des paroles, affichée dans les options.
     message_paroles: Option<String>,
     // Les paroles du morceau en cours, et le fichier dont elles viennent
     // (pour ne relire le .lrc que quand le morceau change). Rien sans .lrc.
@@ -943,8 +942,7 @@ impl LecteurApp {
         self.effets.menu(ui);
     }
 
-    /// Sous la case « Paroles » : ouvrir le dossier des paroles, et y ranger
-    /// les .lrc que les anciennes versions avaient mis à côté des MP3.
+    /// Sous la case « Paroles » : ouvrir le dossier des paroles.
     fn options_paroles(&mut self, ui: &mut egui::Ui) {
         let Some(rangement) = paroles::Rangement::du_lecteur() else {
             return;
@@ -956,34 +954,6 @@ impl LecteurApp {
                 .clicked()
             {
                 self.message_paroles = systeme::ouvrir_le_dossier(&rangement.dossier).err();
-            }
-            let morceaux = self.bibliotheque.morceaux();
-            if ui
-                .add_enabled(
-                    !morceaux.is_empty(),
-                    egui::Button::new("Ranger les anciens .lrc").small(),
-                )
-                .on_hover_text(
-                    "Déplace dans le dossier des paroles les .lrc que le lecteur avait \
-                     créés à côté des MP3 de la bibliothèque. Les .lrc que tu as mis \
-                     toi-même ne bougent pas.",
-                )
-                .clicked()
-            {
-                let bilan = rangement.ranger_les_anciens(&morceaux);
-                let mut message = match bilan.ranges {
-                    0 => "Aucun .lrc à ranger.".to_string(),
-                    1 => "1 .lrc rangé.".to_string(),
-                    n => format!("{n} .lrc rangés."),
-                };
-                if let Some((fichier, erreur)) = bilan.erreurs.first() {
-                    message += &format!(
-                        "\n{} n'ont pas pu être déplacés (ex. {} : {erreur}).",
-                        bilan.erreurs.len(),
-                        fichier.display()
-                    );
-                }
-                self.message_paroles = Some(message);
             }
         });
         if let Some(message) = &self.message_paroles {
