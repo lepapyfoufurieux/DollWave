@@ -1230,7 +1230,7 @@ dependencies = [
 
 [[package]]
 name = "dollwave"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "dirs 6.0.0",
  "eframe",

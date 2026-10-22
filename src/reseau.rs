@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 const AGENT: &str = concat!(
     "dollwave/",
     env!("CARGO_PKG_VERSION"),
-    " (https://github.com/lepapyfoufurieux/lecteur_mp3)"
+    " (https://github.com/lepapyfoufurieux/DollWave)"
 );
 /// Taille maximale d'une réponse (une grande pochette tient largement).
 const TAILLE_MAX: u64 = 20 * 1024 * 1024;
