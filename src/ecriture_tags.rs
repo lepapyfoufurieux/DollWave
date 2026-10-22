@@ -53,6 +53,8 @@ pub struct Modifications {
 /// fichier d'origine n'a pas été modifié.
 #[derive(Debug)]
 pub enum Erreur {
+    /// Les tags ID3 ne s'écrivent que dans les MP3 (pas les FLAC, WAV, OGG).
+    PasUnMp3,
     LectureSeule,
     Introuvable,
     /// Les tags du fichier sont abîmés : on ne les réécrit pas, de peur de
@@ -73,6 +75,7 @@ pub enum Erreur {
 impl fmt::Display for Erreur {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
+            Erreur::PasUnMp3 => write!(f, "seuls les tags des MP3 se modifient pour l'instant"),
             Erreur::LectureSeule => write!(f, "le fichier est en lecture seule"),
             Erreur::Introuvable => write!(f, "le fichier est introuvable"),
             Erreur::TagsIllisibles(e) => write!(f, "ses tags actuels sont abîmés ({e})"),
@@ -178,6 +181,12 @@ fn type_d_image(donnees: &[u8]) -> Result<&'static str, Erreur> {
 /// Lit les tags du fichier, laisse `changer` les modifier, et les réécrit
 /// sans risque pour le fichier (voir le haut de ce module).
 pub fn modifier(chemin: &Path, changer: impl FnOnce(&mut Tag)) -> Result<(), Erreur> {
+    if !chemin
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("mp3"))
+    {
+        return Err(Erreur::PasUnMp3);
+    }
     let infos = match fs::metadata(chemin) {
         Ok(infos) => infos,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Err(Erreur::Introuvable),
@@ -484,6 +493,21 @@ mod tests {
             Err(Erreur::ImageInvalide)
         ));
         assert_eq!(fs::read(&chemin).unwrap(), avant);
+    }
+
+    /// Les tags ID3 ne vont que dans les MP3 : un FLAC ou un OGG n'est pas
+    /// touché (son volume égalisé ne peut pas non plus y être écrit).
+    #[test]
+    fn un_fichier_qui_n_est_pas_un_mp3_n_est_pas_touche() {
+        let dossier = std::env::temp_dir().join("lecteur_mp3_tests_tags");
+        fs::create_dir_all(&dossier).unwrap();
+        let chemin = dossier.join("ecrire pas un mp3.flac");
+        fs::write(&chemin, include_bytes!("../tests/glissando.flac")).unwrap();
+        let avant = fs::read(&chemin).unwrap();
+        let erreur = enregistrer(&chemin, &textes(&[(Champ::Titre, "Autre")]));
+        assert!(matches!(erreur, Err(Erreur::PasUnMp3)));
+        assert_eq!(fs::read(&chemin).unwrap(), avant);
+        assert!(!copie_de(&chemin).exists());
     }
 
     #[test]

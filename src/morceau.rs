@@ -1,7 +1,8 @@
-//! Le « morceau » : un fichier MP3 prêt à être lu à n'importe quel endroit.
+//! Le « morceau » : un fichier audio (MP3, FLAC, WAV ou OGG) prêt à être lu à
+//! n'importe quel endroit.
 //!
 //! On ne décode pas tout le fichier d'un coup (cela prendrait environ 40 Mo pour
-//! 4 minutes et figerait la fenêtre). On garde le MP3 compressé en mémoire,
+//! 4 minutes et figerait la fenêtre). On garde le fichier compressé en mémoire,
 //! découpé en blocs d'environ une seconde, et on ne décode que les blocs autour
 //! de l'endroit écouté. Un fil en arrière-plan prépare les blocs voisins à
 //! l'avance, pour que le scratch reste fluide.
@@ -21,13 +22,14 @@ use symphonia::core::codecs::{CodecParameters, Decoder, DecoderOptions};
 use symphonia::core::errors::Error as ErreurSymphonia;
 use symphonia::core::formats::{FormatOptions, FormatReader, Packet};
 use symphonia::core::io::{MediaSource, MediaSourceStream};
-use symphonia::default::codecs::MpaDecoder;
+use symphonia::core::meta::MetadataOptions;
+use symphonia::core::probe::Hint;
 use symphonia::default::formats::MpaReader;
 
 /// Durée visée pour un bloc, en secondes.
 const SECONDES_PAR_BLOC: f64 = 1.0;
 /// Pour décoder un bloc, on commence quelques paquets plus tôt : un paquet MP3
-/// a besoin de la fin des précédents pour être décodé correctement.
+/// (ou OGG) a besoin de la fin des précédents pour être décodé correctement.
 const AMORCE: usize = 8;
 /// Nombre de blocs que le fil d'arrière-plan prépare de chaque côté de l'endroit écouté.
 const A_PREPARER: usize = 8;
@@ -41,8 +43,8 @@ const PAUSE_PREPARATION: Duration = Duration::from_secs(1);
 
 /// Ce dont on tire le son.
 enum Contenu {
-    /// Les paquets du fichier MP3, encore compressés.
-    Mp3 {
+    /// Les paquets du fichier, encore compressés.
+    Compresse {
         paquets: Vec<Packet>,
         parametres: CodecParameters,
         /// Pour chaque bloc, les numéros de ses paquets.
@@ -95,7 +97,7 @@ impl Reveil {
 }
 
 impl Morceau {
-    /// Prépare un fichier MP3 : lit ses paquets (sans les décoder) et lance le
+    /// Prépare un fichier audio : lit ses paquets (sans les décoder) et lance le
     /// fil qui décode les blocs à l'avance.
     /// `abandonne` permet d'arrêter en route (on a demandé un autre morceau
     /// entre-temps) : inutile de lire tout un long fichier pour rien.
@@ -104,20 +106,20 @@ impl Morceau {
         abandonne: &AtomicBool,
     ) -> Result<Arc<Self>, Box<dyn std::error::Error>> {
         let source = Box::new(File::open(chemin)?);
-        let morceau = Arc::new(Self::depuis_tant_que(source, || {
+        let morceau = Arc::new(Self::depuis_tant_que(source, extension(chemin), || {
             !abandonne.load(Ordering::Relaxed)
         })?);
         morceau.lancer_la_preparation();
         Ok(morceau)
     }
 
-    /// Ouvre un MP3 pour le parcourir une seule fois en entier (pour mesurer
+    /// Ouvre un morceau pour le parcourir une seule fois en entier (pour mesurer
     /// son volume) : pas de fil qui prépare les blocs, voir `parcourir`.
     pub fn ouvrir_pour_parcourir(
         chemin: &Path,
         continuer: impl Fn() -> bool,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        Self::depuis_tant_que(Box::new(File::open(chemin)?), continuer)
+        Self::depuis_tant_que(Box::new(File::open(chemin)?), extension(chemin), continuer)
     }
 
     /// Décode tout le morceau, du début à la fin, et passe le son à `f` petit
@@ -125,13 +127,12 @@ impl Morceau {
     /// dès que `f` renvoie faux, et renvoie faux dans ce cas.
     pub fn parcourir(&self, mut f: impl FnMut(&[i16]) -> bool) -> bool {
         match &self.contenu {
-            Contenu::Mp3 {
+            Contenu::Compresse {
                 paquets,
                 parametres,
                 ..
             } => {
-                let Ok(mut decodeur) = MpaDecoder::try_new(parametres, &DecoderOptions::default())
-                else {
+                let Ok(mut decodeur) = nouveau_decodeur(parametres) else {
                     return true; // rien de lisible : rien à parcourir
                 };
                 let mut tampon: Option<SampleBuffer<i16>> = None;
@@ -161,30 +162,29 @@ impl Morceau {
         thread::spawn(move || preparer_en_continu(suivi, &reveil));
     }
 
-    /// Lit tous les paquets d'un MP3 et les regroupe en blocs.
+    /// Lit tous les paquets d'un fichier et les regroupe en blocs.
+    /// `extension` (« mp3 », « flac »…) aide à reconnaître le format.
     #[cfg(test)]
-    fn depuis(source: Box<dyn MediaSource>) -> Result<Self, Box<dyn std::error::Error>> {
-        Self::depuis_tant_que(source, || true)
+    fn depuis(
+        source: Box<dyn MediaSource>,
+        extension: &str,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::depuis_tant_que(source, extension, || true)
     }
 
     /// Comme `depuis`, mais s'arrête (avec une erreur) dès que `continuer`
     /// renvoie faux.
     fn depuis_tant_que(
         source: Box<dyn MediaSource>,
+        extension: &str,
         continuer: impl Fn() -> bool,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        let source = sauter_les_tags_id3(source)?;
-        let flux = MediaSourceStream::new(source, Default::default());
-        let options = FormatOptions {
-            enable_gapless: true,
-            ..Default::default()
-        };
-        let mut lecteur = MpaReader::try_new(flux, &options)?;
-        let parametres = lecteur
+        let mut lecteur = ouvrir_le_format(source, extension)?;
+        let piste = lecteur
             .default_track()
-            .ok_or("le fichier ne contient pas de son")?
-            .codec_params
-            .clone();
+            .ok_or("le fichier ne contient pas de son")?;
+        let numero_de_piste = piste.id;
+        let parametres = piste.codec_params.clone();
         let canaux = parametres.channels.map_or(0, |c| c.count());
         let frequence = parametres.sample_rate.unwrap_or(0);
         if canaux == 0 || frequence == 0 {
@@ -197,6 +197,8 @@ impl Morceau {
                 return Err("lecture abandonnée".into());
             }
             match lecteur.next_packet() {
+                // Un OGG peut contenir plusieurs pistes : on ne garde que la première.
+                Ok(paquet) if paquet.track_id() != numero_de_piste => {}
                 Ok(paquet) => paquets.push(paquet),
                 // Fin du fichier (ou fichier abîmé à la fin) : on garde ce qu'on a.
                 Err(ErreurSymphonia::IoError(_)) => break,
@@ -229,7 +231,7 @@ impl Morceau {
             frequence,
             nb_trames,
             debuts,
-            Contenu::Mp3 {
+            Contenu::Compresse {
                 paquets,
                 parametres,
                 paquets_des_blocs,
@@ -351,7 +353,7 @@ impl Morceau {
         let trames = self.trames_du_bloc(n);
         let longueur = trames.len() * self.canaux;
         let mut echantillons = match &self.contenu {
-            Contenu::Mp3 {
+            Contenu::Compresse {
                 paquets,
                 parametres,
                 paquets_des_blocs,
@@ -459,6 +461,46 @@ fn resumer(
 /// symphonia ne les saute pas : il cherchait du son dans la pochette, et des
 /// octets qui y ressemblaient par hasard donnaient un faux morceau (muet, à la
 /// mauvaise fréquence, d'une durée fausse).
+/// L'extension du fichier (« mp3 », « flac »…), vide s'il n'en a pas.
+fn extension(chemin: &Path) -> &str {
+    chemin.extension().and_then(|e| e.to_str()).unwrap_or("")
+}
+
+/// Ouvre le fichier pour en lire les paquets, selon son format.
+fn ouvrir_le_format(
+    source: Box<dyn MediaSource>,
+    extension: &str,
+) -> Result<Box<dyn FormatReader>, Box<dyn std::error::Error>> {
+    let options = FormatOptions {
+        enable_gapless: true,
+        ..Default::default()
+    };
+    if extension.eq_ignore_ascii_case("mp3") {
+        // Pour un MP3, on ouvre directement le lecteur MP3 (la reconnaissance
+        // automatique se trompe parfois sur les MP3 abîmés), mais il ne saute
+        // pas les tags ID3 tout seul.
+        let source = sauter_les_tags_id3(source)?;
+        let flux = MediaSourceStream::new(source, Default::default());
+        return Ok(Box::new(MpaReader::try_new(flux, &options)?));
+    }
+    // Les autres formats (FLAC, WAV, OGG) : symphonia les reconnaît.
+    let mut indice = Hint::new();
+    indice.with_extension(extension);
+    let flux = MediaSourceStream::new(source, Default::default());
+    let sonde = symphonia::default::get_probe().format(
+        &indice,
+        flux,
+        &options,
+        &MetadataOptions::default(),
+    )?;
+    Ok(sonde.format)
+}
+
+/// Le décodeur qui convient aux paquets (MP3, FLAC, PCM ou Vorbis).
+fn nouveau_decodeur(parametres: &CodecParameters) -> Result<Box<dyn Decoder>, ErreurSymphonia> {
+    symphonia::default::get_codecs().make(parametres, &DecoderOptions::default())
+}
+
 fn sauter_les_tags_id3(mut source: Box<dyn MediaSource>) -> std::io::Result<Box<dyn MediaSource>> {
     loop {
         let debut = source.stream_position()?;
@@ -482,7 +524,7 @@ fn decoder_paquets(
     canaux: usize,
 ) -> Vec<i16> {
     let mut sortie = Vec::new();
-    let Ok(mut decodeur) = MpaDecoder::try_new(parametres, &DecoderOptions::default()) else {
+    let Ok(mut decodeur) = nouveau_decodeur(parametres) else {
         return sortie; // le bloc restera silencieux
     };
     let mut tampon: Option<SampleBuffer<i16>> = None;
@@ -566,12 +608,12 @@ mod tests {
     const GLISSANDO: &[u8] = include_bytes!("../tests/glissando.mp3");
 
     fn glissando() -> Morceau {
-        Morceau::depuis(Box::new(Cursor::new(GLISSANDO.to_vec()))).unwrap()
+        Morceau::depuis(Box::new(Cursor::new(GLISSANDO.to_vec())), "mp3").unwrap()
     }
 
     /// Tout le morceau décodé d'un seul coup, du début à la fin, comme avant.
     fn decodage_complet(morceau: &Morceau) -> Vec<i16> {
-        let Contenu::Mp3 {
+        let Contenu::Compresse {
             paquets,
             parametres,
             ..
@@ -610,6 +652,36 @@ mod tests {
                 .unwrap();
             assert_eq!(bloc.len(), attendu.len(), "bloc {n}");
             assert!(ecart_max <= 1, "bloc {n} : écart {ecart_max}");
+        }
+    }
+
+    /// Le même glissando de 4 secondes, converti dans les autres formats :
+    /// (contenu, extension, canaux, fréquence).
+    const AUTRES_FORMATS: [(&[u8], &str, usize, u32); 3] = [
+        (include_bytes!("../tests/glissando.flac"), "flac", 1, 8000),
+        (include_bytes!("../tests/glissando.wav"), "wav", 1, 8000),
+        (include_bytes!("../tests/glissando.ogg"), "ogg", 2, 44_100),
+    ];
+
+    #[test]
+    fn les_flac_wav_et_ogg_se_lisent_bloc_par_bloc() {
+        for (contenu, extension, canaux, frequence) in AUTRES_FORMATS {
+            let morceau = Morceau::depuis(Box::new(Cursor::new(contenu.to_vec())), extension)
+                .unwrap_or_else(|e| panic!("{extension} : {e}"));
+            assert_eq!(morceau.canaux, canaux, "{extension}");
+            assert_eq!(morceau.frequence, frequence, "{extension}");
+            let duree = morceau.duree().as_secs_f64();
+            assert!((3.9..4.1).contains(&duree), "{extension} : {duree} s");
+            assert_eq!(morceau.debuts.len(), 4, "{extension}");
+
+            let complet = decodage_complet(&morceau);
+            assert_eq!(complet.len(), morceau.nb_trames * canaux, "{extension}");
+            assert!(complet.iter().any(|e| e.abs() > 8000), "{extension} : muet");
+            for n in [2, 0, 3, 1] {
+                let trames = morceau.trames_du_bloc(n);
+                let attendu = &complet[trames.start * canaux..trames.end * canaux];
+                assert_eq!(&morceau.bloc(n)[..], attendu, "{extension}, bloc {n}");
+            }
         }
     }
 
@@ -709,8 +781,8 @@ mod tests {
     #[test]
     fn une_lecture_abandonnee_s_arrete() {
         let source = || Box::new(Cursor::new(GLISSANDO.to_vec()));
-        assert!(Morceau::depuis_tant_que(source(), || false).is_err());
-        assert!(Morceau::depuis_tant_que(source(), || true).is_ok());
+        assert!(Morceau::depuis_tant_que(source(), "mp3", || false).is_err());
+        assert!(Morceau::depuis_tant_que(source(), "mp3", || true).is_ok());
     }
 
     /// Un tag ID3v2 (comme une pochette) dont le contenu ressemble par hasard
@@ -734,7 +806,7 @@ mod tests {
         // morceau durait 15 minutes au lieu de 3 et restait muet.
         let mut fichier = tag_id3_trompeur();
         fichier.extend_from_slice(GLISSANDO);
-        let morceau = Morceau::depuis(Box::new(Cursor::new(fichier))).unwrap();
+        let morceau = Morceau::depuis(Box::new(Cursor::new(fichier)), "mp3").unwrap();
         let attendu = glissando();
         assert_eq!(morceau.frequence, 44_100);
         assert_eq!(morceau.canaux, 2);

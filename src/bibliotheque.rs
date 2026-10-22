@@ -57,7 +57,7 @@ impl Dossier {
                     if sous_dossier.total > 0 {
                         dossier.sous_dossiers.push(sous_dossier);
                     }
-                } else if est_un_mp3(&chemin) {
+                } else if est_un_morceau(&chemin) {
                     dossier.morceaux.push(chemin);
                 }
             }
@@ -91,9 +91,9 @@ impl Dossier {
     }
 }
 
-/// Tous les MP3 d'un dossier et de ses sous-dossiers, dans l'ordre où la
+/// Tous les morceaux d'un dossier et de ses sous-dossiers, dans l'ordre où la
 /// bibliothèque les affiche (et les ajoute avec « ➕ tout »).
-pub fn mp3_du_dossier(chemin: &Path) -> Vec<PathBuf> {
+pub fn morceaux_du_dossier(chemin: &Path) -> Vec<PathBuf> {
     let mut morceaux = Vec::new();
     Dossier::lire(chemin).tous_les_morceaux(&mut morceaux);
     morceaux
@@ -1244,11 +1244,17 @@ fn espacer_les_milliers(n: usize) -> String {
     texte
 }
 
-/// Le fichier se termine-t-il par .mp3 (ou .MP3, .Mp3…) ?
-pub fn est_un_mp3(chemin: &Path) -> bool {
-    chemin
-        .extension()
-        .is_some_and(|e| e.eq_ignore_ascii_case("mp3"))
+/// Les extensions des fichiers audio que le lecteur sait lire.
+pub const EXTENSIONS_AUDIO: [&str; 5] = ["mp3", "flac", "wav", "ogg", "oga"];
+
+/// Le fichier est-il un morceau qu'on sait lire (.mp3, .flac, .wav, .ogg,
+/// en majuscules ou en minuscules) ?
+pub fn est_un_morceau(chemin: &Path) -> bool {
+    chemin.extension().is_some_and(|e| {
+        EXTENSIONS_AUDIO
+            .iter()
+            .any(|connue| e.eq_ignore_ascii_case(connue))
+    })
 }
 
 /// Les petits fichiers où l'on mémorise nos réglages.
@@ -1825,10 +1831,15 @@ mod tests {
     }
 
     #[test]
-    fn reconnait_les_mp3() {
-        assert!(est_un_mp3(Path::new("a.mp3")));
-        assert!(est_un_mp3(Path::new("a.Mp3")));
-        assert!(!est_un_mp3(Path::new("a.mp3.txt")));
-        assert!(!est_un_mp3(Path::new("mp3")));
+    fn reconnait_les_fichiers_audio() {
+        assert!(est_un_morceau(Path::new("a.mp3")));
+        assert!(est_un_morceau(Path::new("a.Mp3")));
+        assert!(est_un_morceau(Path::new("a.flac")));
+        assert!(est_un_morceau(Path::new("a.WAV")));
+        assert!(est_un_morceau(Path::new("a.ogg")));
+        assert!(!est_un_morceau(Path::new("a.jpg")));
+        assert!(!est_un_morceau(Path::new("a.lrc")));
+        assert!(!est_un_morceau(Path::new("a.mp3.txt")));
+        assert!(!est_un_morceau(Path::new("mp3")));
     }
 }
