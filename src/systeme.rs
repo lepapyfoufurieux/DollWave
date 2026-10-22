@@ -66,6 +66,23 @@ pub fn montrer_le_fichier(chemin: &Path) -> Result<(), String> {
     }
 }
 
+/// Ouvre un dossier dans le gestionnaire de fichiers (sous Windows :
+/// l'Explorateur), en le créant s'il n'existe pas encore.
+pub fn ouvrir_le_dossier(dossier: &Path) -> Result<(), String> {
+    std::fs::create_dir_all(dossier)
+        .map_err(|e| format!("Impossible de créer le dossier : {e}"))?;
+    let commande = if cfg!(windows) {
+        "explorer"
+    } else {
+        "xdg-open"
+    };
+    std::process::Command::new(commande)
+        .arg(dossier)
+        .spawn()
+        .map(drop)
+        .map_err(|e| format!("Impossible d'ouvrir le dossier : {e}"))
+}
+
 /// Ailleurs que sous Windows, pas encore d'icône près de l'horloge : la
 /// croix ferme le lecteur, comme d'habitude. (Sous Linux, il faudra une autre
 /// bibliothèque que sous Windows, voir la to do.)

@@ -314,6 +314,14 @@ impl Bibliotheque {
         self.contenu.as_ref().map(|c| c.tous.len())
     }
 
+    /// Tous les morceaux de la bibliothèque (aucun tant qu'elle n'est pas lue).
+    pub fn morceaux(&self) -> Vec<PathBuf> {
+        self.contenu
+            .as_ref()
+            .map(|c| c.tous.iter().map(|e| e.chemin.clone()).collect())
+            .unwrap_or_default()
+    }
+
     /// Dessine la bibliothèque. Renvoie ce qu'on y a demandé en cliquant.
     /// `dans_la_liste` : les morceaux déjà dans la liste, marqués d'un ✔.
     /// `tags` : les tags des morceaux, pour les nommer et pour la recherche.
@@ -557,7 +565,8 @@ impl Bibliotheque {
             )
             .on_hover_text(
                 "Chercher sur Internet (LRCLIB) les paroles synchronisées des morceaux \
-                 qui n'ont pas encore de fichier .lrc, et les ranger à côté des MP3.\n\
+                 qui n'ont pas encore de fichier .lrc, et les ranger dans le dossier \
+                 des paroles du lecteur (pas dans ta Musique).\n\
                  Les .lrc qui existent déjà ne sont jamais remplacés.",
             );
         if bouton.clicked() {
