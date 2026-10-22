@@ -212,6 +212,7 @@ fn ouvrir<T>(
 /// Les tags déjà lus, pour la bibliothèque et la liste de lecture. Les
 /// fichiers sont lus en arrière-plan, un par un, pour que la fenêtre ne se
 /// fige jamais ; en attendant, on affiche le nom du fichier.
+#[derive(Clone)]
 pub struct TagsConnus {
     partage: Arc<(Mutex<Etat>, Condvar)>,
 }
@@ -307,6 +308,21 @@ impl TagsConnus {
 
     pub fn album(&self, chemin: &Path) -> Option<String> {
         self.avec(chemin, |tags| tags.and_then(|t| t.album.clone()))
+    }
+
+    /// L'artiste et l'album en minuscules, pour comparer deux morceaux
+    /// (aléatoire optimisé). Rien tant que les tags ne sont pas lus.
+    pub fn artiste_et_album(&self, chemin: &Path) -> (Option<String>, Option<String>) {
+        let minuscules = |t: &Option<String>| {
+            t.as_deref()
+                .map(|t| t.trim().to_lowercase())
+                .filter(|t| !t.is_empty())
+        };
+        self.avec(chemin, |tags| {
+            tags.map_or((None, None), |t| {
+                (minuscules(&t.artiste), minuscules(&t.album))
+            })
+        })
     }
 
     pub fn duree(&self, chemin: &Path) -> Option<Duration> {
