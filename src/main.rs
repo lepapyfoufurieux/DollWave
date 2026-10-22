@@ -1535,7 +1535,7 @@ impl LecteurApp {
                     let echelle = (cadre.width() / image.x).max(cadre.height() / image.y);
                     let visible = cadre.size() / (image * echelle);
                     let uv = egui::Rect::from_center_size(egui::pos2(0.5, 0.5), visible);
-                    peintre.image(floue.id(), cadre, uv, egui::Color32::from_gray(150));
+                    peintre.image(floue.id(), cadre, uv, egui::Color32::from_gray(120));
                 }
                 // Devant : la pochette en entier, au centre.
                 let place = theme::place_entiere(cadre, pochette.size_vec2());
