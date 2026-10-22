@@ -1228,8 +1228,17 @@ mod tests {
     #[test]
     fn un_503_dit_que_les_sites_sont_indisponibles() {
         let dossier = dossier_de_test("503");
+        // Des noms à part : `mp3` passe par un fichier temporaire à ce nom,
+        // partagé avec les tests qui tournent en même temps.
         let morceaux: Vec<PathBuf> = (1..=5)
-            .map(|n| mp3(&dossier, &format!("{n}.mp3"), &format!("Album {n}"), false))
+            .map(|n| {
+                mp3(
+                    &dossier,
+                    &format!("503-{n}.mp3"),
+                    &format!("Album {n}"),
+                    false,
+                )
+            })
             .collect();
         let progression = Mutex::new(Progression::default());
         completer(
