@@ -4,7 +4,7 @@
 //!
 //! Le .lrc peut être à côté du MP3 (mis là par l'utilisateur, ou créé par
 //! une ancienne version du lecteur), ou dans notre dossier des paroles
-//! (%APPDATA%\lecteur_mp3\paroles), qui reprend les sous-dossiers de la
+//! (%APPDATA%\dollwave\paroles), qui reprend les sous-dossiers de la
 //! Musique : ceux que le lecteur crée y sont rangés, pour ne pas encombrer
 //! le dossier Musique.
 //!
@@ -43,8 +43,8 @@ pub struct Rangement {
 }
 
 impl Rangement {
-    /// Le rangement du lecteur : %APPDATA%\lecteur_mp3\paroles sous Windows,
-    /// ~/.config/lecteur_mp3/paroles sous Linux.
+    /// Le rangement du lecteur : %APPDATA%\dollwave\paroles sous Windows,
+    /// ~/.config/dollwave/paroles sous Linux.
     pub fn du_lecteur() -> Option<Self> {
         Some(Self {
             dossier: crate::systeme::fichier_de_reglage("paroles")?,
@@ -418,7 +418,7 @@ mod tests {
     #[test]
     fn place_dans_notre_dossier() {
         let rangement = Rangement {
-            dossier: PathBuf::from("/config/lecteur_mp3/paroles"),
+            dossier: PathBuf::from("/config/dollwave/paroles"),
             musique: PathBuf::from("/maison/Musique"),
         };
         // Dans la Musique : mêmes sous-dossiers.
@@ -426,24 +426,24 @@ mod tests {
             rangement.place(Path::new(
                 "/maison/Musique/Daft Punk/Discovery/01 - Intro.mp3"
             )),
-            Path::new("/config/lecteur_mp3/paroles/Daft Punk/Discovery/01 - Intro.lrc")
+            Path::new("/config/dollwave/paroles/Daft Punk/Discovery/01 - Intro.lrc")
         );
         // Ailleurs : sous « autres », avec tout le chemin.
         assert_eq!(
             rangement.place(Path::new("/media/cle/Son/a.b.mp3")),
-            Path::new("/config/lecteur_mp3/paroles/autres/media/cle/Son/a.b.lrc")
+            Path::new("/config/dollwave/paroles/autres/media/cle/Son/a.b.lrc")
         );
         // Jamais en dehors de notre dossier.
         assert!(rangement
             .place(Path::new("/maison/../../etc/x.mp3"))
-            .starts_with("/config/lecteur_mp3/paroles/autres"));
+            .starts_with("/config/dollwave/paroles/autres"));
     }
 
     #[cfg(windows)]
     #[test]
     fn place_sous_windows() {
         let rangement = Rangement {
-            dossier: PathBuf::from(r"C:\Users\Luce\AppData\Roaming\lecteur_mp3\paroles"),
+            dossier: PathBuf::from(r"C:\Users\Luce\AppData\Roaming\dollwave\paroles"),
             musique: PathBuf::from(r"C:\Users\Luce\Music"),
         };
         assert_eq!(

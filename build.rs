@@ -9,8 +9,8 @@ fn main() {
         let mut ressources = winresource::WindowsResource::new();
         ressources
             .set_icon("assets/icone/icone.ico")
-            .set("ProductName", "Lecteur MP3")
-            .set("FileDescription", "Lecteur MP3");
+            .set("ProductName", "Doll//Wave")
+            .set("FileDescription", "Doll//Wave");
         ressources
             .compile()
             .expect("impossible de ranger l'icône dans le .exe");

@@ -1,8 +1,8 @@
-# Compile lecteur_mp3.exe sur un Windows de GitHub.
+# Compile dollwave.exe sur un Windows de GitHub.
 # Un second job compile aussi sous Linux, pour vérifier que le lecteur
 # reste facile à porter.
 # Après le .exe, Inno Setup fabrique l'installateur
-# (installateur/lecteur_mp3.iss).
+# (installateur/dollwave.iss).
 # - À chaque pull request ou lancement manuel : le .exe et l'installateur
 #   sont disponibles dans l'onglet « Actions » (rubrique « Artifacts »)
 #   pour les tester.
@@ -41,21 +41,21 @@ jobs:
         run: |
           choco upgrade innosetup -y --no-progress
           $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"').Matches[0].Groups[1].Value
-          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "/DVersion=$version" installateur\lecteur_mp3.iss
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "/DVersion=$version" installateur\dollwave.iss
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - uses: actions/upload-artifact@v4
         with:
-          name: lecteur_mp3
+          name: dollwave
           path: |
-            target/release/lecteur_mp3.exe
-            target/installateur/lecteur_mp3-installation.exe
+            target/release/dollwave.exe
+            target/installateur/dollwave-installation.exe
 
       - name: Publication de la Release
         if: startsWith(github.ref, 'refs/tags/v')
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "${{ github.ref_name }}" target/release/lecteur_mp3.exe target/installateur/lecteur_mp3-installation.exe --title "Lecteur MP3 ${{ github.ref_name }}" --generate-notes
+        run: gh release create "${{ github.ref_name }}" target/release/dollwave.exe target/installateur/dollwave-installation.exe --title "Doll//Wave ${{ github.ref_name }}" --generate-notes
 
   linux:
     runs-on: ubuntu-latest

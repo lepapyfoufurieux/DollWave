@@ -1,4 +1,4 @@
-# lecteur_mp3
+# Doll//Wave
 
 Un lecteur de fichiers MP3 pour Windows, écrit en Rust.
 
@@ -21,15 +21,15 @@ cargo run --release
 
 ## Créer le .exe
 
-Pour obtenir un `lecteur_mp3.exe` autonome (qui se lance sans Rust) :
+Pour obtenir un `dollwave.exe` autonome (qui se lance sans Rust) :
 
 ```
 cargo build --release
 ```
 
-Le fichier se trouve ensuite dans `target\release\lecteur_mp3.exe`. On peut le
+Le fichier se trouve ensuite dans `target\release\dollwave.exe`. On peut le
 copier où on veut et le partager : la police est intégrée dedans, et les
-réglages sont rangés dans `%APPDATA%\lecteur_mp3`.
+réglages sont rangés dans `%APPDATA%\dollwave`.
 
 Le .exe est aussi compilé automatiquement par GitHub : pour chaque version
 (étiquette `v0.1.0`, `v0.2.0`…), il est téléchargeable sur la page

@@ -1,5 +1,5 @@
 //! Les playlists : des listes de lecture enregistrées, chacune dans un
-//! fichier .m3u du dossier %APPDATA%\lecteur_mp3\playlists. Le .m3u est un
+//! fichier .m3u du dossier %APPDATA%\dollwave\playlists. Le .m3u est un
 //! simple fichier texte (un morceau par ligne) que VLC ou Winamp savent
 //! aussi ouvrir.
 
@@ -990,7 +990,7 @@ mod tests {
     use super::*;
 
     fn dossier_de_test(nom: &str) -> PathBuf {
-        let racine = std::env::temp_dir().join(format!("lecteur_mp3_test_playlists_{nom}"));
+        let racine = std::env::temp_dir().join(format!("dollwave_test_playlists_{nom}"));
         let _ = std::fs::remove_dir_all(&racine);
         racine
     }

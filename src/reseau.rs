@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 /// LRCLIB et MusicBrainz demandent que chaque logiciel se présente.
 const AGENT: &str = concat!(
-    "lecteur_mp3/",
+    "dollwave/",
     env!("CARGO_PKG_VERSION"),
     " (https://github.com/lepapyfoufurieux/lecteur_mp3)"
 );

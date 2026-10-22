@@ -63,6 +63,7 @@ use tags::TagsConnus;
 use visualiseur::Visualiseur;
 
 fn main() -> eframe::Result {
+    systeme::reprendre_les_anciens_reglages();
     // Les fichiers donnés au lancement : celui sur lequel on a double-cliqué
     // dans l'explorateur (ou plusieurs). Si un lecteur est déjà ouvert, il
     // les reçoit, et on s'arrête là. Les chemins sont rendus complets : le
@@ -88,7 +89,7 @@ fn main() -> eframe::Result {
         ..Default::default()
     };
     eframe::run_native(
-        "Lecteur MP3",
+        "Doll//Wave",
         options,
         Box::new(|cc| {
             let mut lecteur = LecteurApp::new(&cc.egui_ctx);
@@ -2932,7 +2933,7 @@ mod tests {
             return; // pas de son sur ce PC (machine de test)
         }
         let fort = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/glissando.mp3");
-        let dossier = std::env::temp_dir().join("lecteur_mp3_test_egalisation_fondu");
+        let dossier = std::env::temp_dir().join("dollwave_test_egalisation_fondu");
         std::fs::create_dir_all(&dossier).unwrap();
         let calme = dossier.join("calme.mp3");
         std::fs::copy(&fort, &calme).unwrap();

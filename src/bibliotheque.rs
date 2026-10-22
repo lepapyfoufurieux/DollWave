@@ -1468,7 +1468,7 @@ mod tests {
 
     /// Crée un dossier de test vide, propre à chaque test.
     fn dossier_de_test(nom: &str) -> PathBuf {
-        let racine = std::env::temp_dir().join(format!("lecteur_mp3_test_{nom}"));
+        let racine = std::env::temp_dir().join(format!("dollwave_test_{nom}"));
         let _ = std::fs::remove_dir_all(&racine);
         std::fs::create_dir_all(&racine).unwrap();
         racine
@@ -1547,7 +1547,7 @@ mod tests {
         assert!(trouves("beatles").is_empty());
         assert!(trouves("mp3").is_empty());
         // Le nom du dossier de musique lui-même ne compte pas.
-        assert!(trouves("lecteur_mp3_test").is_empty());
+        assert!(trouves("dollwave_test").is_empty());
         std::fs::remove_dir_all(&racine).unwrap();
     }
 

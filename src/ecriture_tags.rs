@@ -499,7 +499,7 @@ mod tests {
     /// touché (son volume égalisé ne peut pas non plus y être écrit).
     #[test]
     fn un_fichier_qui_n_est_pas_un_mp3_n_est_pas_touche() {
-        let dossier = std::env::temp_dir().join("lecteur_mp3_tests_tags");
+        let dossier = std::env::temp_dir().join("dollwave_tests_tags");
         fs::create_dir_all(&dossier).unwrap();
         let chemin = dossier.join("ecrire pas un mp3.flac");
         fs::write(&chemin, include_bytes!("../tests/glissando.flac")).unwrap();
@@ -536,7 +536,7 @@ mod tests {
 
     #[test]
     fn un_fichier_introuvable() {
-        let chemin = std::env::temp_dir().join("lecteur_mp3_tests_tags/n existe pas.mp3");
+        let chemin = std::env::temp_dir().join("dollwave_tests_tags/n existe pas.mp3");
         let erreur = enregistrer(&chemin, &textes(&[(Champ::Titre, "Autre")]));
         assert!(matches!(erreur, Err(Erreur::Introuvable)));
     }

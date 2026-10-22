@@ -661,7 +661,7 @@ mod tests {
     /// Un dossier de test vide avec une copie du vrai MP3 de test (sans
     /// tags ReplayGain), et le chemin du fichier des mesures.
     fn dossier_de_test(nom: &str) -> (PathBuf, PathBuf) {
-        let dossier = std::env::temp_dir().join(format!("lecteur_mp3_test_{nom}"));
+        let dossier = std::env::temp_dir().join(format!("dollwave_test_{nom}"));
         let _ = std::fs::remove_dir_all(&dossier);
         std::fs::create_dir_all(&dossier).unwrap();
         let morceau = dossier.join("glissando.mp3");
