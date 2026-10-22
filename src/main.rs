@@ -2097,7 +2097,11 @@ impl eframe::App for LecteurApp {
             ctx.request_repaint_after(Duration::from_millis(if en_lecture { 100 } else { 200 }));
         } else if anime && !reduite {
             // 30 images par seconde suffisent pour un visualiseur fluide.
-            ctx.request_repaint_after(cadence::attente(self.debut_image, Instant::now()));
+            // egui avance de lui-même le rendez-vous de la durée prévue d'une
+            // image (pour ne pas le rater) : on la rajoute, sinon on
+            // retomberait à la cadence de l'écran.
+            let image = Duration::from_secs_f32(ctx.input(|i| i.predicted_dt));
+            ctx.request_repaint_after(cadence::attente(self.debut_image, Instant::now()) + image);
         } else {
             ctx.request_repaint_after(Duration::from_millis(200));
         }
