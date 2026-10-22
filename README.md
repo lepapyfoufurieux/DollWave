@@ -138,3 +138,10 @@ files attached.
 - [souvlaki](https://github.com/Sinono3/souvlaki) for media keys and the
   media panel
 - [id3](https://github.com/polyfloyd/rust-id3) for tags
+
+## License
+
+Doll//Wave is released under the [MIT License](LICENSE).
+
+The embedded fonts (Inter, Orbitron, Rajdhani, Share Tech Mono) are under the
+SIL Open Font License; their licenses are in `assets/polices`.
