@@ -24,6 +24,7 @@ mod police;
 mod raccourcis;
 mod regroupement;
 mod reprise;
+mod reseau;
 mod sortie;
 mod systeme;
 mod tags;
