@@ -177,7 +177,7 @@ struct LecteurApp {
     muet: bool,
     // Au Stop et à la Pause, le son ralentit-il comme un vinyle qu'on arrête
     // à la main (et accélère-t-il à la Lecture) ?
-    // Les effets néon : lignes d'écran, lueurs qui respirent.
+    // Les effets néon : lignes d'écran ou écran cathodique, lueurs qui respirent.
     effets: effets::Effets,
     freinage: bool,
     // Quand on fait glisser la barre de progression, la musique suit-elle
@@ -1487,9 +1487,12 @@ impl LecteurApp {
             }
         }
         // Les lignes de la pochette sous les paroles, pour qu'elles se lisent
-        // bien (celles de la fenêtre ne passent pas ici).
-        theme::lignes_d_ecran(&peintre, cadre, 3.0, 56.0);
-        self.effets.proteger(cadre);
+        // bien (celles de la fenêtre ne passent pas ici). L'écran cathodique,
+        // lui, passe par-dessus tout, paroles comprises.
+        if !self.effets.cathodique() {
+            theme::lignes_d_ecran(&peintre, cadre, 3.0, 56.0);
+            self.effets.proteger(cadre);
+        }
         if let Some(paroles) = paroles {
             paroles.afficher(ui, cadre, position);
         }
