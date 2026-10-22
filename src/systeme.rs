@@ -130,8 +130,8 @@ pub fn autoriser_le_premier_plan() {}
 /// build.rs).
 const ICONE_GRANDE: &[u8] = include_bytes!("../assets/icone/icone-256.png");
 
-/// La même icône en 32 pixels, pour la zone près de l'horloge.
-#[cfg_attr(not(windows), allow(dead_code))]
+/// La même icône en 32 pixels, pour la zone près de l'horloge et le coin du
+/// bandeau.
 const ICONE_PETITE: &[u8] = include_bytes!("../assets/icone/icone-32.png");
 
 /// L'icône de la fenêtre du lecteur.
@@ -139,10 +139,9 @@ pub fn icone_fenetre() -> eframe::egui::IconData {
     eframe::icon_data::from_png_bytes(ICONE_GRANDE).unwrap_or_default()
 }
 
-/// L'icône près de l'horloge : ses pixels (rouge, vert, bleu, opacité),
-/// ligne par ligne, et sa taille.
-#[cfg_attr(not(windows), allow(dead_code))]
-fn icone_petite() -> Option<(Vec<u8>, u32, u32)> {
+/// L'icône en 32 pixels (zone près de l'horloge, coin du bandeau) : ses
+/// pixels (rouge, vert, bleu, opacité), ligne par ligne, et sa taille.
+pub fn icone_petite() -> Option<(Vec<u8>, u32, u32)> {
     let image = image::load_from_memory(ICONE_PETITE).ok()?.into_rgba8();
     let (largeur, hauteur) = image.dimensions();
     Some((image.into_raw(), largeur, hauteur))
