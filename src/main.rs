@@ -1698,7 +1698,7 @@ impl LecteurApp {
                 },
             );
             let mini = Bouton::texte("Mini")
-                .allure(theme::Allure::Eteint)
+                .allure(theme::Allure::Allume)
                 .taille(egui::vec2(80.0, 30.0));
             if ui
                 .add(mini)

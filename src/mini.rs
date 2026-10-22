@@ -318,24 +318,24 @@ fn boutons(ui: &mut egui::Ui, affichage: &Affichage, actions: &mut Vec<Action>) 
             let bouton = Bouton::icone(Icone::Precedent)
                 .coins(Coins::haut_gauche(8.0))
                 .taille(carre);
-            if ui.add(bouton).on_hover_text("Morceau précédent").clicked() {
+            if ui.add(bouton).clicked() {
                 actions.push(Action::Precedent);
             }
-            let (icone, aide) = if affichage.en_lecture {
-                (Icone::Pause, "Pause")
+            let icone = if affichage.en_lecture {
+                Icone::Pause
             } else {
-                (Icone::Lecture, "Lecture")
+                Icone::Lecture
             };
             let bouton = Bouton::icone(icone)
                 .allure(Allure::Hexagone)
                 .taille(egui::vec2(40.0, 40.0));
-            if ui.add(bouton).on_hover_text(aide).clicked() {
+            if ui.add(bouton).clicked() {
                 actions.push(Action::LecturePause);
             }
             let bouton = Bouton::icone(Icone::Suivant)
                 .coins(Coins::bas_droit(8.0))
                 .taille(carre);
-            if ui.add(bouton).on_hover_text("Morceau suivant").clicked() {
+            if ui.add(bouton).clicked() {
                 actions.push(Action::Suivant);
             }
         });
@@ -344,11 +344,7 @@ fn boutons(ui: &mut egui::Ui, affichage: &Affichage, actions: &mut Vec<Action>) 
                 .petit()
                 .allure(Allure::Eteint)
                 .taille(egui::vec2(92.0, 26.0));
-            if ui
-                .add(bouton)
-                .on_hover_text("Revenir au lecteur en grand")
-                .clicked()
-            {
+            if ui.add(bouton).clicked() {
                 actions.push(Action::Agrandir);
             }
         });
