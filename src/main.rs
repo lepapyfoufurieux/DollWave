@@ -1786,11 +1786,7 @@ impl LecteurApp {
                 .couleur(theme::MAGENTA)
                 .allume(aleatoire)
                 .taille(egui::vec2(86.0, 32.0));
-            let bouton = ui.add(bouton).on_hover_text(if aleatoire {
-                "Lecture aléatoire : activée"
-            } else {
-                "Lecture aléatoire : désactivée"
-            });
+            let bouton = ui.add(bouton);
             if bouton.clicked() {
                 self.liste.changer_aleatoire(!aleatoire);
             }
@@ -1800,11 +1796,7 @@ impl LecteurApp {
                 .couleur(theme::MAGENTA)
                 .allume(repetition)
                 .taille(egui::vec2(98.0, 32.0));
-            let bouton = ui.add(bouton).on_hover_text(if repetition {
-                "Répétition de la liste : activée"
-            } else {
-                "Répétition de la liste : désactivée"
-            });
+            let bouton = ui.add(bouton);
             if bouton.clicked() {
                 self.liste.changer_repetition(!repetition);
             }
