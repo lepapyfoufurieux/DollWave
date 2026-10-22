@@ -3,6 +3,7 @@
 
 mod bandeau;
 mod bibliotheque;
+mod chercher_pochettes;
 mod depot;
 mod ecoutes;
 mod ecriture_tags;
@@ -2031,6 +2032,21 @@ impl eframe::App for LecteurApp {
             if demandes.paroles_ecrites.contains(chemin) {
                 self.paroles = None;
             }
+        }
+        // Des MP3 viennent de recevoir une pochette : leur taille a changé,
+        // et si c'est le morceau en cours, on relit sa pochette.
+        for chemin in &demandes.pochettes_ecrites {
+            self.infos.oublier(chemin);
+        }
+        let touche = |chemin: &PathBuf| demandes.pochettes_ecrites.contains(chemin);
+        if self.pochette.as_ref().is_some_and(|(p, _)| touche(p))
+            || self
+                .pochette_en_cours
+                .as_ref()
+                .is_some_and(|(p, _)| touche(p))
+        {
+            self.pochette = None;
+            self.pochette_en_cours = None;
         }
         if let Some(chemins) = demandes.tags_a_modifier {
             self.editeur = Some(EditeurTags::ouvrir(ctx, chemins, &self.tags));
