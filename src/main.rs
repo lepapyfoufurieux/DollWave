@@ -3,6 +3,7 @@
 
 mod bandeau;
 mod bibliotheque;
+mod cadence;
 mod chercher_pochettes;
 mod depot;
 mod ecoutes;
@@ -190,6 +191,9 @@ struct LecteurApp {
     // à la main (et accélère-t-il à la Lecture) ?
     // Les effets néon : lignes d'écran, lueurs qui respirent.
     effets: effets::Effets,
+    /// La mesure du processeur (⚙ Options) et le début de l'image en cours.
+    mesure: cadence::Mesure,
+    debut_image: Instant,
     freinage: bool,
     // Quand on fait glisser la barre de progression, la musique suit-elle
     // la souris (bruit de scratch) ? Sinon, elle continue et saute au lâcher.
@@ -392,6 +396,8 @@ impl LecteurApp {
             volume: 0.5,
             muet: false,
             effets: effets::Effets::charger(),
+            mesure: cadence::Mesure::new(Instant::now()),
+            debut_image: Instant::now(),
             freinage: option_memorisee(REGLAGE_FREINAGE),
             scratch: option_memorisee(REGLAGE_SCRATCH),
             egalisation: option_memorisee(REGLAGE_EGALISATION),
@@ -975,6 +981,11 @@ impl LecteurApp {
         }
         ui.separator();
         self.effets.menu(ui);
+        ui.checkbox(&mut self.mesure.affichee, "Mesure du processeur")
+            .on_hover_text(
+                "Affiche en bas à droite le nombre d'images par seconde et le \
+                 temps de processeur pris par chaque image",
+            );
     }
 
     /// Sous la case « Paroles » : ouvrir le dossier des paroles.
@@ -2033,6 +2044,9 @@ impl eframe::App for LecteurApp {
 
     // Appelée à chaque image : on (re)dessine toute l'interface.
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        self.debut_image = Instant::now();
+        self.mesure
+            .compter(frame.info().cpu_usage, self.debut_image);
         // Les raccourcis clavier passent avant l'interface (voir raccourcis::lire),
         // tout comme le menu de l'icône près de l'horloge.
         for commande in raccourcis::lire(ctx) {
@@ -2090,12 +2104,13 @@ impl eframe::App for LecteurApp {
         self.media.morceau(en_cours);
 
         // Pendant la lecture (ou en pause, le temps que les barres retombent),
-        // on redessine à chaque image de l'écran pour que le visualiseur soit fluide.
+        // on redessine 30 fois par seconde pour que le visualiseur soit fluide.
         // Sinon (en pause, à l'arrêt, ou fenêtre réduite : rien ne bouge à
         // l'écran), de temps en temps suffit pour voir l'état changer et
         // passer au morceau suivant.
         // Les lignes d'écran, une fois tous les panneaux dessinés.
         self.effets.dessiner(ctx);
+        self.mesure.dessiner(ctx);
 
         let en_lecture = self.platine_active().is_some_and(Telecommande::tourne);
         let reduite = ctx.input(|i| i.viewport().minimized == Some(true));
@@ -2105,7 +2120,12 @@ impl eframe::App for LecteurApp {
             // assez souvent comme ça.
             ctx.request_repaint_after(Duration::from_millis(if en_lecture { 100 } else { 200 }));
         } else if anime && !reduite {
-            ctx.request_repaint();
+            // 30 images par seconde suffisent pour un visualiseur fluide.
+            // egui avance de lui-même le rendez-vous de la durée prévue d'une
+            // image (pour ne pas le rater) : on la rajoute, sinon on
+            // retomberait à la cadence de l'écran.
+            let image = Duration::from_secs_f32(ctx.input(|i| i.predicted_dt));
+            ctx.request_repaint_after(cadence::attente(self.debut_image, Instant::now()) + image);
         } else {
             ctx.request_repaint_after(Duration::from_millis(200));
         }
