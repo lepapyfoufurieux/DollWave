@@ -3,6 +3,7 @@
 
 mod bandeau;
 mod bibliotheque;
+mod courbure;
 mod depot;
 mod ecoutes;
 mod ecriture_tags;
@@ -1915,6 +1916,21 @@ impl LecteurApp {
 }
 
 impl eframe::App for LecteurApp {
+    /// Avec l'écran cathodique, les clics suivent l'image bombée.
+    fn raw_input_hook(&mut self, ctx: &egui::Context, entree: &mut egui::RawInput) {
+        self.effets.redresser_entree(ctx, entree);
+    }
+
+    /// Le fond derrière l'image : noir autour de l'écran cathodique bombé
+    /// (comme le cadre d'une vieille télé), celui d'eframe sinon.
+    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
+        if self.effets.cathodique() {
+            egui::Color32::BLACK.to_normalized_gamma_f32()
+        } else {
+            egui::Color32::from_rgba_unmultiplied(12, 12, 12, 180).to_normalized_gamma_f32()
+        }
+    }
+
     /// À la fermeture, on mémorise où on en était.
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         self.memoriser_l_ecoute(None);

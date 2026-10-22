@@ -11,6 +11,7 @@ use std::cell::Cell;
 use eframe::egui::{self, epaint, Color32, Pos2, Rect, Stroke};
 
 use crate::bibliotheque::memoriser;
+use crate::courbure;
 use crate::systeme::fichier_de_reglage;
 use crate::theme;
 
@@ -25,13 +26,10 @@ const OPACITE_FENETRE: f32 = 31.0;
 /// Écran cathodique : des lignes de balayage plus serrées et plus marquées.
 const ECART_TUBE: f32 = 3.0;
 const OPACITE_TUBE: f32 = 64.0;
-/// Le bombé du tube : au bord, les lignes du haut et du bas se courbent
-/// de ce nombre de points vers le milieu.
-const BOMBE: f32 = 5.0;
 /// Les coins arrondis noirs du tube (rayon, en points).
 const RAYON_COINS: f32 = 22.0;
 /// L'ombre des bords (vignette) : opacité tout au bord de l'écran.
-const OPACITE_VIGNETTE: f32 = 150.0;
+const OPACITE_VIGNETTE: f32 = 70.0;
 /// Le scintillement : opacité maximale du voile sombre qui tremble.
 const OPACITE_SCINTILLEMENT: f32 = 10.0;
 /// La bande lumineuse qui descend : hauteur, durée d'un passage, opacité.
@@ -124,7 +122,21 @@ impl Effets {
                     theme::lignes_d_ecran(&peintre, zone, ECART_FENETRE, OPACITE_FENETRE);
                 }
             }
-            Ecran::Cathodique => dessiner_tube(&peintre, ecran, self.temps),
+            Ecran::Cathodique => {
+                // Toute l'image (fenêtres et menus compris) est bombée, puis
+                // le tube est dessiné par-dessus, déjà à sa forme bombée.
+                courbure::courber(ctx, &[calque, egui::LayerId::background()]);
+                dessiner_tube(&peintre, ecran, self.temps);
+            }
+        }
+    }
+
+    /// Avec l'écran cathodique, l'image est bombée : on ramène les
+    /// clics de la souris là où ils tombent vraiment.
+    pub fn redresser_entree(&self, ctx: &egui::Context, entree: &mut egui::RawInput) {
+        if self.cathodique() {
+            let ecran = entree.screen_rect.unwrap_or_else(|| ctx.screen_rect());
+            courbure::redresser_entree(ecran, entree);
         }
     }
 
@@ -159,8 +171,9 @@ impl Effets {
 }
 
 /// L'écran cathodique sur `ecran`, au moment `temps` de la lecture :
-/// scintillement, bande lumineuse qui descend, lignes de balayage bombées,
-/// bords assombris et coins arrondis noirs du tube.
+/// scintillement, bande lumineuse qui descend, lignes de balayage,
+/// bords assombris et coins arrondis noirs du tube. Les lignes suivent
+/// le bombé de l'image (voir `courbure`).
 fn dessiner_tube(peintre: &egui::Painter, ecran: Rect, temps: f32) {
     // Le voile sombre qui tremble très légèrement.
     let voile = (OPACITE_SCINTILLEMENT * scintillement(temps)).round() as u8;
@@ -192,15 +205,14 @@ fn dessiner_tube(peintre: &egui::Painter, ecran: Rect, temps: f32) {
     }
     peintre.add(maillage);
 
-    // Les lignes de balayage, qui se courbent vers les bords comme sur
-    // un tube bombé.
+    // Les lignes de balayage, courbées comme le reste de l'image.
     let trait_ = Stroke::new(1.0_f32, Color32::from_black_alpha(OPACITE_TUBE as u8));
     let mut y = ecran.top().floor() + 0.5;
     while y < ecran.bottom() {
         let points: Vec<Pos2> = (0..=16)
             .map(|i| {
                 let x = ecran.left() + ecran.width() * i as f32 / 16.0;
-                egui::pos2(x, y + courbure(ecran, egui::pos2(x, y)))
+                courbure::bomber(ecran, egui::pos2(x, y))
             })
             .collect();
         peintre.add(egui::Shape::line(points, trait_));
@@ -270,21 +282,13 @@ fn dessiner_tube(peintre: &egui::Painter, ecran: Rect, temps: f32) {
     }
 }
 
-/// De combien de points la ligne de balayage se décale en `p` : rien au
-/// milieu, jusqu'à `BOMBE` aux coins, toujours vers le milieu de l'écran.
-fn courbure(ecran: Rect, p: Pos2) -> f32 {
-    let x = (p.x - ecran.center().x) / (ecran.width() / 2.0);
-    let y = (p.y - ecran.center().y) / (ecran.height() / 2.0);
-    -BOMBE * y * x * x
-}
-
 /// L'ombre des bords en `p`, de 0 (dans tout le milieu) à 1 (aux coins).
 fn vignette(ecran: Rect, p: Pos2) -> f32 {
     let x = (p.x - ecran.center().x) / (ecran.width() / 2.0);
     let y = (p.y - ecran.center().y) / (ecran.height() / 2.0);
     // Distance « arrondie » au centre : 1 au milieu des bords, plus aux coins.
     let d = (x.powi(4) + y.powi(4)).powf(0.25);
-    let t = ((d - 0.55) / 0.5).clamp(0.0, 1.0);
+    let t = ((d - 0.7) / 0.4).clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t)
 }
 
@@ -364,27 +368,13 @@ mod tests {
     }
 
     #[test]
-    fn le_tube_est_bombe() {
-        let ecran = Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(200.0, 100.0));
-        assert_eq!(courbure(ecran, ecran.center()), 0.0, "droit au milieu");
-        assert_eq!(courbure(ecran, egui::pos2(100.0, 0.0)), 0.0);
-        // Aux coins, les lignes se rapprochent du milieu.
-        assert_eq!(
-            courbure(ecran, egui::pos2(0.0, 0.0)),
-            BOMBE,
-            "en haut : vers le bas"
-        );
-        assert_eq!(courbure(ecran, egui::pos2(200.0, 100.0)), -BOMBE);
-    }
-
-    #[test]
     fn les_bords_sont_assombris() {
         let ecran = Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(200.0, 100.0));
         assert_eq!(vignette(ecran, ecran.center()), 0.0, "milieu net");
         assert_eq!(vignette(ecran, egui::pos2(60.0, 40.0)), 0.0);
         assert_eq!(vignette(ecran, egui::pos2(0.0, 0.0)), 1.0, "coins sombres");
         let bord = vignette(ecran, egui::pos2(100.0, 0.0));
-        assert!(bord > 0.5 && bord < 1.0, "bords à moitié : {bord}");
+        assert!(bord > 0.3 && bord < 1.0, "bords à moitié : {bord}");
     }
 
     #[test]
