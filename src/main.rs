@@ -3,12 +3,14 @@
 
 mod bandeau;
 mod bibliotheque;
+mod chercher_pochettes;
 mod depot;
 mod ecoutes;
 mod ecriture_tags;
 mod editeur_tags;
 mod effets;
 mod egalisation;
+mod fenetre;
 mod generer_paroles;
 mod hud;
 mod infos_fichier;
@@ -77,6 +79,8 @@ fn main() -> eframe::Result {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1320.0, 900.0])
             .with_min_inner_size(mini::TAILLE_MIN_GRANDE)
+            // Pas de cadre du système : le bandeau néon sert de barre de titre.
+            .with_decorations(false)
             .with_icon(systeme::icone_fenetre()),
         ..Default::default()
     };
@@ -146,6 +150,8 @@ const AVANCE_OUVERTURE: Duration = Duration::from_secs(20);
 const REGLAGE_ENCHAINEMENT: &str = "fondu_enchaine.txt";
 /// Le petit fichier où l'on mémorise si les paroles (.lrc) sont affichées.
 const REGLAGE_PAROLES: &str = "paroles.txt";
+/// Le petit fichier où l'on mémorise si l'aléatoire optimisé est coché.
+const REGLAGE_ALEATOIRE_OPTIMISE: &str = "aleatoire_optimise.txt";
 
 /// L'état de l'application.
 struct LecteurApp {
@@ -166,6 +172,8 @@ struct LecteurApp {
     playlists: Playlists,
     // Les morceaux à jouer, et lequel est en cours.
     liste: ListeDeLecture,
+    // En aléatoire, éviter d'enchaîner deux morceaux du même artiste ou album ?
+    aleatoire_optimise: bool,
     // Le son du morceau en cours, décodé en mémoire.
     morceau: Option<Arc<Morceau>>,
     // Pendant qu'on fait glisser la barre de progression, la position de la
@@ -220,6 +228,8 @@ struct LecteurApp {
     mini: mini::MiniLecteur,
     // Affiche-t-on les paroles synchronisées (fichier .lrc à côté du MP3) ?
     afficher_paroles: bool,
+    // L'erreur d'ouverture du dossier des paroles, affichée dans les options.
+    message_paroles: Option<String>,
     // Les paroles du morceau en cours, et le fichier dont elles viennent
     // (pour ne relire le .lrc que quand le morceau change). Rien sans .lrc.
     paroles: Option<(PathBuf, Option<Paroles>)>,
@@ -358,6 +368,10 @@ impl LecteurApp {
         // (Pendant les tests, jamais : ils jouent des fichiers du projet.)
         let ecrire_volume = !cfg!(test) && option_cochee(REGLAGE_ECRITURE_VOLUME);
         volumes.ecrire_dans_les_fichiers(ecrire_volume);
+        let tags = TagsConnus::new(ctx);
+        let aleatoire_optimise = option_cochee(REGLAGE_ALEATOIRE_OPTIMISE);
+        let mut liste = ListeDeLecture::default();
+        liste.optimiser_aleatoire(aleatoire_optimise.then(|| famille(&tags)));
         Self {
             sortie,
             veilleur: Veilleur::new(maintenant),
@@ -366,7 +380,8 @@ impl LecteurApp {
             telecommande: None,
             bibliotheque: Bibliotheque::new(ctx),
             playlists: Playlists::new(),
-            liste: ListeDeLecture::default(),
+            liste,
+            aleatoire_optimise,
             morceau: None,
             position_glissee: None,
             volume: 0.5,
@@ -382,7 +397,7 @@ impl LecteurApp {
             sortant: None,
             a_suivre: None,
             visualiseur: Visualiseur::new(),
-            tags: TagsConnus::new(ctx),
+            tags,
             zone: ZoneDeNotification::new(ctx),
             media: ControlesMedia::new(),
             boite: Boite::vide(),
@@ -390,6 +405,7 @@ impl LecteurApp {
             pochette: None,
             mini: mini::MiniLecteur::charger(),
             afficher_paroles: option_memorisee(REGLAGE_PAROLES),
+            message_paroles: None,
             paroles: None,
             message,
             depots: depot::Depots::default(),
@@ -931,15 +947,47 @@ impl LecteurApp {
             .checkbox(&mut self.afficher_paroles, "Paroles")
             .on_hover_text(
                 "Si un fichier .lrc porte le même nom que le MP3 (chanson.mp3 → \
-                 chanson.lrc, dans le même dossier), ses paroles défilent sur la \
-                 pochette en même temps que la musique",
+                 chanson.lrc, à côté du MP3 ou dans le dossier des paroles), ses \
+                 paroles défilent sur la pochette en même temps que la musique",
             )
             .changed()
         {
             memoriser_option(REGLAGE_PAROLES, self.afficher_paroles);
         }
+        self.options_paroles(ui);
+        if ui
+            .checkbox(&mut self.aleatoire_optimise, "Aléatoire optimisé")
+            .on_hover_text(
+                "En lecture aléatoire, évite d'enchaîner deux morceaux du même \
+                 artiste ou du même album, quand c'est possible",
+            )
+            .changed()
+        {
+            memoriser_option(REGLAGE_ALEATOIRE_OPTIMISE, self.aleatoire_optimise);
+            self.liste
+                .optimiser_aleatoire(self.aleatoire_optimise.then(|| famille(&self.tags)));
+        }
         ui.separator();
         self.effets.menu(ui);
+    }
+
+    /// Sous la case « Paroles » : ouvrir le dossier des paroles.
+    fn options_paroles(&mut self, ui: &mut egui::Ui) {
+        let Some(rangement) = paroles::Rangement::du_lecteur() else {
+            return;
+        };
+        ui.horizontal(|ui| {
+            if ui
+                .small_button("📂 Dossier des paroles")
+                .on_hover_text(rangement.dossier.display().to_string())
+                .clicked()
+            {
+                self.message_paroles = systeme::ouvrir_le_dossier(&rangement.dossier).err();
+            }
+        });
+        if let Some(message) = &self.message_paroles {
+            ui.label(egui::RichText::new(message).small().weak());
+        }
     }
 
     /// Le facteur du volume égalisé pour le morceau en cours : 1 si
@@ -1843,6 +1891,13 @@ fn option_depuis(texte: Option<&str>) -> bool {
     texte.is_none_or(|t| t.trim() != "non")
 }
 
+/// Pour l'aléatoire optimisé : l'artiste et l'album des morceaux, lus dans
+/// leurs tags.
+fn famille(tags: &TagsConnus) -> liste::Famille {
+    let tags = tags.clone();
+    Box::new(move |chemin| tags.artiste_et_album(chemin))
+}
+
 /// Mémorise une option du menu Options.
 fn memoriser_option(fichier: &str, activee: bool) {
     memoriser(fichier, if activee { "oui" } else { "non" });
@@ -2019,7 +2074,12 @@ impl LecteurApp {
     /// La grande fenêtre : le bandeau, la bibliothèque et les playlists à
     /// gauche, le lecteur au centre.
     fn grande_fenetre(&mut self, ctx: &egui::Context, en_lecture: bool) {
-        // En haut, le bandeau néon (logo et voyants), sur toute la largeur.
+        // Les bords de la fenêtre se tirent pour la redimensionner ; ils
+        // passent avant les panneaux.
+        fenetre::bords(ctx);
+
+        // En haut, le bandeau néon (logo, voyants et boutons de la fenêtre),
+        // sur toute la largeur.
         let voyants = bandeau::Voyants {
             sortie: self.sortie.is_some(),
             bibliotheque: self.bibliotheque.nombre_de_titres().is_some_and(|n| n > 0),
@@ -2081,6 +2141,21 @@ impl LecteurApp {
             if demandes.paroles_ecrites.contains(chemin) {
                 self.paroles = None;
             }
+        }
+        // Des MP3 viennent de recevoir une pochette : leur taille a changé,
+        // et si c'est le morceau en cours, on relit sa pochette.
+        for chemin in &demandes.pochettes_ecrites {
+            self.infos.oublier(chemin);
+        }
+        let touche = |chemin: &PathBuf| demandes.pochettes_ecrites.contains(chemin);
+        if self.pochette.as_ref().is_some_and(|(p, _)| touche(p))
+            || self
+                .pochette_en_cours
+                .as_ref()
+                .is_some_and(|(p, _)| touche(p))
+        {
+            self.pochette = None;
+            self.pochette_en_cours = None;
         }
         if let Some(chemins) = demandes.tags_a_modifier {
             self.editeur = Some(EditeurTags::ouvrir(ctx, chemins, &self.tags));

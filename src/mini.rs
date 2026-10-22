@@ -57,6 +57,8 @@ pub struct MiniLecteur {
     /// La grande fenêtre avant de passer en mini : le coin en haut à gauche
     /// de la fenêtre (barre de titre comprise) et la taille de son intérieur.
     grande: Option<Rect>,
+    /// La grande fenêtre était agrandie (plein écran avec la barre des tâches).
+    agrandie: bool,
     /// La place du mini-lecteur à l'écran (coin en haut à gauche).
     position: Option<Pos2>,
 }
@@ -82,6 +84,7 @@ impl MiniLecteur {
             return;
         }
         let (dehors, dedans) = ctx.input(|i| (i.viewport().outer_rect, i.viewport().inner_rect));
+        self.agrandie = ctx.input(|i| i.viewport().maximized == Some(true));
         self.grande = dehors
             .zip(dedans)
             .map(|(dehors, dedans)| Rect::from_min_size(dehors.min, dedans.size()));
@@ -109,7 +112,6 @@ impl MiniLecteur {
     fn commandes_pour_entrer(&self) -> Vec<ViewportCommand> {
         let mut commandes = vec![
             ViewportCommand::Maximized(false),
-            ViewportCommand::Decorations(false),
             ViewportCommand::Resizable(false),
             ViewportCommand::MinInnerSize(TAILLE),
             ViewportCommand::InnerSize(TAILLE),
@@ -125,7 +127,6 @@ impl MiniLecteur {
     fn commandes_pour_sortir(&self) -> Vec<ViewportCommand> {
         let mut commandes = vec![
             ViewportCommand::WindowLevel(egui::WindowLevel::Normal),
-            ViewportCommand::Decorations(true),
             ViewportCommand::Resizable(true),
         ];
         let taille = self
@@ -135,6 +136,9 @@ impl MiniLecteur {
         commandes.push(ViewportCommand::MinInnerSize(TAILLE_MIN_GRANDE));
         if let Some(grande) = self.grande {
             commandes.push(ViewportCommand::OuterPosition(grande.min));
+        }
+        if self.agrandie {
+            commandes.push(ViewportCommand::Maximized(true));
         }
         commandes
     }
@@ -378,7 +382,6 @@ mod tests {
         assert!(commandes.contains(&ViewportCommand::WindowLevel(
             egui::WindowLevel::AlwaysOnTop
         )));
-        assert!(commandes.contains(&ViewportCommand::Decorations(false)));
         // La taille minimale baisse avant qu'on rapetisse la fenêtre.
         assert!(
             rang(&ViewportCommand::MinInnerSize(TAILLE))
@@ -407,14 +410,36 @@ mod tests {
         let mini = MiniLecteur {
             actif: true,
             grande: Some(grande),
-            position: None,
+            ..Default::default()
         };
         let commandes = mini.commandes_pour_sortir();
         assert!(commandes.contains(&ViewportCommand::WindowLevel(egui::WindowLevel::Normal)));
-        assert!(commandes.contains(&ViewportCommand::Decorations(true)));
+        // La fenêtre n'a jamais le cadre du système : le lecteur dessine sa
+        // propre barre de titre (voir fenetre.rs).
+        assert!(!commandes
+            .iter()
+            .any(|c| matches!(c, ViewportCommand::Decorations(_))));
         assert!(commandes.contains(&ViewportCommand::InnerSize(egui::vec2(1320.0, 900.0))));
         assert!(commandes.contains(&ViewportCommand::OuterPosition(Pos2::new(100.0, 80.0))));
         assert!(commandes.contains(&ViewportCommand::MinInnerSize(TAILLE_MIN_GRANDE)));
+    }
+
+    #[test]
+    fn une_grande_fenetre_agrandie_le_redevient() {
+        let mini = MiniLecteur {
+            actif: true,
+            agrandie: true,
+            ..Default::default()
+        };
+        let commandes = mini.commandes_pour_sortir();
+        assert_eq!(commandes.last(), Some(&ViewportCommand::Maximized(true)));
+        let mini = MiniLecteur {
+            actif: true,
+            ..Default::default()
+        };
+        assert!(!mini
+            .commandes_pour_sortir()
+            .contains(&ViewportCommand::Maximized(true)));
     }
 
     #[test]
@@ -423,7 +448,7 @@ mod tests {
         let mini = MiniLecteur {
             actif: true,
             grande: Some(petite),
-            position: None,
+            ..Default::default()
         };
         assert!(mini
             .commandes_pour_sortir()

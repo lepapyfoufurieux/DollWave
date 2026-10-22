@@ -1,6 +1,12 @@
 //! Les paroles synchronisées : si un fichier .lrc porte le même nom que le
-//! MP3 (chanson.mp3 → chanson.lrc, dans le même dossier), ses paroles
-//! défilent par-dessus la pochette en même temps que la musique.
+//! MP3 (chanson.mp3 → chanson.lrc), ses paroles défilent par-dessus la
+//! pochette en même temps que la musique.
+//!
+//! Le .lrc peut être à côté du MP3 (mis là par l'utilisateur, ou créé par
+//! une ancienne version du lecteur), ou dans notre dossier des paroles
+//! (%APPDATA%\lecteur_mp3\paroles), qui reprend les sous-dossiers de la
+//! Musique : ceux que le lecteur crée y sont rangés, pour ne pas encombrer
+//! le dossier Musique.
 //!
 //! Le format .lrc est un simple fichier texte, une ligne par phrase chantée,
 //! précédée du moment où elle commence :
@@ -23,15 +29,84 @@ pub struct Paroles {
     lignes: Vec<(f32, String)>,
 }
 
-/// Le fichier .lrc qui va avec un MP3 : même nom, même dossier.
+/// Le fichier .lrc à côté d'un MP3 : même nom, même dossier.
 pub fn fichier_lrc(mp3: &Path) -> PathBuf {
     mp3.with_extension("lrc")
 }
 
-/// Les paroles d'un MP3, si un .lrc l'accompagne (et contient au moins une
-/// phrase avec son moment).
+/// Où sont rangées les paroles créées par le lecteur.
+pub struct Rangement {
+    /// Notre dossier des paroles.
+    pub dossier: PathBuf,
+    /// Le dossier Musique, dont on reprend les sous-dossiers.
+    pub musique: PathBuf,
+}
+
+impl Rangement {
+    /// Le rangement du lecteur : %APPDATA%\lecteur_mp3\paroles sous Windows,
+    /// ~/.config/lecteur_mp3/paroles sous Linux.
+    pub fn du_lecteur() -> Option<Self> {
+        Some(Self {
+            dossier: crate::systeme::fichier_de_reglage("paroles")?,
+            musique: crate::systeme::dossier_musique(),
+        })
+    }
+
+    /// La place d'un .lrc dans notre dossier. Un morceau de la Musique garde
+    /// ses sous-dossiers (Musique\Artiste\Album\01.mp3 →
+    /// paroles\Artiste\Album\01.lrc), pour que deux morceaux du même nom ne
+    /// se mélangent pas. Un morceau rangé ailleurs va dans « autres », avec
+    /// tout son chemin (D:\Son\a.mp3 → paroles\autres\D\Son\a.lrc).
+    pub fn place(&self, mp3: &Path) -> PathBuf {
+        let relatif = match mp3.strip_prefix(&self.musique) {
+            Ok(relatif) if !self.musique.as_os_str().is_empty() => relatif.to_path_buf(),
+            _ => {
+                let mut chemin = PathBuf::from("autres");
+                for morceau in mp3.components() {
+                    use std::path::Component;
+                    match morceau {
+                        // « C: » → « C », « \\serveur\partage » → « serveur_partage ».
+                        Component::Prefix(p) => {
+                            let nom: String = p
+                                .as_os_str()
+                                .to_string_lossy()
+                                .chars()
+                                .map(|c| if matches!(c, '\\' | '/') { '_' } else { c })
+                                .filter(|c| !matches!(c, ':' | '?' | '.'))
+                                .collect();
+                            let nom = nom.trim_matches('_');
+                            if !nom.is_empty() {
+                                chemin.push(nom);
+                            }
+                        }
+                        Component::Normal(nom) => chemin.push(nom),
+                        // Jamais de « .. » : on ne sort pas de notre dossier.
+                        _ => {}
+                    }
+                }
+                chemin
+            }
+        };
+        self.dossier.join(relatif).with_extension("lrc")
+    }
+
+    /// Le .lrc d'un MP3 : d'abord celui à côté du MP3 (souvent mis là par
+    /// l'utilisateur), sinon celui de notre dossier.
+    pub fn trouver(&self, mp3: &Path) -> Option<PathBuf> {
+        [fichier_lrc(mp3), self.place(mp3)]
+            .into_iter()
+            .find(|f| f.is_file())
+    }
+}
+
+/// Les paroles d'un MP3, si un .lrc l'accompagne, à côté de lui ou dans
+/// notre dossier (et contient au moins une phrase avec son moment).
 pub fn charger(mp3: &Path) -> Option<Paroles> {
-    let octets = std::fs::read(fichier_lrc(mp3)).ok()?;
+    let fichier = match Rangement::du_lecteur() {
+        Some(rangement) => rangement.trouver(mp3)?,
+        None => fichier_lrc(mp3),
+    };
+    let octets = std::fs::read(fichier).ok()?;
     let paroles = Paroles::lire(&decoder(&octets));
     (!paroles.lignes.is_empty()).then_some(paroles)
 }
@@ -337,6 +412,73 @@ mod tests {
         // Un .lrc sans aucun moment ne compte pas.
         std::fs::write(dossier.join("chanson.lrc"), "Juste du texte").unwrap();
         assert_eq!(charger(&mp3), None);
+        std::fs::remove_dir_all(&dossier).unwrap();
+    }
+
+    #[test]
+    fn place_dans_notre_dossier() {
+        let rangement = Rangement {
+            dossier: PathBuf::from("/config/lecteur_mp3/paroles"),
+            musique: PathBuf::from("/maison/Musique"),
+        };
+        // Dans la Musique : mêmes sous-dossiers.
+        assert_eq!(
+            rangement.place(Path::new(
+                "/maison/Musique/Daft Punk/Discovery/01 - Intro.mp3"
+            )),
+            Path::new("/config/lecteur_mp3/paroles/Daft Punk/Discovery/01 - Intro.lrc")
+        );
+        // Ailleurs : sous « autres », avec tout le chemin.
+        assert_eq!(
+            rangement.place(Path::new("/media/cle/Son/a.b.mp3")),
+            Path::new("/config/lecteur_mp3/paroles/autres/media/cle/Son/a.b.lrc")
+        );
+        // Jamais en dehors de notre dossier.
+        assert!(rangement
+            .place(Path::new("/maison/../../etc/x.mp3"))
+            .starts_with("/config/lecteur_mp3/paroles/autres"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn place_sous_windows() {
+        let rangement = Rangement {
+            dossier: PathBuf::from(r"C:\Users\Luce\AppData\Roaming\lecteur_mp3\paroles"),
+            musique: PathBuf::from(r"C:\Users\Luce\Music"),
+        };
+        assert_eq!(
+            rangement.place(Path::new(r"C:\Users\Luce\Music\Artiste\01.mp3")),
+            rangement.dossier.join(r"Artiste\01.lrc")
+        );
+        assert_eq!(
+            rangement.place(Path::new(r"D:\Son\a.mp3")),
+            rangement.dossier.join(r"autres\D\Son\a.lrc")
+        );
+        assert_eq!(
+            rangement.place(Path::new(r"\\nas\musique\a.mp3")),
+            rangement.dossier.join(r"autres\nas_musique\a.lrc")
+        );
+    }
+
+    #[test]
+    fn trouve_le_lrc_a_cote_puis_dans_notre_dossier() {
+        let dossier =
+            std::env::temp_dir().join(format!("paroles_rangement_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dossier);
+        let rangement = Rangement {
+            dossier: dossier.join("paroles"),
+            musique: dossier.join("Musique"),
+        };
+        let mp3 = rangement.musique.join("Album").join("chanson.mp3");
+        assert_eq!(rangement.trouver(&mp3), None);
+        let range = rangement.place(&mp3);
+        std::fs::create_dir_all(range.parent().unwrap()).unwrap();
+        std::fs::write(&range, "[00:01.00]rangé").unwrap();
+        assert_eq!(rangement.trouver(&mp3), Some(range));
+        // Celui à côté du MP3 passe en premier.
+        std::fs::create_dir_all(mp3.parent().unwrap()).unwrap();
+        std::fs::write(fichier_lrc(&mp3), "[00:01.00]à côté").unwrap();
+        assert_eq!(rangement.trouver(&mp3), Some(fichier_lrc(&mp3)));
         std::fs::remove_dir_all(&dossier).unwrap();
     }
 }

@@ -8,6 +8,7 @@ use std::sync::mpsc::{self, Receiver, TryRecvError};
 
 use eframe::egui;
 
+use crate::chercher_pochettes::RecherchePochettes;
 use crate::generer_paroles::Generation;
 use crate::liste::{nom_du_fichier, rangee};
 use crate::playlists::{menu_clic_droit, ChoixDuMenu, MorceauxGlisses};
@@ -245,6 +246,8 @@ pub struct Bibliotheque {
     /// La recherche des paroles (bouton « 📝 Paroles »), pendant qu'elle
     /// tourne et ensuite tant que son résumé est affiché.
     generation: Option<Generation>,
+    /// La recherche des pochettes (bouton « 🖼 »), pareil.
+    pochettes: Option<RecherchePochettes>,
 }
 
 impl Bibliotheque {
@@ -273,6 +276,7 @@ impl Bibliotheque {
             vue,
             regroupement: None,
             generation: None,
+            pochettes: None,
         };
         bibliotheque.actualiser(ctx);
         bibliotheque
@@ -389,6 +393,7 @@ impl Bibliotheque {
         // Le dossier, et à droite le bouton qui cherche les paroles (.lrc).
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
             self.bouton_paroles(ui);
+            self.bouton_pochettes(ui);
             ui.with_layout(egui::Layout::left_to_right(egui::Align::Min), |ui| {
                 ui.add(
                     egui::Label::new(
@@ -401,6 +406,7 @@ impl Bibliotheque {
             });
         });
         let paroles_ecrites = self.afficher_generation(ui);
+        let pochettes_ecrites = self.afficher_pochettes(ui);
         ui.add_space(4.0);
 
         // Les onglets Dossiers / Artistes / Albums, aux angles coupés aux
@@ -532,7 +538,114 @@ impl Bibliotheque {
             tags_a_modifier,
             infos_a_voir,
             paroles_ecrites,
+            pochettes_ecrites,
         }
+    }
+
+    /// Le bouton « 🖼 » : cherche les pochettes qui manquent dans toute la
+    /// bibliothèque. Grisé pendant la lecture du dossier et pendant une
+    /// recherche de pochettes déjà en cours.
+    fn bouton_pochettes(&mut self, ui: &mut egui::Ui) {
+        let en_cours = self
+            .pochettes
+            .as_ref()
+            .is_some_and(|r| !r.progression().fini);
+        let morceaux = match &self.contenu {
+            Some(contenu) if self.en_cours.is_none() && !en_cours => contenu.tous.as_slice(),
+            _ => &[],
+        };
+        let bouton = ui
+            .add_enabled(
+                !morceaux.is_empty(),
+                theme::Bouton::texte("🖼")
+                    .allure(theme::Allure::Eteint)
+                    .petit()
+                    .taille(egui::vec2(36.0, 24.0)),
+            )
+            .on_hover_text(
+                "Chercher sur Internet (MusicBrainz, puis iTunes) la pochette des albums \
+                 dont des MP3 n'en ont pas, et l'enregistrer dans leurs tags.\n\
+                 Si un morceau de l'album a déjà sa pochette, elle est recopiée dans les autres.\n\
+                 Les pochettes qui existent déjà ne sont jamais remplacées.",
+            );
+        if bouton.clicked() {
+            let chemins = morceaux.iter().map(|e| e.chemin.clone()).collect();
+            self.pochettes = Some(RecherchePochettes::lancer(ui.ctx(), chemins));
+        }
+    }
+
+    /// Où en est la recherche des pochettes (« Pochettes : 3 / 12 albums »,
+    /// bouton « Arrêter »), puis son résumé une fois finie. Renvoie les MP3
+    /// qui viennent de recevoir une pochette.
+    fn afficher_pochettes(&mut self, ui: &mut egui::Ui) -> Vec<PathBuf> {
+        let Some(recherche) = &self.pochettes else {
+            return Vec::new();
+        };
+        let mut fermer = false;
+        let mut p = recherche.progression();
+        let nouveaux = std::mem::take(&mut p.nouveaux);
+        ui.group(|ui| {
+            ui.set_width(ui.available_width());
+            if !p.fini {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    if p.preparation {
+                        ui.label("Pochettes : lecture des tags…");
+                    } else {
+                        ui.label(format!("Pochettes : {} / {} albums", p.faits, p.total));
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if recherche.arret_demande() {
+                            ui.label("Arrêt…");
+                        } else if ui
+                            .small_button("⏹ Arrêter")
+                            .on_hover_text(
+                                "Arrêter la recherche (les pochettes déjà enregistrées restent)",
+                            )
+                            .clicked()
+                        {
+                            recherche.arreter();
+                        }
+                    });
+                });
+                if let Some(album) = &p.en_cours {
+                    ui.add(egui::Label::new(egui::RichText::new(album).small().weak()).truncate());
+                }
+                return;
+            }
+            ui.horizontal(|ui| {
+                ui.strong("Pochettes");
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui
+                        .small_button("✖")
+                        .on_hover_text("Fermer ce résumé")
+                        .clicked()
+                    {
+                        fermer = true;
+                    }
+                });
+            });
+            if let Some(raison) = &p.interruption {
+                ui.label(format!("{raison} ({} / {} albums vus)", p.faits, p.total));
+            }
+            ui.label(format!(
+                "✔ {} trouvées · {} recopiées · {} déjà complètes · {} introuvables",
+                p.trouvees,
+                p.recopiees,
+                p.completes,
+                p.introuvables.len()
+            ));
+            liste_de_noms(ui, "Introuvables", &p.introuvables);
+            if let Some((_, premiere)) = p.erreurs.first() {
+                let noms: Vec<String> = p.erreurs.iter().map(|(n, _)| n.clone()).collect();
+                liste_de_noms(ui, &format!("Erreurs ({premiere})"), &noms);
+            }
+        });
+        drop(p);
+        if fermer {
+            self.pochettes = None;
+        }
+        nouveaux
     }
 
     /// Le bouton « 📝 Paroles » : cherche les .lrc qui manquent dans toute
@@ -557,7 +670,8 @@ impl Bibliotheque {
             )
             .on_hover_text(
                 "Chercher sur Internet (LRCLIB) les paroles synchronisées des morceaux \
-                 qui n'ont pas encore de fichier .lrc, et les ranger à côté des MP3.\n\
+                 qui n'ont pas encore de fichier .lrc, et les ranger dans le dossier \
+                 des paroles du lecteur (pas dans ta Musique).\n\
                  Les .lrc qui existent déjà ne sont jamais remplacés.",
             );
         if bouton.clicked() {
@@ -769,6 +883,28 @@ pub struct Demandes {
     pub infos_a_voir: Option<PathBuf>,
     /// Les morceaux dont le .lrc vient d'être créé (bouton « 📝 Paroles »).
     pub paroles_ecrites: Vec<PathBuf>,
+    /// Les MP3 qui viennent de recevoir une pochette (bouton « 🖼 »).
+    pub pochettes_ecrites: Vec<PathBuf>,
+}
+
+/// Une liste d'albums ou de fichiers du résumé des pochettes, repliée (rien
+/// si elle est vide).
+fn liste_de_noms(ui: &mut egui::Ui, titre: &str, noms: &[String]) {
+    if noms.is_empty() {
+        return;
+    }
+    egui::CollapsingHeader::new(format!("{titre} : {}", noms.len()))
+        .id_salt(("pochettes", titre))
+        .show(ui, |ui| {
+            egui::ScrollArea::vertical()
+                .id_salt(("pochettes", titre))
+                .max_height(120.0)
+                .show(ui, |ui| {
+                    for nom in noms {
+                        ui.label(egui::RichText::new(nom).small());
+                    }
+                });
+        });
 }
 
 /// Une liste de morceaux du résumé des paroles, repliée (rien si elle est vide).
@@ -1535,6 +1671,7 @@ mod tests {
             vue: Vue::Dossiers,
             regroupement: None,
             generation: None,
+            pochettes: None,
         };
         let dans_la_liste = HashSet::new();
         let mut image = |temps: f64, events: Vec<egui::Event>| {
@@ -1640,6 +1777,7 @@ mod tests {
             vue: Vue::Albums,
             regroupement: None,
             generation: None,
+            pochettes: None,
         };
         let dans_la_liste = HashSet::new();
         let mut image = |temps: f64, events: Vec<egui::Event>| {

@@ -1,8 +1,11 @@
 //! Le visualiseur : une image qui bouge avec la musique en cours de lecture.
-//! Trois styles au choix, dans un menu déroulant :
+//! Quatre styles au choix, dans un menu déroulant :
 //! - les barres de fréquences (graves à gauche, aigus à droite) ;
 //! - l'oscilloscope (la vibration du son, en direct) ;
-//! - la forme d'onde (le dessin des 30 secondes autour de l'endroit écouté).
+//! - la forme d'onde (le dessin des 30 secondes autour de l'endroit écouté) ;
+//! - l'ambiance (des couleurs qui tourbillonnent avec la musique, façon Windows Media Player XP).
+
+mod ambiance;
 
 use std::sync::{Arc, OnceLock, Weak};
 use std::thread;
@@ -14,6 +17,7 @@ use crate::bibliotheque::memoriser;
 use crate::morceau::Morceau;
 use crate::systeme::fichier_de_reglage;
 use crate::theme;
+use ambiance::Ambiance;
 
 /// Nombre d'échantillons analysés pour les barres. Plus c'est grand, plus les
 /// graves sont précis, mais plus les barres réagissent lentement.
@@ -52,10 +56,16 @@ pub enum Style {
     Barres,
     Oscilloscope,
     FormeOnde,
+    Ambiance,
 }
 
 impl Style {
-    const TOUS: [Style; 3] = [Style::Barres, Style::Oscilloscope, Style::FormeOnde];
+    const TOUS: [Style; 4] = [
+        Style::Barres,
+        Style::Oscilloscope,
+        Style::FormeOnde,
+        Style::Ambiance,
+    ];
 
     /// Le titre du cadre, en néon, pour ce style.
     fn titre(self) -> &'static str {
@@ -63,6 +73,7 @@ impl Style {
             Style::Barres => "SPECTRE",
             Style::Oscilloscope => "OSCILLOSCOPE",
             Style::FormeOnde => "FORME D'ONDE",
+            Style::Ambiance => "AMBIANCE",
         }
     }
 
@@ -71,6 +82,7 @@ impl Style {
             Style::Barres => "Barres de fréquences",
             Style::Oscilloscope => "Oscilloscope",
             Style::FormeOnde => "Forme d'onde",
+            Style::Ambiance => "Ambiance",
         }
     }
 
@@ -80,6 +92,7 @@ impl Style {
             Style::Barres => "barres",
             Style::Oscilloscope => "oscilloscope",
             Style::FormeOnde => "onde",
+            Style::Ambiance => "ambiance",
         }
     }
 
@@ -108,6 +121,8 @@ pub struct Visualiseur {
     brouillon: Vec<Complex<f32>>,
     /// Hauteur actuelle de chaque barre (entre 0 et 1).
     barres: [f32; NB_BARRES],
+    /// Les formes du style « Ambiance ».
+    ambiance: Ambiance,
     /// Le résumé de la forme d'onde, calculé en arrière-plan une fois par
     /// morceau (vide tant que le calcul n'est pas fini). On ne garde pas le
     /// morceau lui-même (`Weak`) : une fois fini, il peut libérer sa mémoire.
@@ -125,14 +140,19 @@ impl Visualiseur {
             spectre: Vec::with_capacity(TAILLE_FFT),
             brouillon: Vec::new(),
             barres: [0.0; NB_BARRES],
+            ambiance: Ambiance::new(),
             apercu: None,
         }
     }
 
-    /// Vrai quand plus rien ne bouge (les barres sont retombées) : inutile
-    /// alors de redessiner à chaque image.
+    /// Vrai quand plus rien ne bouge (les barres sont retombées, les formes
+    /// de l'ambiance sont immobiles) : inutile alors de redessiner à chaque image.
     pub fn au_repos(&self) -> bool {
-        self.style != Style::Barres || self.barres.iter().all(|&b| b <= 0.0)
+        match self.style {
+            Style::Barres => self.barres.iter().all(|&b| b <= 0.0),
+            Style::Ambiance => self.ambiance.au_repos(),
+            Style::Oscilloscope | Style::FormeOnde => true,
+        }
     }
 
     /// Dessine le cadre du visualiseur : son titre (« SPECTRE »), le menu de
@@ -235,6 +255,18 @@ impl Visualiseur {
                     let curseur = theme::JAUNE;
                     dessiner_forme_onde(&peintre, zone, apercu, position, couleur, grise, curseur);
                 }
+            }
+            Style::Ambiance => {
+                let (forces, onde) = match morceau {
+                    Some(m) if en_lecture => (
+                        self.hauteurs_des_barres(m, position),
+                        m.extrait_mono(position, TAILLE_OSCILLO),
+                    ),
+                    _ => ([0.0; NB_BARRES], Vec::new()),
+                };
+                self.ambiance.adapter(zone.size());
+                self.ambiance.avancer(&forces, &onde, en_lecture, dt);
+                self.ambiance.dessiner(ui.ctx(), &peintre, zone);
             }
         }
         // Les lignes d'écran, plus marquées ici que sur le reste de la fenêtre.
@@ -499,6 +531,34 @@ mod tests {
             images += 1;
         }
         assert!(images <= 60, "{images} images pour retomber");
+    }
+
+    /// L'ambiance bouge pendant la lecture, puis s'immobilise en pause.
+    #[test]
+    fn l_ambiance_bouge_puis_s_immobilise_en_pause() {
+        let morceau = Arc::new(Morceau::sinus(60.0, 44_100, 1.0));
+        let mut visualiseur = Visualiseur::new();
+        visualiseur.style = Style::Ambiance;
+        let ctx = egui::Context::default();
+        crate::police::installer(&ctx);
+        let image = |visualiseur: &mut Visualiseur, en_lecture: bool| {
+            let _ = ctx.run(egui::RawInput::default(), |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    visualiseur.afficher(ui, Some(&morceau), 0.0, en_lecture);
+                });
+            });
+        };
+        image(&mut visualiseur, true);
+        assert!(!visualiseur.au_repos());
+        let mut images = 0;
+        while !visualiseur.au_repos() && images < 200 {
+            image(&mut visualiseur, false);
+            images += 1;
+        }
+        assert!(
+            visualiseur.au_repos(),
+            "toujours en mouvement après {images} images"
+        );
     }
 
     /// La forme d'onde ne garde pas le morceau en mémoire : une fois le
