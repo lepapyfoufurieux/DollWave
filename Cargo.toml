@@ -50,9 +50,14 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_Wind
 
 # Les bibliothèques (décodage MP3 notamment) sont optimisées même en mode
 # développement : sinon le décodage serait très lent avec `cargo run`.
-# Notre propre code reste en mode développement normal.
 [profile.dev.package."*"]
 opt-level = 3
+
+# Notre propre code est un peu optimisé lui aussi : la courbure de l'écran
+# cathodique refait des dizaines de milliers de calculs à chaque image, trop
+# lents sans optimisation. La compilation reste rapide.
+[profile.dev]
+opt-level = 1
 
 # Outils utilisés seulement pendant la compilation (voir build.rs).
 [build-dependencies]
