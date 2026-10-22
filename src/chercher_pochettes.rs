@@ -6,7 +6,11 @@
 //!    autres (sans Internet) ;
 //! 2. sinon on cherche l'album sur MusicBrainz, et sa pochette sur le
 //!    Cover Art Archive (gratuits, sans compte) ;
-//! 3. si rien n'est trouvé, on essaie iTunes (gratuit, sans compte).
+//! 3. si rien n'est trouvé, on essaie Deezer puis iTunes (gratuits, sans
+//!    compte).
+//!
+//! Un morceau sans album est cherché tout seul, par son artiste et son
+//! titre : on prend la pochette de l'album ou du single où il est paru.
 //!
 //! L'image est rangée dans le MP3, comme le fait « Modifier les tags » (voir
 //! `ecriture_tags` : copie vérifiée, puis remplacement). Une pochette déjà
@@ -21,12 +25,14 @@ use std::time::Duration;
 use eframe::egui;
 
 use crate::ecriture_tags::{self, Modifications, Pochette};
-use crate::generer_paroles::{normaliser, ressemblance};
+use crate::generer_paroles::{self, normaliser, ressemblance};
 use crate::reseau::{self, Echec};
 use crate::tags::{self, Tags};
 
 const MUSICBRAINZ: &str = "https://musicbrainz.org/ws/2/release-group/";
 const ITUNES: &str = "https://itunes.apple.com/search";
+const DEEZER_ALBUMS: &str = "https://api.deezer.com/search/album";
+const DEEZER_MORCEAUX: &str = "https://api.deezer.com/search/track";
 /// MusicBrainz accepte une recherche par seconde au plus.
 const PAUSE_ENTRE_RECHERCHES: Duration = Duration::from_millis(1100);
 /// Au-delà de ces ressemblances, la réponse est bien le même album.
@@ -41,10 +47,14 @@ const ECHECS_DE_SUITE_MAX: usize = 3;
 
 // ---------------------------------------------------------------- les albums
 
-/// Un album dont au moins un MP3 n'a pas de pochette.
+/// Un album dont au moins un MP3 n'a pas de pochette (ou un morceau sans
+/// album, voir `morceau`).
 #[derive(Debug, PartialEq)]
 pub struct AlbumACompleter {
     pub album: String,
+    /// Pour un morceau sans album : son titre. On cherche alors le morceau,
+    /// et pas l'album.
+    pub morceau: Option<String>,
     /// L'artiste de l'album, s'il est connu (rien pour une compilation).
     pub artiste: Option<String>,
     /// Les MP3 sans pochette.
@@ -56,9 +66,10 @@ pub struct AlbumACompleter {
 impl AlbumACompleter {
     /// « Album — Artiste », pour la progression et le résumé.
     pub fn libelle(&self) -> String {
+        let nom = self.morceau.as_ref().unwrap_or(&self.album);
         match &self.artiste {
-            Some(artiste) => format!("{} — {artiste}", self.album),
-            None => self.album.clone(),
+            Some(artiste) => format!("{nom} — {artiste}"),
+            None => nom.clone(),
         }
     }
 }
@@ -72,15 +83,19 @@ pub struct MorceauLu {
 
 /// Les albums à compléter, et le nombre d'albums déjà complets. Comme dans
 /// la vue « Albums » : même nom d'album et même artiste de l'album (à
-/// défaut, même dossier, pour une compilation). Les morceaux sans album
-/// sont laissés de côté.
+/// défaut, même dossier, pour une compilation). Les morceaux sans album et
+/// sans pochette sont cherchés un par un, après les albums.
 pub fn albums_a_completer(morceaux: Vec<MorceauLu>) -> (Vec<AlbumACompleter>, usize) {
     // Clé → (album, artistes vus, sans pochette, avec pochette).
     type Groupe = (String, Vec<String>, Vec<PathBuf>, Option<PathBuf>);
     let mut groupes: HashMap<(String, String), Groupe> = HashMap::new();
     let mut ordre = Vec::new();
+    let mut seuls = Vec::new();
     for morceau in morceaux {
         let Some(album) = morceau.tags.album.clone() else {
+            if !morceau.a_une_pochette {
+                seuls.extend(morceau_seul(morceau));
+            }
             continue;
         };
         let second = match &morceau.tags.artiste_album {
@@ -125,13 +140,28 @@ pub fn albums_a_completer(morceaux: Vec<MorceauLu>) -> (Vec<AlbumACompleter>, us
         }
         a_completer.push(AlbumACompleter {
             album,
+            morceau: None,
             // Plusieurs artistes sans « artiste de l'album » : une compilation.
             artiste: (artistes.len() == 1).then(|| artistes[0].clone()),
             sans_pochette,
             avec_pochette,
         });
     }
+    a_completer.extend(seuls);
     (a_completer, complets)
+}
+
+/// Un morceau sans album, à chercher par son titre et son artiste (devinés
+/// comme pour les paroles : tags, nom du fichier, dossier).
+fn morceau_seul(morceau: MorceauLu) -> Option<AlbumACompleter> {
+    let recherche = generer_paroles::preparer(&morceau.chemin, &morceau.tags);
+    Some(AlbumACompleter {
+        album: String::new(),
+        morceau: Some(recherche.titres.first()?.clone()),
+        artiste: recherche.artistes.first().cloned(),
+        sans_pochette: vec![morceau.chemin],
+        avec_pochette: None,
+    })
 }
 
 // ---------------------------------------------------------------- chercher
@@ -140,6 +170,8 @@ pub fn albums_a_completer(morceaux: Vec<MorceauLu>) -> (Vec<AlbumACompleter>, us
 #[derive(Clone, Debug, PartialEq)]
 pub struct Candidat {
     pub album: String,
+    /// Le titre du morceau, quand on a cherché un morceau.
+    pub titre: Option<String>,
     pub artiste: String,
     /// L'adresse de l'image.
     pub image: String,
@@ -178,6 +210,7 @@ pub fn lire_musicbrainz(json: &str) -> Vec<Candidat> {
                 .unwrap_or_default();
             Some(Candidat {
                 album: g.get("title")?.as_str()?.to_string(),
+                titre: None,
                 artiste,
                 image: format!("https://coverartarchive.org/release-group/{id}/front-500"),
             })
@@ -185,8 +218,9 @@ pub fn lire_musicbrainz(json: &str) -> Vec<Candidat> {
         .collect()
 }
 
-/// Lit la réponse JSON d'une recherche d'albums iTunes. L'image est
-/// demandée en 600 pixels (iTunes donne l'adresse de la version 100 px).
+/// Lit la réponse JSON d'une recherche iTunes (d'albums ou de morceaux).
+/// L'image est demandée en 600 pixels (iTunes donne l'adresse de la
+/// version 100 px).
 pub fn lire_itunes(json: &str) -> Vec<Candidat> {
     let Ok(reponse) = serde_json::from_str::<serde_json::Value>(json) else {
         return Vec::new();
@@ -200,6 +234,10 @@ pub fn lire_itunes(json: &str) -> Vec<Candidat> {
             let image = r.get("artworkUrl100")?.as_str()?;
             Some(Candidat {
                 album: r.get("collectionName")?.as_str()?.to_string(),
+                titre: r
+                    .get("trackName")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string),
                 artiste: r
                     .get("artistName")
                     .and_then(|v| v.as_str())
@@ -207,6 +245,37 @@ pub fn lire_itunes(json: &str) -> Vec<Candidat> {
                     .to_string(),
                 // HTTPS seulement : iTunes donne parfois des adresses en http.
                 image: en_https(image).replace("100x100bb", "600x600bb"),
+            })
+        })
+        .collect()
+}
+
+/// Lit la réponse JSON d'une recherche Deezer, d'albums ou de morceaux
+/// (un morceau porte son album). L'image est la plus grande (1000 px).
+pub fn lire_deezer(json: &str) -> Vec<Candidat> {
+    let Ok(reponse) = serde_json::from_str::<serde_json::Value>(json) else {
+        return Vec::new();
+    };
+    let Some(resultats) = reponse.get("data").and_then(|v| v.as_array()) else {
+        return Vec::new();
+    };
+    let texte = |v: &serde_json::Value, cle: &str| v.get(cle)?.as_str().map(str::to_string);
+    resultats
+        .iter()
+        .filter_map(|r| {
+            let artiste = r
+                .get("artist")
+                .and_then(|a| texte(a, "name"))
+                .unwrap_or_default();
+            let (album, titre) = match r.get("album") {
+                Some(album) => (album, texte(r, "title")),
+                None => (r, None),
+            };
+            Some(Candidat {
+                album: texte(album, "title")?,
+                titre,
+                artiste,
+                image: en_https(&texte(album, "cover_xl")?),
             })
         })
         .collect()
@@ -220,9 +289,9 @@ fn en_https(adresse: &str) -> String {
     }
 }
 
-/// Le nom de l'album sans « (Deluxe Edition) », « [Remastered] »… pour
-/// comparer : les éditions d'un même album ont la même pochette, à peu près.
-fn sans_edition(album: &str) -> String {
+/// Le nom de l'album sans « (CD1) », « [Special Edition] »… pour la
+/// recherche : « War Eternal (CD1) » n'existe sur aucun site.
+fn nom_a_chercher(album: &str) -> String {
     let mut texte = String::new();
     let mut profondeur = 0;
     for c in album.chars() {
@@ -233,7 +302,18 @@ fn sans_edition(album: &str) -> String {
             _ => {}
         }
     }
-    let texte = normaliser(&texte);
+    let texte = texte.split_whitespace().collect::<Vec<_>>().join(" ");
+    if texte.is_empty() {
+        album.trim().to_string()
+    } else {
+        texte
+    }
+}
+
+/// Le nom de l'album sans « (Deluxe Edition) », « [Remastered] »… pour
+/// comparer : les éditions d'un même album ont la même pochette, à peu près.
+fn sans_edition(album: &str) -> String {
+    let texte = normaliser(&nom_a_chercher(album));
     if texte.is_empty() {
         normaliser(album)
     } else {
@@ -242,11 +322,16 @@ fn sans_edition(album: &str) -> String {
 }
 
 /// À quel point la réponse ressemble à l'album cherché : le nom, et
-/// l'artiste (s'il est connu). Rien si ce n'est pas le même album.
+/// l'artiste (s'il est connu). Rien si ce n'est pas le même album. Pour un
+/// morceau sans album, on compare le titre du morceau.
 pub fn noter(candidat: &Candidat, album: &AlbumACompleter) -> Option<f64> {
-    let titre = ressemblance(&normaliser(&candidat.album), &normaliser(&album.album))
+    let (trouve, cherche) = match &album.morceau {
+        Some(morceau) => (candidat.titre.as_deref()?, morceau.as_str()),
+        None => (candidat.album.as_str(), album.album.as_str()),
+    };
+    let titre = ressemblance(&normaliser(trouve), &normaliser(cherche))
         // Une autre édition compte un peu moins que le nom exact.
-        .max(0.95 * ressemblance(&sans_edition(&candidat.album), &sans_edition(&album.album)));
+        .max(0.95 * ressemblance(&sans_edition(trouve), &sans_edition(cherche)));
     if titre < TITRE_MIN {
         return None;
     }
@@ -285,15 +370,37 @@ fn entre_guillemets(texte: &str) -> String {
     format!("\"{}\"", texte.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
-/// Les recherches à faire, dans l'ordre : MusicBrainz, puis iTunes.
+/// Les recherches à faire, dans l'ordre : MusicBrainz, Deezer, puis
+/// iTunes. Un morceau sans album : Deezer puis iTunes, par son titre.
 pub fn recherches_a_faire(album: &AlbumACompleter) -> Vec<(Source, Vec<(&'static str, String)>)> {
-    let mut requete = format!("releasegroup:{}", entre_guillemets(&album.album));
+    if let Some(morceau) = &album.morceau {
+        let termes = match &album.artiste {
+            Some(artiste) => format!("{artiste} {morceau}"),
+            None => morceau.clone(),
+        };
+        return vec![
+            (
+                Source::DeezerMorceaux,
+                vec![("q", termes.clone()), ("limit", "10".to_string())],
+            ),
+            (
+                Source::Itunes,
+                vec![
+                    ("term", termes),
+                    ("entity", "song".to_string()),
+                    ("limit", "10".to_string()),
+                ],
+            ),
+        ];
+    }
+    let nom = nom_a_chercher(&album.album);
+    let mut requete = format!("releasegroup:{}", entre_guillemets(&nom));
     if let Some(artiste) = &album.artiste {
         requete += &format!(" AND artist:{}", entre_guillemets(artiste));
     }
     let termes = match &album.artiste {
-        Some(artiste) => format!("{artiste} {}", album.album),
-        None => album.album.clone(),
+        Some(artiste) => format!("{artiste} {nom}"),
+        None => nom,
     };
     vec![
         (
@@ -303,6 +410,10 @@ pub fn recherches_a_faire(album: &AlbumACompleter) -> Vec<(Source, Vec<(&'static
                 ("fmt", "json".to_string()),
                 ("limit", "10".to_string()),
             ],
+        ),
+        (
+            Source::DeezerAlbums,
+            vec![("q", termes.clone()), ("limit", "10".to_string())],
         ),
         (
             Source::Itunes,
@@ -318,6 +429,8 @@ pub fn recherches_a_faire(album: &AlbumACompleter) -> Vec<(Source, Vec<(&'static
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Source {
     MusicBrainz,
+    DeezerAlbums,
+    DeezerMorceaux,
     Itunes,
 }
 
@@ -325,6 +438,8 @@ impl Source {
     fn adresse(self) -> &'static str {
         match self {
             Source::MusicBrainz => MUSICBRAINZ,
+            Source::DeezerAlbums => DEEZER_ALBUMS,
+            Source::DeezerMorceaux => DEEZER_MORCEAUX,
             Source::Itunes => ITUNES,
         }
     }
@@ -332,6 +447,7 @@ impl Source {
     fn lire(self, json: &str) -> Vec<Candidat> {
         match self {
             Source::MusicBrainz => lire_musicbrainz(json),
+            Source::DeezerAlbums | Source::DeezerMorceaux => lire_deezer(json),
             Source::Itunes => lire_itunes(json),
         }
     }
@@ -339,6 +455,7 @@ impl Source {
     fn nom(self) -> &'static str {
         match self {
             Source::MusicBrainz => "Cover Art Archive",
+            Source::DeezerAlbums | Source::DeezerMorceaux => "Deezer",
             Source::Itunes => "iTunes",
         }
     }
@@ -651,6 +768,7 @@ mod tests {
     fn album(nom: &str, artiste: Option<&str>) -> AlbumACompleter {
         AlbumACompleter {
             album: nom.to_string(),
+            morceau: None,
             artiste: artiste.map(str::to_string),
             sans_pochette: Vec::new(),
             avec_pochette: None,
@@ -660,6 +778,7 @@ mod tests {
     fn candidat(album: &str, artiste: &str, image: &str) -> Candidat {
         Candidat {
             album: album.to_string(),
+            titre: None,
             artiste: artiste.to_string(),
             image: image.to_string(),
         }
@@ -721,7 +840,7 @@ mod tests {
             ),
         ]);
         assert_eq!(complets, 1); // Homework
-        assert_eq!(albums.len(), 3);
+        assert_eq!(albums.len(), 4);
         assert_eq!(albums[0].album, "Discovery");
         assert_eq!(albums[0].artiste.as_deref(), Some("Daft Punk"));
         assert_eq!(
@@ -739,6 +858,8 @@ mod tests {
         assert_eq!(albums[1].sans_pochette.len(), 2);
         assert_eq!(albums[2].libelle(), "Live — X");
         assert_eq!(albums[2].sans_pochette.len(), 2);
+        // Le morceau sans album vient après, cherché par son titre.
+        assert_eq!(albums[3].morceau.as_deref(), Some("sans album"));
     }
 
     #[test]
@@ -786,6 +907,84 @@ mod tests {
         );
     }
 
+    /// Exemples de Luce : « War Eternal (CD1) » et « Black Dog Barking
+    /// [Special Edition - CD1] » ne sont trouvés nulle part tels quels.
+    #[test]
+    fn cherche_l_album_sans_cd1_ni_edition() {
+        let recherches = recherches_a_faire(&album("War Eternal (CD1)", Some("Arch Enemy")));
+        let sources: Vec<_> = recherches.iter().map(|(s, _)| *s).collect();
+        assert_eq!(
+            sources,
+            [Source::MusicBrainz, Source::DeezerAlbums, Source::Itunes]
+        );
+        assert_eq!(
+            recherches[0].1[0].1,
+            r#"releasegroup:"War Eternal" AND artist:"Arch Enemy""#
+        );
+        assert_eq!(recherches[1].1[0].1, "Arch Enemy War Eternal");
+        assert_eq!(
+            nom_a_chercher("Black Dog Barking [Special Edition - CD1]"),
+            "Black Dog Barking"
+        );
+        // La réponse « War Eternal » est bien le même album.
+        assert!(noter(
+            &candidat("War Eternal", "Arch Enemy", "x"),
+            &album("War Eternal (CD1)", Some("Arch Enemy"))
+        )
+        .is_some());
+    }
+
+    #[test]
+    fn lit_la_reponse_de_deezer_albums_et_morceaux() {
+        let albums = r#"{"data": [{"title": "War Eternal", "artist": {"name": "Arch Enemy"},
+            "cover_xl": "http://cdn-images.dzcdn.net/images/cover/abc/1000x1000-000000-80-0-0.jpg"}]}"#;
+        assert_eq!(
+            lire_deezer(albums),
+            [candidat(
+                "War Eternal",
+                "Arch Enemy",
+                "https://cdn-images.dzcdn.net/images/cover/abc/1000x1000-000000-80-0-0.jpg"
+            )]
+        );
+        let morceaux = r#"{"data": [{"title": "Tequila Coma", "artist": {"name": "yeule"},
+            "album": {"title": "Evangelic Girl is a Gun", "cover_xl": "https://d/1000.jpg"}}]}"#;
+        let lus = lire_deezer(morceaux);
+        assert_eq!(lus[0].album, "Evangelic Girl is a Gun");
+        assert_eq!(lus[0].titre.as_deref(), Some("Tequila Coma"));
+        assert!(lire_deezer(r#"{"error": {"code": 4}}"#).is_empty());
+    }
+
+    #[test]
+    fn un_morceau_sans_album_est_cherche_par_son_titre() {
+        let (albums, _) = albums_a_completer(vec![
+            lu(
+                "M/yeule/yeule - 'Tequila Coma' (Official Video).mp3",
+                tags(None, None, None),
+                false,
+            ),
+            // Déjà une pochette : rien à faire.
+            lu("M/X/X - Y.mp3", tags(None, None, None), true),
+        ]);
+        assert_eq!(albums.len(), 1);
+        let seul = &albums[0];
+        assert_eq!(seul.morceau.as_deref(), Some("Tequila Coma"));
+        assert_eq!(seul.artiste.as_deref(), Some("yeule"));
+        assert_eq!(seul.libelle(), "Tequila Coma — yeule");
+
+        let recherches = recherches_a_faire(seul);
+        assert_eq!(recherches[0].0, Source::DeezerMorceaux);
+        assert_eq!(recherches[0].1[0].1, "yeule Tequila Coma");
+        assert_eq!(recherches[1].0, Source::Itunes);
+        assert!(recherches[1].1.contains(&("entity", "song".to_string())));
+
+        // On compare le titre du morceau, pas le nom de l'album.
+        let mut bon = candidat("Evangelic Girl is a Gun", "yeule", "a");
+        bon.titre = Some("Tequila Coma".to_string());
+        let mut autre = candidat("Tequila Coma", "yeule", "b");
+        autre.titre = Some("Bites on My Neck".to_string());
+        assert_eq!(garder_les_bonnes(vec![autre, bon.clone()], seul), [bon]);
+    }
+
     #[test]
     fn garde_seulement_le_bon_album() {
         let cherche = album("Discovery", Some("Daft Punk"));
@@ -814,7 +1013,7 @@ mod tests {
     }
 
     #[test]
-    fn recherches_musicbrainz_puis_itunes() {
+    fn recherches_musicbrainz_puis_deezer_puis_itunes() {
         let recherches = recherches_a_faire(&album("Le \"Best\" of", Some("Moi")));
         assert_eq!(recherches[0].0, Source::MusicBrainz);
         assert_eq!(
@@ -824,15 +1023,16 @@ mod tests {
                 r#"releasegroup:"Le \"Best\" of" AND artist:"Moi""#.to_string()
             )
         );
-        assert_eq!(recherches[1].0, Source::Itunes);
+        assert_eq!(recherches[1].0, Source::DeezerAlbums);
+        assert_eq!(recherches[2].0, Source::Itunes);
         assert_eq!(
-            recherches[1].1[0],
+            recherches[2].1[0],
             ("term", "Moi Le \"Best\" of".to_string())
         );
     }
 
     #[test]
-    fn passe_a_itunes_si_le_cover_art_archive_n_a_pas_d_image() {
+    fn passe_a_itunes_si_ni_le_cover_art_archive_ni_deezer_n_ont_d_image() {
         let cherche = album("Discovery", Some("Daft Punk"));
         let mut demandes = Vec::new();
         let trouvee = chercher(
@@ -866,6 +1066,7 @@ mod tests {
             [
                 MUSICBRAINZ,
                 "https://coverartarchive.org/release-group/x/front-500",
+                DEEZER_ALBUMS,
                 ITUNES,
                 "https://itunes/600x600bb.jpg"
             ]
