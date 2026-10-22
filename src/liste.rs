@@ -576,7 +576,7 @@ fn dessiner_fond_de_ligne(ui: &egui::Ui, rect: egui::Rect, en_cours: bool, survo
         peintre.rect_filled(barre, 0.0, theme::MAGENTA);
     } else {
         if survol {
-            peintre.rect_filled(rect, 0.0, theme::attenue(theme::CYAN, 18));
+            peintre.rect_filled(rect, 0.0, theme::couleur_de_survol());
         }
         peintre.rect_filled(barre, 0.0, theme::attenue(theme::CYAN, 40));
     }

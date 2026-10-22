@@ -922,6 +922,8 @@ fn entete_depliable(
         }
     }
     let mut basculer = false;
+    // Le fond de survol, dessiné sous l'en-tête une fois sa place connue.
+    let fond = ui.painter().add(egui::Shape::Noop);
     let mut entete = etat.show_header(ui, |ui| {
         if let Some(favori) = favori {
             etoile(ui, favori, lignes);
@@ -968,6 +970,7 @@ fn entete_depliable(
         entete.toggle();
     }
     let (_, ligne, _) = entete.body(|ui| contenu(ui, lignes));
+    theme::fond_de_survol(ui, fond, ligne.response.rect);
     if replie {
         lignes.hauteur_entete = Some(ligne.response.rect.height());
     }
@@ -1108,7 +1111,7 @@ fn ligne_morceau(ui: &mut egui::Ui, chemin: &Path, lignes: &mut Lignes, dossier:
         let bord = egui::Rect::from_min_size(rect.min, egui::vec2(2.0, rect.height()));
         peintre.rect_filled(bord, 0.0, theme::JAUNE);
     } else if ligne.hovered() {
-        peintre.rect_filled(rect, 0.0, theme::attenue(theme::CYAN, 16));
+        peintre.rect_filled(rect, 0.0, theme::couleur_de_survol());
     }
     let mut dedans = ui.new_child(
         egui::UiBuilder::new()
