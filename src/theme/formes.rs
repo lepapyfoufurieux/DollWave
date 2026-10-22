@@ -54,6 +54,30 @@ pub fn lignes_d_ecran(peintre: &egui::Painter, zone: Rect, ecart: f32, opacite: 
     }
 }
 
+/// Le fond nuit d'une case de pochette : sans pochette, ou dans la marge
+/// d'une pochette qui n'est pas carrée.
+pub const NUIT_POCHETTE: Color32 = Color32::from_rgb(0x0B, 0x07, 0x18);
+
+/// La case de la pochette : le plus grand carré qui tient dans `zone`,
+/// centré de gauche à droite et calé en haut.
+pub fn case_carree(zone: Rect) -> Rect {
+    let cote = zone.width().min(zone.height()).max(0.0);
+    Rect::from_min_size(
+        egui::pos2(zone.center().x - cote / 2.0, zone.top()),
+        Vec2::splat(cote),
+    )
+}
+
+/// La place d'une image de taille `image` montrée en entier dans `cadre` :
+/// la plus grande possible, centrée, sans être déformée ni coupée.
+pub fn place_entiere(cadre: Rect, image: Vec2) -> Rect {
+    if image.x <= 0.0 || image.y <= 0.0 {
+        return cadre;
+    }
+    let echelle = (cadre.width() / image.x).min(cadre.height() / image.y);
+    Rect::from_center_size(cadre.center(), image * echelle)
+}
+
 /// Une couleur dont l'opacité est multipliée par `facteur` (0 à 1).
 pub fn fondu(couleur: Color32, facteur: f32) -> Color32 {
     couleur.gamma_multiply(facteur.clamp(0.0, 1.0))
@@ -842,6 +866,39 @@ pub fn separateur(ui: &mut egui::Ui, couleur: Color32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn la_case_de_la_pochette_est_toujours_carree() {
+        // Zone large : le carré prend la hauteur, centré de gauche à droite.
+        let large = Rect::from_min_size(egui::pos2(10.0, 20.0), egui::vec2(300.0, 100.0));
+        assert_eq!(
+            case_carree(large),
+            Rect::from_min_size(egui::pos2(110.0, 20.0), egui::vec2(100.0, 100.0))
+        );
+        // Zone haute : le carré prend la largeur, calé en haut.
+        let haute = Rect::from_min_size(egui::pos2(10.0, 20.0), egui::vec2(80.0, 200.0));
+        assert_eq!(
+            case_carree(haute),
+            Rect::from_min_size(egui::pos2(10.0, 20.0), egui::vec2(80.0, 80.0))
+        );
+    }
+
+    #[test]
+    fn une_pochette_est_montree_en_entier() {
+        let case = Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(100.0, 100.0));
+        // Carrée : elle remplit la case.
+        assert_eq!(place_entiere(case, egui::vec2(500.0, 500.0)), case);
+        // Plus large que haute : toute la largeur, des marges en haut et en bas.
+        assert_eq!(
+            place_entiere(case, egui::vec2(400.0, 200.0)),
+            Rect::from_min_size(egui::pos2(0.0, 25.0), egui::vec2(100.0, 50.0))
+        );
+        // Plus haute que large : toute la hauteur, des marges sur les côtés.
+        assert_eq!(
+            place_entiere(case, egui::vec2(300.0, 600.0)),
+            Rect::from_min_size(egui::pos2(25.0, 0.0), egui::vec2(50.0, 100.0))
+        );
+    }
 
     fn carre() -> Rect {
         Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(100.0, 40.0))

@@ -1490,8 +1490,8 @@ impl LecteurApp {
         self.paroles = Some((chemin.to_path_buf(), paroles::charger(chemin)));
     }
 
-    /// La pochette du morceau en cours, sous le visualiseur, dans toute la
-    /// place qui reste (recadrée pour la remplir), avec ses paroles
+    /// La pochette du morceau en cours, sous le visualiseur, en entier dans
+    /// le plus grand carré qui tient dans la place qui reste, avec ses paroles
     /// par-dessus s'il en a. Sans pochette : un fond néon.
     fn afficher_pochette(&self, ui: &mut egui::Ui, position: f32) {
         let pochette = match &self.pochette {
@@ -1502,25 +1502,25 @@ impl LecteurApp {
             Some((_, Some(paroles))) => Some(paroles),
             _ => None,
         };
-        let cadre = ui.available_rect_before_wrap();
+        let zone = ui.available_rect_before_wrap();
+        // La case est carrée, comme les pochettes.
+        let cadre = theme::case_carree(zone);
         if cadre.height() < 40.0 {
             return;
         }
-        ui.allocate_rect(cadre, egui::Sense::hover());
+        ui.allocate_rect(zone, egui::Sense::hover());
         let peintre = ui.painter_at(cadre);
         match pochette {
             Some(pochette) => {
-                // Comme un fond d'écran : l'image remplit le cadre, coupée
-                // en haut et en bas (ou sur les côtés) plutôt que déformée.
-                let image = pochette.size_vec2();
-                let echelle = (cadre.width() / image.x).max(cadre.height() / image.y);
-                let visible = cadre.size() / (image * echelle);
-                let uv = egui::Rect::from_center_size(egui::pos2(0.5, 0.5), visible);
-                peintre.image(pochette.id(), cadre, uv, egui::Color32::WHITE);
+                // En entier : une pochette pas carrée laisse une marge nuit.
+                peintre.rect_filled(cadre, 0.0, theme::NUIT_POCHETTE);
+                let place = theme::place_entiere(cadre, pochette.size_vec2());
+                let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
+                peintre.image(pochette.id(), place, uv, egui::Color32::WHITE);
             }
             None => {
                 // Pas de pochette : un fond nuit avec deux taches de néon.
-                peintre.rect_filled(cadre, 0.0, egui::Color32::from_rgb(0x0B, 0x07, 0x18));
+                peintre.rect_filled(cadre, 0.0, theme::NUIT_POCHETTE);
                 let points = theme::contour(cadre, theme::Coins::AUCUN);
                 let rien = egui::Color32::TRANSPARENT;
                 let magenta = theme::attenue(theme::MAGENTA, 70);
