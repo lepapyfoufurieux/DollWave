@@ -26,6 +26,7 @@ use eframe::egui;
 
 use crate::ecriture_tags::{self, Modifications, Pochette};
 use crate::generer_paroles::{self, normaliser, ressemblance};
+use crate::introuvables::{self, Introuvables};
 use crate::reseau::{self, Echec};
 use crate::tags::{self, Tags};
 
@@ -547,6 +548,9 @@ pub struct Progression {
     /// Les albums dont tous les morceaux avaient déjà une pochette.
     pub completes: usize,
     pub introuvables: Vec<String>,
+    /// Les albums déjà cherchés sans succès
+    /// sautés.
+    pub deja_cherches: usize,
     /// Le site n'a pas répondu, ou un MP3 n'a pas pu être écrit.
     pub erreurs: Vec<(String, String)>,
     /// Les MP3 qui ont reçu une pochette depuis la dernière fois qu'on a
@@ -580,6 +584,7 @@ impl RecherchePochettes {
                 &morceaux,
                 &pour_le_travail,
                 &stop,
+                &mut Introuvables::du_lecteur(introuvables::POCHETTES),
                 |adresse, p| reseau::telecharger(&agent, adresse, p, &stop),
                 PAUSE_ENTRE_RECHERCHES,
                 || ctx.request_repaint(),
@@ -612,6 +617,7 @@ fn completer(
     morceaux: &[PathBuf],
     progression: &Mutex<Progression>,
     arreter: &AtomicBool,
+    memoire: &mut Introuvables,
     mut demander: impl FnMut(&str, &[(&str, String)]) -> Result<Option<Vec<u8>>, Echec>,
     pause: Duration,
     redessiner: impl Fn(),
@@ -647,11 +653,17 @@ fn completer(
         });
     }
     let (albums, completes) = albums_a_completer(lus);
+    // Déjà cherchés sans succès sautés, sauf si
+    // un morceau de l'album a maintenant une pochette à recopier.
+    let (albums, sautes): (Vec<_>, Vec<_>) = albums.into_iter().partition(|album| {
+        album.avec_pochette.is_some() || !memoire.deja_cherche(&album.libelle())
+    });
     {
         let mut etat = etat();
         etat.preparation = false;
         etat.total = albums.len();
         etat.completes = completes;
+        etat.deja_cherches = sautes.len();
     }
     redessiner();
 
@@ -712,6 +724,7 @@ fn completer(
             Ok(None) => {
                 echecs_de_suite = 0;
                 etat.introuvables.push(album.libelle());
+                memoire.noter(&album.libelle(), introuvables::maintenant());
             }
             Err(Interruption::Arretee) => {
                 drop(etat);
@@ -1122,6 +1135,7 @@ mod tests {
             ],
             &progression,
             &AtomicBool::new(false),
+            &mut Introuvables::en_memoire(),
             |adresse, parametres| {
                 let cherche_homework = parametres.iter().any(|(_, v)| v.contains("Homework"));
                 Ok(match adresse {
@@ -1156,6 +1170,35 @@ mod tests {
     }
 
     #[test]
+    fn un_album_introuvable_n_est_pas_recherche_la_fois_suivante() {
+        let dossier = dossier_de_test("memoire");
+        let morceaux = [mp3(&dossier, "memoire.mp3", "Rien du tout", false)];
+        let mut memoire = Introuvables::en_memoire();
+        let appels = std::cell::Cell::new(0);
+        let mut resumes = Vec::new();
+        for _ in 0..2 {
+            let progression = Mutex::new(Progression::default());
+            completer(
+                &morceaux,
+                &progression,
+                &AtomicBool::new(false),
+                &mut memoire,
+                |_, _| {
+                    appels.set(appels.get() + 1);
+                    Ok(None)
+                },
+                Duration::ZERO,
+                || {},
+            );
+            let p = progression.into_inner().unwrap();
+            resumes.push((p.introuvables.len(), p.deja_cherches, p.total));
+        }
+        assert_eq!(resumes, [(1, 0, 1), (0, 1, 0)]);
+        // Les recherches du premier passage seulement.
+        assert_eq!(appels.get(), 3);
+    }
+
+    #[test]
     fn s_arrete_si_internet_ne_repond_pas() {
         let dossier = dossier_de_test("reseau");
         let morceaux: Vec<PathBuf> = (1..=5)
@@ -1167,6 +1210,7 @@ mod tests {
             &morceaux,
             &progression,
             &AtomicBool::new(false),
+            &mut Introuvables::en_memoire(),
             |_, _| {
                 appels.set(appels.get() + 1);
                 Err(Echec::SansReponse("pas de connexion".to_string()))
@@ -1200,6 +1244,7 @@ mod tests {
             &morceaux,
             &progression,
             &AtomicBool::new(false),
+            &mut Introuvables::en_memoire(),
             |_, _| Err(Echec::SiteIndisponible("http status: 503".to_string())),
             Duration::ZERO,
             || {},

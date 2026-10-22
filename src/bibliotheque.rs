@@ -635,6 +635,12 @@ impl Bibliotheque {
                 p.completes,
                 p.introuvables.len()
             ));
+            if p.deja_cherches > 0 {
+                ui.label(format!(
+                    "{} déjà cherchés sans succès (sautés)",
+                    p.deja_cherches
+                ));
+            }
             liste_de_noms(ui, "Introuvables", &p.introuvables);
             if let Some((_, premiere)) = p.erreurs.first() {
                 let noms: Vec<String> = p.erreurs.iter().map(|(n, _)| n.clone()).collect();
@@ -739,6 +745,12 @@ impl Bibliotheque {
                 p.deja_presents,
                 p.introuvables.len()
             ));
+            if p.deja_cherches > 0 {
+                ui.label(format!(
+                    "{} déjà cherchés sans succès (sautés)",
+                    p.deja_cherches
+                ));
+            }
             liste_du_resume(
                 ui,
                 "À vérifier (durée différente, version clip ?)",
