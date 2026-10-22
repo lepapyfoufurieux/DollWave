@@ -2,14 +2,72 @@
 //! de titre (voir bandeau.rs), son liseré cyan et ses bords à tirer pour la
 //! redimensionner.
 
-use eframe::egui::{self, CursorIcon, Pos2, Rect, ResizeDirection, Stroke, ViewportCommand};
+use eframe::egui::{
+    self, panel::PanelState, CursorIcon, Pos2, Rect, ResizeDirection, Stroke, ViewportCommand,
+};
 
+use crate::mini::TAILLE_MIN_GRANDE;
 use crate::theme::{self, CYAN};
 
 /// L'épaisseur des bords qu'on tire pour redimensionner, en points.
 const EPAISSEUR: f32 = 5.0;
 /// La taille des coins, un peu plus grands pour être faciles à attraper.
 const COIN: f32 = 12.0;
+
+/// Les panneaux dont on tire le séparateur : la bibliothèque (sa largeur) et
+/// les playlists sous elle (leur hauteur).
+pub const PANNEAUX: [&str; 2] = ["bibliotheque", "playlists"];
+
+/// Les tailles des panneaux à séparateur, notées avant de les dessiner.
+///
+/// Réduite, la fenêtre continue de se dessiner (la musique avance), mais
+/// Windows lui donne une toute petite taille. egui rétrécit alors les
+/// panneaux pour qu'ils y tiennent, et retient ces tailles : à la
+/// réouverture, les séparateurs avaient bougé. On remet donc celles d'avant.
+pub struct Separateurs(Vec<(egui::Id, Option<PanelState>)>);
+
+impl Separateurs {
+    /// À appeler avant de dessiner les panneaux.
+    pub fn noter(ctx: &egui::Context) -> Self {
+        Self(
+            PANNEAUX
+                .iter()
+                .map(|&nom| {
+                    let id = egui::Id::new(nom);
+                    (id, PanelState::load(ctx, id))
+                })
+                .collect(),
+        )
+    }
+
+    /// À appeler après : si la fenêtre est réduite, les tailles notées
+    /// reviennent.
+    pub fn garder_si_reduite(self, ctx: &egui::Context) {
+        if !est_reduite(ctx) {
+            return;
+        }
+        ctx.data_mut(|d| {
+            for (id, etat) in self.0 {
+                match etat {
+                    Some(etat) => d.insert_persisted(id, etat),
+                    None => {
+                        d.remove::<PanelState>(id);
+                    }
+                }
+            }
+        });
+    }
+}
+
+/// Vrai si la fenêtre est réduite, ou bien plus petite que la taille minimale
+/// de la grande fenêtre (réduite, ou à l'instant où elle quitte le
+/// mini-lecteur ; avec une marge pour les écrans zoomés).
+pub fn est_reduite(ctx: &egui::Context) -> bool {
+    let taille = ctx.screen_rect().size();
+    ctx.input(|i| i.viewport().minimized == Some(true))
+        || taille.x < TAILLE_MIN_GRANDE.x / 2.0
+        || taille.y < TAILLE_MIN_GRANDE.y / 2.0
+}
 
 /// Le bord (ou le coin) de `fenetre` sous `pos`, s'il y en a un.
 pub fn bord(pos: Pos2, fenetre: Rect) -> Option<ResizeDirection> {
@@ -105,6 +163,7 @@ pub fn sur_un_bord(ctx: &egui::Context) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use egui::Vec2;
     use ResizeDirection::*;
 
     fn fenetre() -> Rect {
@@ -124,6 +183,78 @@ mod tests {
         assert!(matches!(bord(egui::pos2(998.0, 790.0), f), Some(SouthEast)));
         assert!(matches!(bord(egui::pos2(990.0, 2.0), f), Some(NorthEast)));
         assert!(matches!(bord(egui::pos2(2.0, 795.0), f), Some(SouthWest)));
+    }
+
+    /// Les panneaux comme dans le lecteur (main.rs), avec leurs séparateurs.
+    fn dessiner_les_panneaux(ctx: &egui::Context) {
+        let separateurs = Separateurs::noter(ctx);
+        egui::SidePanel::left(PANNEAUX[0])
+            .resizable(true)
+            .default_width(310.0)
+            .width_range(220.0..=600.0)
+            .show(ctx, |ui| {
+                egui::TopBottomPanel::bottom(PANNEAUX[1])
+                    .resizable(true)
+                    .default_height(240.0)
+                    .height_range(110.0..=500.0)
+                    .show_inside(ui, |ui| ui.set_min_height(ui.available_height()));
+            });
+        egui::CentralPanel::default().show(ctx, |_| {});
+        separateurs.garder_si_reduite(ctx);
+    }
+
+    fn image(ctx: &egui::Context, taille: Vec2, reduite: bool) {
+        let mut entree = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, taille)),
+            ..Default::default()
+        };
+        entree
+            .viewports
+            .entry(egui::ViewportId::ROOT)
+            .or_default()
+            .minimized = Some(reduite);
+        let _ = ctx.run(entree, dessiner_les_panneaux);
+    }
+
+    fn tailles(ctx: &egui::Context) -> (f32, f32) {
+        let taille = |nom| PanelState::load(ctx, egui::Id::new(nom)).unwrap().size();
+        (taille(PANNEAUX[0]).x, taille(PANNEAUX[1]).y)
+    }
+
+    /// Le bug : réduire puis rouvrir la fenêtre faisait bouger les séparateurs
+    /// (Windows donne une toute petite taille à la fenêtre réduite).
+    #[test]
+    fn reduire_puis_rouvrir_ne_bouge_pas_les_separateurs() {
+        let ctx = egui::Context::default();
+        let grande = egui::vec2(1320.0, 900.0);
+        // Des séparateurs déjà tirés par l'utilisateur.
+        ctx.data_mut(|d| {
+            for (nom, taille) in [
+                (PANNEAUX[0], egui::vec2(450.0, 860.0)),
+                (PANNEAUX[1], egui::vec2(450.0, 380.0)),
+            ] {
+                let rect = Rect::from_min_size(Pos2::ZERO, taille);
+                d.insert_persisted(egui::Id::new(nom), PanelState { rect });
+            }
+        });
+        image(&ctx, grande, false);
+        let avant = tailles(&ctx);
+        assert_eq!(avant.0.round(), 450.0);
+        // Réduite : la taille que Windows donne aux fenêtres réduites.
+        for _ in 0..3 {
+            image(&ctx, egui::vec2(160.0, 28.0), true);
+        }
+        image(&ctx, grande, false);
+        assert_eq!(tailles(&ctx), avant);
+    }
+
+    /// Une fenêtre lancée réduite garde les tailles par défaut.
+    #[test]
+    fn lancee_reduite_les_separateurs_restent_par_defaut() {
+        let ctx = egui::Context::default();
+        image(&ctx, egui::vec2(160.0, 28.0), true);
+        image(&ctx, egui::vec2(1320.0, 900.0), false);
+        assert_eq!(tailles(&ctx).0.round(), 310.0);
     }
 
     #[test]

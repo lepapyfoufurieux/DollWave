@@ -2093,16 +2093,20 @@ impl LecteurApp {
             .show_separator_line(false)
             .show(ctx, |ui| bandeau::afficher(ui, &voyants));
 
+        // Fenêtre réduite : les séparateurs ne doivent pas bouger (voir
+        // fenetre::Separateurs).
+        let separateurs = fenetre::Separateurs::noter(ctx);
+
         // À gauche, la bibliothèque. Un clic sur un morceau (ou sur « ➕ tout »)
         // l'ajoute à la liste de lecture. En bas, les playlists.
-        let (demandes, demande) = egui::SidePanel::left("bibliotheque")
+        let (demandes, demande) = egui::SidePanel::left(fenetre::PANNEAUX[0])
             .resizable(true)
             .default_width(310.0)
             .width_range(220.0..=600.0)
             .show(ctx, |ui| {
                 // Les playlists d'abord, pour qu'elles se réservent le bas du
                 // panneau ; la bibliothèque prend la place qui reste au-dessus.
-                let demande = egui::TopBottomPanel::bottom("playlists")
+                let demande = egui::TopBottomPanel::bottom(fenetre::PANNEAUX[1])
                     .frame(theme::cadre_interieur(ui.style()))
                     .resizable(true)
                     .default_height(240.0)
@@ -2130,6 +2134,7 @@ impl LecteurApp {
                 )
             })
             .inner;
+        separateurs.garder_si_reduite(ctx);
         if !demandes.a_ajouter.is_empty() {
             self.ajouter(demandes.a_ajouter);
         }
