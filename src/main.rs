@@ -4,6 +4,7 @@
 mod bandeau;
 mod bibliotheque;
 mod depot;
+mod ecoutes;
 mod ecriture_tags;
 mod editeur_tags;
 mod effets;
@@ -237,6 +238,11 @@ struct LecteurApp {
     // quand la mémoriser à nouveau (voir `memoriser_l_ecoute`).
     ecoute_memorisee: Option<Reprise>,
     prochaine_memorisation: Instant,
+    // Combien de fois on a écouté chaque morceau (playlist « Les plus
+    // écoutés »), l'écoute du morceau en cours, et quand on l'a suivie.
+    ecoutes: ecoutes::Ecoutes,
+    suivi: ecoutes::Suivi,
+    dernier_suivi: Instant,
     // Pour redessiner la fenêtre quand un travail en arrière-plan est fini.
     ctx: egui::Context,
 }
@@ -390,8 +396,57 @@ impl LecteurApp {
             infos: InfosConnues::default(),
             ecoute_memorisee: None,
             prochaine_memorisation: maintenant + reprise::INTERVALLE,
+            // (Pendant les tests, aucune : on ne lit pas celles de Luce.)
+            ecoutes: if cfg!(test) {
+                ecoutes::Ecoutes::default()
+            } else {
+                ecoutes::Ecoutes::charger()
+            },
+            suivi: ecoutes::Suivi::default(),
+            dernier_suivi: maintenant,
             ctx: ctx.clone(),
         }
+        .avec_les_plus_ecoutes()
+    }
+
+    /// Remplit la playlist « Les plus écoutés ».
+    fn avec_les_plus_ecoutes(mut self) -> Self {
+        self.montrer_les_plus_ecoutes();
+        self
+    }
+
+    fn montrer_les_plus_ecoutes(&mut self) {
+        let morceaux = self.ecoutes.plus_ecoutes(
+            ecoutes::maintenant(),
+            ecoutes::TAILLE_DE_LA_PLAYLIST,
+            Path::exists,
+        );
+        self.playlists.changer_les_plus_ecoutes(morceaux);
+    }
+
+    /// Suit l'écoute du morceau en cours : quand on en a écouté assez, on
+    /// compte une écoute et la playlist « Les plus écoutés » se met à jour.
+    fn suivre_les_ecoutes(&mut self, maintenant: Instant) {
+        let ecoule = maintenant.saturating_duration_since(self.dernier_suivi);
+        self.dernier_suivi = maintenant;
+        let (Some(morceau), Some(telecommande)) = (&self.morceau, self.platine_active()) else {
+            return;
+        };
+        let adresse = Arc::as_ptr(morceau) as usize;
+        if !self
+            .suivi
+            .avancer(adresse, telecommande.position(), morceau.duree(), ecoule)
+        {
+            return;
+        }
+        let Some(chemin) = self.liste.courant().and_then(|n| self.liste.fichier(n)) else {
+            return;
+        };
+        self.ecoutes.compter(chemin, ecoutes::maintenant());
+        if !cfg!(test) {
+            self.ecoutes.memoriser();
+        }
+        self.montrer_les_plus_ecoutes();
     }
 
     /// Ouvre la fenêtre Windows de choix de fichiers (on peut en prendre
@@ -1894,6 +1949,7 @@ impl eframe::App for LecteurApp {
         self.suivre_l_egalisation();
         self.preparer_l_enchainement();
         self.memoriser_l_ecoute(Some(Instant::now()));
+        self.suivre_les_ecoutes(Instant::now());
 
         // Le fond nuit quadrillé, sous tous les panneaux ; les lignes d'écran
         // par-dessus. Les lueurs respirent seulement pendant la lecture.
