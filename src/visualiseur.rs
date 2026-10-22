@@ -3,7 +3,7 @@
 //! - les barres de fréquences (graves à gauche, aigus à droite) ;
 //! - l'oscilloscope (la vibration du son, en direct) ;
 //! - la forme d'onde (le dessin des 30 secondes autour de l'endroit écouté) ;
-//! - l'ambiance (des formes qui tournent avec la musique, façon Windows Media Player XP).
+//! - l'ambiance (des couleurs qui tourbillonnent avec la musique, façon Windows Media Player XP).
 
 mod ambiance;
 
@@ -257,12 +257,15 @@ impl Visualiseur {
                 }
             }
             Style::Ambiance => {
-                let forces = match morceau {
-                    Some(m) if en_lecture => self.hauteurs_des_barres(m, position),
-                    _ => [0.0; NB_BARRES],
+                let (forces, onde) = match morceau {
+                    Some(m) if en_lecture => (
+                        self.hauteurs_des_barres(m, position),
+                        m.extrait_mono(position, TAILLE_OSCILLO),
+                    ),
+                    _ => ([0.0; NB_BARRES], Vec::new()),
                 };
-                self.ambiance.avancer(&forces, en_lecture, dt);
-                self.ambiance.dessiner(&peintre, zone);
+                self.ambiance.avancer(&forces, &onde, en_lecture, dt);
+                self.ambiance.dessiner(ui.ctx(), &peintre, zone);
             }
         }
         // Les lignes d'écran, plus marquées ici que sur le reste de la fenêtre.
