@@ -195,14 +195,6 @@ impl Vue {
         }
     }
 
-    fn aide(self) -> &'static str {
-        match self {
-            Vue::Dossiers => "Ranger la musique par dossier",
-            Vue::Artistes => "Ranger la musique par artiste, puis par album (d'après les tags)",
-            Vue::Albums => "Ranger la musique par album (d'après les tags)",
-        }
-    }
-
     /// Le mot écrit dans le fichier de réglage.
     fn code(self) -> &'static str {
         match self {
@@ -426,7 +418,7 @@ impl Bibliotheque {
                     .allume(self.vue == vue)
                     .coins(coins)
                     .taille(egui::vec2(largeur, 28.0));
-                if ui.add(onglet).on_hover_text(vue.aide()).clicked() && self.vue != vue {
+                if ui.add(onglet).clicked() && self.vue != vue {
                     self.vue = vue;
                     memoriser(REGLAGE_VUE, vue.code());
                 }
@@ -930,6 +922,8 @@ fn entete_depliable(
         }
     }
     let mut basculer = false;
+    // Le fond de survol, dessiné sous l'en-tête une fois sa place connue.
+    let fond = ui.painter().add(egui::Shape::Noop);
     let mut entete = etat.show_header(ui, |ui| {
         if let Some(favori) = favori {
             etoile(ui, favori, lignes);
@@ -976,6 +970,7 @@ fn entete_depliable(
         entete.toggle();
     }
     let (_, ligne, _) = entete.body(|ui| contenu(ui, lignes));
+    theme::fond_de_survol(ui, fond, ligne.response.rect);
     if replie {
         lignes.hauteur_entete = Some(ligne.response.rect.height());
     }
@@ -1116,7 +1111,7 @@ fn ligne_morceau(ui: &mut egui::Ui, chemin: &Path, lignes: &mut Lignes, dossier:
         let bord = egui::Rect::from_min_size(rect.min, egui::vec2(2.0, rect.height()));
         peintre.rect_filled(bord, 0.0, theme::JAUNE);
     } else if ligne.hovered() {
-        peintre.rect_filled(rect, 0.0, theme::attenue(theme::CYAN, 16));
+        peintre.rect_filled(rect, 0.0, theme::couleur_de_survol());
     }
     let mut dedans = ui.new_child(
         egui::UiBuilder::new()
@@ -1155,17 +1150,6 @@ fn ligne_morceau(ui: &mut egui::Ui, chemin: &Path, lignes: &mut Lignes, dossier:
             let nom = egui::RichText::new(lignes.tags.libelle(chemin)).color(couleur_nom);
             ui.add(egui::Label::new(nom).truncate().selectable(false));
         });
-    });
-
-    let aide = if deja {
-        "Déjà dans la liste de lecture (cliquer pour l'ajouter encore une fois ; glisser sur une playlist ou clic droit pour l'y ajouter)"
-    } else {
-        "Cliquer pour ajouter à la liste de lecture (glisser sur une playlist ou clic droit pour l'y ajouter)"
-    };
-    // L'infobulle n'est préparée que si la souris est dessus.
-    let tags = lignes.tags;
-    let ligne = ligne.on_hover_ui(|ui| {
-        ui.label(format!("{}\n\n{aide}", tags.infobulle(chemin)));
     });
     if clic_simple(ui, &ligne) {
         lignes.a_ajouter.push(chemin.to_path_buf());

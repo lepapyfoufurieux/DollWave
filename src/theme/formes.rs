@@ -197,6 +197,21 @@ pub fn melange(a: Color32, b: Color32, t: f32) -> Color32 {
     )
 }
 
+/// La teinte d'une ligne survolée par la souris, la même partout (liste de
+/// lecture, bibliothèque, playlists) : un cyan léger.
+pub fn couleur_de_survol() -> Color32 {
+    attenue(CYAN, 18)
+}
+
+/// Pose le fond de survol à la place réservée `place` (sous le texte de la
+/// ligne), si la souris est sur `rect`.
+pub fn fond_de_survol(ui: &egui::Ui, place: egui::layers::ShapeIdx, rect: Rect) {
+    if ui.rect_contains_pointer(rect) {
+        ui.painter()
+            .set(place, Shape::rect_filled(rect, 0.0, couleur_de_survol()));
+    }
+}
+
 /// Une lueur floue autour de `rect` (une ombre colorée d'egui), plus ou
 /// moins forte selon le réglage des effets. `force` : 1 pour une lueur normale.
 pub fn halo(peintre: &egui::Painter, rect: Rect, couleur: Color32, force: f32) {

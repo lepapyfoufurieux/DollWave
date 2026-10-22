@@ -59,15 +59,22 @@ pub fn fraction_sous(zone: Rect, x: f32) -> f32 {
 
 /// Dessine la forme d'onde dans `zone` : `barres` (rien tant qu'elle n'est
 /// pas calculée), `fraction` du morceau déjà jouée, `actif` faux sans morceau.
+/// `survol` : l'abscisse de la souris quand elle est sur la barre ; les bords
+/// et le reste du morceau s'éclairent, et un trait montre où un clic mènera.
 pub fn dessiner_progression(
     peintre: &egui::Painter,
     zone: Rect,
     barres: Option<&[f32]>,
     fraction: f32,
     actif: bool,
+    survol: Option<f32>,
 ) {
+    let survol = survol.filter(|_| actif);
     peintre.rect_filled(zone, 0.0, FOND);
-    let bord = Stroke::new(1.0_f32, theme::attenue(CYAN, 50));
+    let bord = Stroke::new(
+        1.0_f32,
+        theme::attenue(CYAN, if survol.is_some() { 140 } else { 50 }),
+    );
     peintre.hline(zone.x_range(), zone.top(), bord);
     peintre.hline(zone.x_range(), zone.bottom(), bord);
 
@@ -84,7 +91,7 @@ pub fn dessiner_progression(
     let pas = interieur.width() / nombre as f32;
     let largeur = (pas - ECART_BARRE).max(1.0);
     let jouee = theme::fondu(CYAN, if actif { 1.0 } else { 0.4 });
-    let reste = theme::attenue(CYAN, 64);
+    let reste = theme::attenue(CYAN, if survol.is_some() { 100 } else { 64 });
     let lueur = theme::intensite() > 0.0;
     for (n, &hauteur) in barres.iter().enumerate() {
         let x = interieur.left() + n as f32 * pas;
@@ -98,6 +105,16 @@ pub fn dessiner_progression(
             peintre.rect_filled(barre.expand(1.0), 0.0, theme::attenue(CYAN, 50));
         }
         peintre.rect_filled(barre, 0.0, if deja { jouee } else { reste });
+    }
+
+    // Là où un clic mènerait : un fin trait blanc.
+    if let Some(x) = survol {
+        let x = x.clamp(zone.left(), zone.right());
+        peintre.vline(
+            x,
+            zone.y_range(),
+            Stroke::new(1.0_f32, theme::fondu(Color32::WHITE, 0.6)),
+        );
     }
 
     // Le curseur jaune, avec son petit triangle au-dessus.
@@ -141,8 +158,10 @@ pub fn segments_du_volume(ui: &mut egui::Ui, volume: f32, muet: bool) -> Option<
     let (largeur, ecart, hauteur) = (6.0, 3.0, 26.0);
     let taille = egui::vec2(SEGMENTS as f32 * (largeur + ecart) - ecart, hauteur);
     let (zone, reponse) = ui.allocate_exact_size(taille, egui::Sense::click_and_drag());
-    let reponse = reponse.on_hover_text("Volume : cliquer ou glisser (ou molette)");
     let allumes = if muet { 0 } else { segments_allumes(volume) };
+    // Au survol, les segments éteints s'éclairent et les allumés brillent plus.
+    let survol = reponse.hovered() || reponse.dragged();
+    let (eteint, lueur) = if survol { (90, 110) } else { (48, 60) };
     let peintre = ui.painter();
     for n in 0..SEGMENTS {
         let h = 8.0 + n as f32 * (hauteur - 8.0) / (SEGMENTS - 1) as f32;
@@ -154,11 +173,11 @@ pub fn segments_du_volume(ui: &mut egui::Ui, volume: f32, muet: bool) -> Option<
         let couleur = couleur_du_segment(n);
         if n < allumes {
             if theme::intensite() > 0.0 {
-                peintre.rect_filled(segment.expand(1.0), 0.0, theme::attenue(couleur, 60));
+                peintre.rect_filled(segment.expand(1.0), 0.0, theme::attenue(couleur, lueur));
             }
             peintre.rect_filled(segment, 0.0, couleur);
         } else {
-            peintre.rect_filled(segment, 0.0, theme::attenue(couleur, 48));
+            peintre.rect_filled(segment, 0.0, theme::attenue(couleur, eteint));
         }
     }
     if reponse.clicked() || reponse.dragged() {

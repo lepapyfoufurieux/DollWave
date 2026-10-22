@@ -377,16 +377,12 @@ impl Playlists {
                         theme::TEXTE
                     });
                     let nombre = self.toutes[n].morceaux.len();
-                    let etiquette = ui
-                        .add(
-                            egui::Label::new(texte)
-                                .truncate()
-                                .selectable(false)
-                                .sense(egui::Sense::click()),
-                        )
-                        .on_hover_text(
-                            "Cliquer pour écouter cette playlist (remplace la liste de lecture)",
-                        );
+                    let etiquette = ui.add(
+                        egui::Label::new(texte)
+                            .truncate()
+                            .selectable(false)
+                            .sense(egui::Sense::click()),
+                    );
                     if clic_simple(ui, &etiquette) {
                         if let Some(fichiers) = self.lire_pour(&nom) {
                             self.chargee = Some(nom.clone());
@@ -440,19 +436,14 @@ impl Playlists {
                 // La place de chaque ligne, pour savoir où lâcher un titre glissé.
                 let mut lignes = Vec::with_capacity(morceaux.len());
                 for (i, morceau) in morceaux.iter().enumerate() {
+                    let survol = ui.painter().add(egui::Shape::Noop);
                     let ligne = ui.horizontal(|ui| {
                         // Un clic lance ce titre ; le faire glisser le déplace.
-                        let aide = format!(
-                            "{}\n\nCliquer pour écouter la playlist à partir de ce titre ; glisser pour le déplacer",
-                            tags.infobulle(morceau)
+                        let titre = ui.add(
+                            egui::Label::new(tags.libelle(morceau))
+                                .selectable(false)
+                                .sense(egui::Sense::click_and_drag()),
                         );
-                        let titre = ui
-                            .add(
-                                egui::Label::new(tags.libelle(morceau))
-                                    .selectable(false)
-                                    .sense(egui::Sense::click_and_drag()),
-                            )
-                            .on_hover_text(aide);
                         if clic_simple(ui, &titre) {
                             a_lancer = Some(i);
                         }
@@ -475,6 +466,7 @@ impl Playlists {
                             }
                         });
                     });
+                    theme::fond_de_survol(ui, survol, ligne.response.rect);
                     lignes.push(ligne.response.rect);
                 }
                 a_deplacer = deposer_un_titre(ui, &nom, &lignes);
@@ -482,8 +474,12 @@ impl Playlists {
             .1;
         let cadre = rangee.response.rect.expand2(egui::vec2(4.0, 3.0));
         let coins = theme::Coins::haut_droit(10.0);
+        // Au survol, le même fond cyan léger que les lignes de la liste de lecture.
+        let survol = ui.rect_contains_pointer(rangee.response.rect);
         let remplissage = if chargee {
             theme::attenue(theme::MAGENTA, 40)
+        } else if survol {
+            theme::couleur_de_survol()
         } else {
             theme::attenue(theme::PANNEAU, 200)
         };
@@ -558,8 +554,7 @@ impl Playlists {
                         )
                         .on_hover_text(
                             "Se remplit toute seule avec tes morceaux les plus écoutés \
-                             (les écoutes récentes comptent plus).\n\
-                             Cliquer pour l'écouter (remplace la liste de lecture)",
+                             (les écoutes récentes comptent plus).",
                         );
                     if clic_simple(ui, &etiquette) && !self.plus_ecoutes.is_empty() {
                         self.chargee = Some(PLUS_ECOUTES.to_string());
@@ -592,17 +587,14 @@ impl Playlists {
                     ui.weak("Vide pour l'instant : un morceau y entre quand tu en as écouté au moins la moitié.");
                 }
                 for (i, morceau) in self.plus_ecoutes.iter().enumerate() {
-                    let aide = format!(
-                        "{}\n\nCliquer pour écouter la playlist à partir de ce titre",
-                        tags.infobulle(morceau)
+                    let survol = ui.painter().add(egui::Shape::Noop);
+                    let titre = ui.add(
+                        egui::Label::new(tags.libelle(morceau))
+                            .selectable(false)
+                            .sense(egui::Sense::click()),
                     );
-                    let titre = ui
-                        .add(
-                            egui::Label::new(tags.libelle(morceau))
-                                .selectable(false)
-                                .sense(egui::Sense::click()),
-                        )
-                        .on_hover_text(aide);
+                    let ligne = egui::Rect::from_x_y_ranges(ui.max_rect().x_range(), titre.rect.y_range());
+                    theme::fond_de_survol(ui, survol, ligne);
                     if clic_simple(ui, &titre) {
                         a_lancer = Some(i);
                     }
@@ -610,8 +602,12 @@ impl Playlists {
             })
             .1;
         let cadre = rangee.response.rect.expand2(egui::vec2(4.0, 3.0));
+        // Au survol, le même fond cyan léger que les lignes de la liste de lecture.
+        let survol = ui.rect_contains_pointer(rangee.response.rect);
         let remplissage = if chargee {
             theme::attenue(theme::CYAN, 40)
+        } else if survol {
+            theme::couleur_de_survol()
         } else {
             theme::attenue(theme::PANNEAU, 200)
         };
