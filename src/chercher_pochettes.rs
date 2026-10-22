@@ -22,16 +22,11 @@ use eframe::egui;
 
 use crate::ecriture_tags::{self, Modifications, Pochette};
 use crate::generer_paroles::{normaliser, ressemblance};
+use crate::reseau::{self, Echec};
 use crate::tags::{self, Tags};
 
 const MUSICBRAINZ: &str = "https://musicbrainz.org/ws/2/release-group/";
 const ITUNES: &str = "https://itunes.apple.com/search";
-/// MusicBrainz demande que chaque logiciel se présente.
-const AGENT: &str = concat!(
-    "lecteur_mp3/",
-    env!("CARGO_PKG_VERSION"),
-    " (https://github.com/lepapyfoufurieux/lecteur_mp3)"
-);
 /// MusicBrainz accepte une recherche par seconde au plus.
 const PAUSE_ENTRE_RECHERCHES: Duration = Duration::from_millis(1100);
 /// Au-delà de ces ressemblances, la réponse est bien le même album.
@@ -210,10 +205,19 @@ pub fn lire_itunes(json: &str) -> Vec<Candidat> {
                     .and_then(|v| v.as_str())
                     .unwrap_or_default()
                     .to_string(),
-                image: image.replace("100x100bb", "600x600bb"),
+                // HTTPS seulement : iTunes donne parfois des adresses en http.
+                image: en_https(image).replace("100x100bb", "600x600bb"),
             })
         })
         .collect()
+}
+
+/// La même adresse, en https si elle était en http.
+fn en_https(adresse: &str) -> String {
+    match adresse.strip_prefix("http://") {
+        Some(reste) => format!("https://{reste}"),
+        None => adresse.to_string(),
+    }
 }
 
 /// Le nom de l'album sans « (Deluxe Edition) », « [Remastered] »… pour
@@ -345,8 +349,8 @@ impl Source {
 pub enum Interruption {
     /// On a cliqué sur « Arrêter ».
     Arretee,
-    /// Le site n'a pas répondu.
-    Reseau(String),
+    /// Le site n'a pas répondu, ou a refusé.
+    Reseau(Echec),
 }
 
 /// Une image trouvée et d'où elle vient (« iTunes : Album — Artiste »).
@@ -361,7 +365,7 @@ pub struct Trouvee {
 /// page n'existe pas. `arreter` dit si on a cliqué sur « Arrêter ».
 pub fn chercher(
     album: &AlbumACompleter,
-    mut demander: impl FnMut(&str, &[(&str, String)]) -> Result<Option<Vec<u8>>, String>,
+    mut demander: impl FnMut(&str, &[(&str, String)]) -> Result<Option<Vec<u8>>, Echec>,
     arreter: impl Fn() -> bool,
     pause: Duration,
 ) -> Result<Option<Trouvee>, Interruption> {
@@ -405,38 +409,6 @@ fn est_une_image(octets: &[u8]) -> bool {
         image::guess_format(octets),
         Ok(image::ImageFormat::Jpeg | image::ImageFormat::Png)
     ) && image::load_from_memory(octets).is_ok()
-}
-
-/// Télécharge une adresse. Une page introuvable veut dire « rien ». En cas
-/// d'erreur, on réessaie deux fois, après 1 puis 2 secondes.
-fn telecharger(
-    agent: &ureq::Agent,
-    adresse: &str,
-    parametres: &[(&str, String)],
-) -> Result<Option<Vec<u8>>, String> {
-    let mut essai = 0;
-    loop {
-        let mut requete = agent.get(adresse);
-        for (cle, valeur) in parametres {
-            requete = requete.query(*cle, valeur);
-        }
-        match requete.call() {
-            Ok(mut reponse) => {
-                return reponse
-                    .body_mut()
-                    .with_config()
-                    .limit(20 * 1024 * 1024)
-                    .read_to_vec()
-                    .map(Some)
-                    .map_err(|e| e.to_string());
-            }
-            Err(ureq::Error::StatusCode(404)) => return Ok(None),
-            Err(erreur) if essai == 2 => return Err(erreur.to_string()),
-            Err(_) => {}
-        }
-        essai += 1;
-        std::thread::sleep(Duration::from_secs(essai));
-    }
 }
 
 // ---------------------------------------------------------------- en arrière-plan
@@ -486,16 +458,12 @@ impl RecherchePochettes {
         let (pour_le_travail, stop, ctx) =
             (Arc::clone(&progression), Arc::clone(&arreter), ctx.clone());
         std::thread::spawn(move || {
-            let agent: ureq::Agent = ureq::Agent::config_builder()
-                .user_agent(AGENT)
-                .timeout_global(Some(Duration::from_secs(30)))
-                .build()
-                .into();
+            let agent = reseau::agent(Duration::from_secs(30));
             completer(
                 &morceaux,
                 &pour_le_travail,
                 &stop,
-                |adresse, p| telecharger(&agent, adresse, p),
+                |adresse, p| reseau::telecharger(&agent, adresse, p, &stop),
                 PAUSE_ENTRE_RECHERCHES,
                 || ctx.request_repaint(),
             );
@@ -527,7 +495,7 @@ fn completer(
     morceaux: &[PathBuf],
     progression: &Mutex<Progression>,
     arreter: &AtomicBool,
-    mut demander: impl FnMut(&str, &[(&str, String)]) -> Result<Option<Vec<u8>>, String>,
+    mut demander: impl FnMut(&str, &[(&str, String)]) -> Result<Option<Vec<u8>>, Echec>,
     pause: Duration,
     redessiner: impl Fn(),
 ) {
@@ -632,16 +600,25 @@ fn completer(
                 drop(etat);
                 return fin(Some("Arrêté."));
             }
-            Err(Interruption::Reseau(erreur)) => {
-                etat.erreurs.push((album.libelle(), erreur));
+            Err(Interruption::Reseau(echec)) => {
+                etat.erreurs.push((album.libelle(), echec.to_string()));
                 echecs_de_suite += 1;
                 if echecs_de_suite >= ECHECS_DE_SUITE_MAX {
                     etat.faits += 1;
                     drop(etat);
-                    return fin(Some(
-                        "Les sites de pochettes ne répondent pas : la connexion Internet est \
-                         peut-être coupée.",
-                    ));
+                    return fin(Some(match echec {
+                        Echec::SiteIndisponible(_) => {
+                            "Les sites de pochettes sont indisponibles pour le moment \
+                             (surchargés ou en maintenance) : réessaie plus tard."
+                        }
+                        Echec::SansReponse(_) => {
+                            "Les sites de pochettes ne répondent pas : la connexion Internet \
+                             est peut-être coupée."
+                        }
+                        Echec::NonSecurise(_) => {
+                            "Un site de pochettes a donné une adresse non sécurisée (http)."
+                        }
+                    }));
                 }
             }
         }
@@ -796,6 +773,16 @@ mod tests {
                 "Daft Punk",
                 "https://is1.mzstatic.com/image/thumb/x/600x600bb.jpg"
             )]
+        );
+    }
+
+    #[test]
+    fn une_image_itunes_en_http_passe_en_https() {
+        let json = r#"{"results": [{"collectionName": "Discovery", "artistName": "Daft Punk",
+             "artworkUrl100": "http://is1.mzstatic.com/image/thumb/x/100x100bb.jpg"}]}"#;
+        assert_eq!(
+            lire_itunes(json)[0].image,
+            "https://is1.mzstatic.com/image/thumb/x/600x600bb.jpg"
         );
     }
 
@@ -981,7 +968,7 @@ mod tests {
             &AtomicBool::new(false),
             |_, _| {
                 appels.set(appels.get() + 1);
-                Err("pas de connexion".to_string())
+                Err(Echec::SansReponse("pas de connexion".to_string()))
             },
             Duration::ZERO,
             || {},
@@ -989,6 +976,36 @@ mod tests {
         let p = progression.into_inner().unwrap();
         assert_eq!(appels.get(), ECHECS_DE_SUITE_MAX);
         assert_eq!(p.erreurs.len(), ECHECS_DE_SUITE_MAX);
-        assert!(p.interruption.is_some() && p.fini);
+        assert!(p.interruption.unwrap().contains("connexion Internet") && p.fini);
+    }
+
+    #[test]
+    fn un_503_dit_que_les_sites_sont_indisponibles() {
+        let dossier = dossier_de_test("503");
+        // Des noms à part : `mp3` passe par un fichier temporaire à ce nom,
+        // partagé avec les tests qui tournent en même temps.
+        let morceaux: Vec<PathBuf> = (1..=5)
+            .map(|n| {
+                mp3(
+                    &dossier,
+                    &format!("503-{n}.mp3"),
+                    &format!("Album {n}"),
+                    false,
+                )
+            })
+            .collect();
+        let progression = Mutex::new(Progression::default());
+        completer(
+            &morceaux,
+            &progression,
+            &AtomicBool::new(false),
+            |_, _| Err(Echec::SiteIndisponible("http status: 503".to_string())),
+            Duration::ZERO,
+            || {},
+        );
+        let p = progression.into_inner().unwrap();
+        let message = p.interruption.unwrap();
+        assert!(message.contains("indisponibles"), "{message}");
+        assert!(!message.contains("connexion"), "{message}");
     }
 }

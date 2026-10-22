@@ -21,21 +21,16 @@ use eframe::egui;
 use regex::Regex;
 
 use crate::paroles::Rangement;
+use crate::reseau::{self, Echec};
 use crate::tags::{self, Tags};
 
 const API: &str = "https://lrclib.net/api";
-/// LRCLIB demande que chaque logiciel se présente.
-const AGENT: &str = concat!(
-    "lecteur_mp3/",
-    env!("CARGO_PKG_VERSION"),
-    " (https://github.com/lepapyfoufurieux/lecteur_mp3)"
-);
-/// Une petite pause entre deux recherches, pour ne pas bombarder LRCLIB.
-const PAUSE_ENTRE_RECHERCHES: Duration = Duration::from_millis(200);
+/// Une pause entre deux recherches, pour ne pas surcharger LRCLIB.
+const PAUSE_ENTRE_RECHERCHES: Duration = Duration::from_secs(1);
 /// Au-delà de cette note, la réponse est assez bonne : on arrête de chercher.
 const NOTE_SUFFISANTE: f64 = 0.93;
 /// Après autant de morceaux de suite sans réussir à joindre LRCLIB, on
-/// s'arrête : Internet est sans doute coupé.
+/// s'arrête : le site est indisponible, ou Internet est coupé.
 const ECHECS_DE_SUITE_MAX: usize = 3;
 
 /// Mentions YouTube ou d'édition à retirer du titre.
@@ -419,15 +414,15 @@ pub enum Resultat {
 pub enum Interruption {
     /// On a cliqué sur « Arrêter ».
     Arretee,
-    /// LRCLIB n'a pas répondu.
-    Reseau(String),
+    /// LRCLIB n'a pas répondu, ou a refusé.
+    Reseau(Echec),
 }
 
 /// Cherche les paroles d'un morceau. `demander` interroge LRCLIB (ou, dans
 /// les tests, fait semblant) ; `arreter` dit si on a cliqué sur « Arrêter ».
 pub fn chercher(
     recherche: &Recherche,
-    mut demander: impl FnMut(&[(&str, String)]) -> Result<Vec<Candidat>, String>,
+    mut demander: impl FnMut(&[(&str, String)]) -> Result<Vec<Candidat>, Echec>,
     arreter: impl Fn() -> bool,
     pause: Duration,
 ) -> Result<Resultat, Interruption> {
@@ -493,33 +488,17 @@ pub fn contenu_du_lrc(chemin: &Path, recherche: &Recherche, paroles: &str, sourc
     )
 }
 
-/// Interroge LRCLIB. Une page introuvable veut dire « aucune réponse ». En
-/// cas d'erreur, on réessaie deux fois, après 1 puis 2 secondes.
+/// Interroge LRCLIB. Une page introuvable veut dire « aucune réponse ».
+/// Les nouveaux essais sont faits par `reseau::telecharger`.
 fn demander_a_lrclib(
     agent: &ureq::Agent,
     parametres: &[(&str, String)],
-) -> Result<Vec<Candidat>, String> {
-    let mut essai = 0;
-    loop {
-        let mut requete = agent.get(format!("{API}/search"));
-        for (cle, valeur) in parametres {
-            requete = requete.query(*cle, valeur);
-        }
-        match requete.call() {
-            Ok(mut reponse) => {
-                let json = reponse
-                    .body_mut()
-                    .read_to_string()
-                    .map_err(|e| e.to_string())?;
-                return Ok(lire_reponse(&json));
-            }
-            Err(ureq::Error::StatusCode(404)) => return Ok(Vec::new()),
-            Err(erreur) if essai == 2 => return Err(erreur.to_string()),
-            Err(_) => {}
-        }
-        essai += 1;
-        std::thread::sleep(Duration::from_secs(essai));
-    }
+    arreter: &AtomicBool,
+) -> Result<Vec<Candidat>, Echec> {
+    let reponse = reseau::telecharger(agent, &format!("{API}/search"), parametres, arreter)?;
+    Ok(lire_reponse(&String::from_utf8_lossy(
+        &reponse.unwrap_or_default(),
+    )))
 }
 
 // ---------------------------------------------------------------- en arrière-plan
@@ -566,11 +545,7 @@ impl Generation {
         let (pour_le_travail, stop, ctx) =
             (Arc::clone(&progression), Arc::clone(&arreter), ctx.clone());
         std::thread::spawn(move || {
-            let agent: ureq::Agent = ureq::Agent::config_builder()
-                .user_agent(AGENT)
-                .timeout_global(Some(Duration::from_secs(20)))
-                .build()
-                .into();
+            let agent = reseau::agent(Duration::from_secs(20));
             let Some(rangement) = Rangement::du_lecteur() else {
                 let mut p = pour_le_travail.lock().unwrap_or_else(|e| e.into_inner());
                 p.interruption = Some("Dossier des paroles introuvable.".to_string());
@@ -582,7 +557,7 @@ impl Generation {
                 &rangement,
                 &pour_le_travail,
                 &stop,
-                |p| demander_a_lrclib(&agent, p),
+                |p| demander_a_lrclib(&agent, p, &stop),
                 PAUSE_ENTRE_RECHERCHES,
                 || ctx.request_repaint(),
             );
@@ -614,7 +589,7 @@ fn generer(
     rangement: &Rangement,
     progression: &Mutex<Progression>,
     arreter: &AtomicBool,
-    mut demander: impl FnMut(&[(&str, String)]) -> Result<Vec<Candidat>, String>,
+    mut demander: impl FnMut(&[(&str, String)]) -> Result<Vec<Candidat>, Echec>,
     pause: Duration,
     redessiner: impl Fn(),
 ) {
@@ -669,15 +644,12 @@ fn generer(
                 etat.interruption = Some("Arrêté.".to_string());
                 break;
             }
-            Err(Interruption::Reseau(erreur)) => {
-                etat.erreurs.push((chemin.clone(), erreur));
+            Err(Interruption::Reseau(echec)) => {
+                etat.erreurs.push((chemin.clone(), echec.to_string()));
                 echecs_de_suite += 1;
                 if echecs_de_suite >= ECHECS_DE_SUITE_MAX {
                     etat.faits += 1;
-                    etat.interruption = Some(
-                        "LRCLIB ne répond pas : la connexion Internet est peut-être coupée."
-                            .to_string(),
-                    );
+                    etat.interruption = Some(pourquoi_on_s_arrete(&echec).to_string());
                     break;
                 }
             }
@@ -689,6 +661,20 @@ fn generer(
     etat.fini = true;
     drop(etat);
     redessiner();
+}
+
+/// Le message affiché quand on abandonne après plusieurs échecs de suite.
+fn pourquoi_on_s_arrete(echec: &Echec) -> &'static str {
+    match echec {
+        Echec::SiteIndisponible(_) => {
+            "LRCLIB est indisponible pour le moment (surchargé ou en maintenance) : \
+             réessaie plus tard."
+        }
+        Echec::SansReponse(_) => {
+            "LRCLIB ne répond pas : la connexion Internet est peut-être coupée."
+        }
+        Echec::NonSecurise(_) => "LRCLIB a répondu par une adresse non sécurisée (http).",
+    }
 }
 
 /// Écrit le .lrc, sauf s'il existe déjà (créé entre-temps par un autre
@@ -1069,7 +1055,7 @@ mod tests {
             &AtomicBool::new(false),
             |_| {
                 appels += 1;
-                Err("pas de connexion".to_string())
+                Err(Echec::SansReponse("pas de connexion".to_string()))
             },
             Duration::ZERO,
             || {},
@@ -1077,6 +1063,31 @@ mod tests {
         let p = progression.into_inner().unwrap();
         assert_eq!(appels, ECHECS_DE_SUITE_MAX);
         assert_eq!(p.erreurs.len(), ECHECS_DE_SUITE_MAX);
-        assert!(p.interruption.is_some() && p.fini);
+        assert!(p.interruption.unwrap().contains("connexion Internet") && p.fini);
+    }
+
+    /// Le bug de la capture : LRCLIB répond « 503 » (surchargé), et on
+    /// affichait « la connexion Internet est peut-être coupée ».
+    #[test]
+    fn un_503_dit_que_lrclib_est_indisponible_pas_que_la_connexion_est_coupee() {
+        let dossier = dossier_de_test("503");
+        let morceaux: Vec<PathBuf> = (1..=5)
+            .map(|n| dossier.join(format!("A - T{n}.mp3")))
+            .collect();
+        let progression = Mutex::new(Progression::default());
+        generer(
+            &morceaux,
+            &rangement_de_test(&dossier),
+            &progression,
+            &AtomicBool::new(false),
+            |_| Err(Echec::SiteIndisponible("http status: 503".to_string())),
+            Duration::ZERO,
+            || {},
+        );
+        let p = progression.into_inner().unwrap();
+        assert_eq!(p.erreurs[0].1, "http status: 503");
+        let message = p.interruption.unwrap();
+        assert!(message.contains("indisponible"), "{message}");
+        assert!(!message.contains("connexion"), "{message}");
     }
 }
