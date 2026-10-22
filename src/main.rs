@@ -15,6 +15,7 @@ mod generer_paroles;
 mod hud;
 mod infos_fichier;
 mod liste;
+mod mini;
 mod morceau;
 mod onde;
 mod paroles;
@@ -77,7 +78,7 @@ fn main() -> eframe::Result {
         // colonnes du bas seraient trop serrées.
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1320.0, 900.0])
-            .with_min_inner_size([1040.0, 720.0])
+            .with_min_inner_size(mini::TAILLE_MIN_GRANDE)
             // Pas de cadre du système : le bandeau néon sert de barre de titre.
             .with_decorations(false)
             .with_icon(systeme::icone_fenetre()),
@@ -223,6 +224,8 @@ struct LecteurApp {
     // La pochette du morceau en cours, et le fichier dont elle vient (pour
     // ne la relire que quand le morceau change). Rien si le fichier n'en a pas.
     pochette: Option<(PathBuf, Option<egui::TextureHandle>)>,
+    // Le mini-lecteur (bouton « Mini ») : affiché ou non, et sa place.
+    mini: mini::MiniLecteur,
     // Affiche-t-on les paroles synchronisées (fichier .lrc à côté du MP3) ?
     afficher_paroles: bool,
     // L'erreur d'ouverture du dossier des paroles, affichée dans les options.
@@ -400,6 +403,7 @@ impl LecteurApp {
             boite: Boite::vide(),
             derniere_ouverture: None,
             pochette: None,
+            mini: mini::MiniLecteur::charger(),
             afficher_paroles: option_memorisee(REGLAGE_PAROLES),
             message_paroles: None,
             paroles: None,
@@ -1693,6 +1697,16 @@ impl LecteurApp {
                     self.menu_options(ui);
                 },
             );
+            let mini = Bouton::texte("Mini")
+                .allure(theme::Allure::Allume)
+                .taille(egui::vec2(80.0, 30.0));
+            if ui
+                .add(mini)
+                .on_hover_text("Passer en mini-lecteur, toujours au-dessus des autres fenêtres")
+                .clicked()
+            {
+                self.mini.entrer(ui.ctx());
+            }
             let raccourcis = Bouton::texte("Raccourcis")
                 .allure(theme::Allure::Eteint)
                 .taille(egui::vec2(120.0, 30.0));
@@ -1970,6 +1984,9 @@ impl eframe::App for LecteurApp {
     /// À la fermeture, on mémorise où on en était.
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         self.memoriser_l_ecoute(None);
+        if self.mini.actif() {
+            self.mini.memoriser();
+        }
     }
 
     // Appelée à chaque image : on (re)dessine toute l'interface.
@@ -2001,6 +2018,62 @@ impl eframe::App for LecteurApp {
         let en_lecture = self.platine_active().is_some_and(Telecommande::tourne);
         self.effets.avancer(ctx.input(|i| i.stable_dt), en_lecture);
 
+        if self.mini.actif() {
+            self.afficher_mini(ctx);
+        } else {
+            self.grande_fenetre(ctx, en_lecture);
+        }
+
+        self.afficher_editeur(ctx);
+        if let Some(fenetre) = &mut self.fenetre_infos {
+            if !fenetre.afficher(ctx) {
+                self.fenetre_infos = None;
+            }
+        }
+        depot::dessiner_survol(ctx);
+        playlists::dessiner_glissement(ctx);
+
+        self.surveiller_sortie(Instant::now());
+
+        self.suivre_la_fin();
+        self.media.etat(match self.etat() {
+            Etat::Arrete => EtatMedia::Arrete,
+            Etat::Pause => EtatMedia::Pause,
+            Etat::Chargement | Etat::Lecture => EtatMedia::Lecture,
+        });
+        let en_cours = match (&self.morceau, self.liste.courant()) {
+            (Some(_), Some(n)) => self.liste.fichier(n),
+            _ => None,
+        };
+        self.media.morceau(en_cours);
+
+        // Pendant la lecture (ou en pause, le temps que les barres retombent),
+        // on redessine à chaque image de l'écran pour que le visualiseur soit fluide.
+        // Sinon (en pause, à l'arrêt, ou fenêtre réduite : rien ne bouge à
+        // l'écran), de temps en temps suffit pour voir l'état changer et
+        // passer au morceau suivant.
+        // Les lignes d'écran, une fois tous les panneaux dessinés.
+        self.effets.dessiner(ctx);
+
+        let en_lecture = self.platine_active().is_some_and(Telecommande::tourne);
+        let reduite = ctx.input(|i| i.viewport().minimized == Some(true));
+        let anime = en_lecture || !self.visualiseur.au_repos() || self.position_glissee.is_some();
+        if self.mini.actif() {
+            // Le mini-lecteur n'a pas de visualiseur : sa barre avance
+            // assez souvent comme ça.
+            ctx.request_repaint_after(Duration::from_millis(if en_lecture { 100 } else { 200 }));
+        } else if anime && !reduite {
+            ctx.request_repaint();
+        } else {
+            ctx.request_repaint_after(Duration::from_millis(200));
+        }
+    }
+}
+
+impl LecteurApp {
+    /// La grande fenêtre : le bandeau, la bibliothèque et les playlists à
+    /// gauche, le lecteur au centre.
+    fn grande_fenetre(&mut self, ctx: &egui::Context, en_lecture: bool) {
         // Les bords de la fenêtre se tirent pour la redimensionner ; ils
         // passent avant les panneaux.
         fenetre::bords(ctx);
@@ -2197,45 +2270,69 @@ impl eframe::App for LecteurApp {
                 self.changer_volume(de);
             }
         }
+    }
 
-        self.afficher_editeur(ctx);
-        if let Some(fenetre) = &mut self.fenetre_infos {
-            if !fenetre.afficher(ctx) {
-                self.fenetre_infos = None;
-            }
-        }
-        depot::dessiner_survol(ctx);
-        playlists::dessiner_glissement(ctx);
-
-        self.surveiller_sortie(Instant::now());
-
-        self.suivre_la_fin();
-        self.media.etat(match self.etat() {
-            Etat::Arrete => EtatMedia::Arrete,
-            Etat::Pause => EtatMedia::Pause,
-            Etat::Chargement | Etat::Lecture => EtatMedia::Lecture,
-        });
+    /// Le mini-lecteur, à la place de la grande fenêtre.
+    fn afficher_mini(&mut self, ctx: &egui::Context) {
+        self.mini.suivre_la_position(ctx);
         let en_cours = match (&self.morceau, self.liste.courant()) {
-            (Some(_), Some(n)) => self.liste.fichier(n),
+            (Some(_), Some(n)) => self.liste.fichier(n).map(Path::to_path_buf),
             _ => None,
         };
-        self.media.morceau(en_cours);
-
-        // Pendant la lecture (ou en pause, le temps que les barres retombent),
-        // on redessine à chaque image de l'écran pour que le visualiseur soit fluide.
-        // Sinon (en pause, à l'arrêt, ou fenêtre réduite : rien ne bouge à
-        // l'écran), de temps en temps suffit pour voir l'état changer et
-        // passer au morceau suivant.
-        // Les lignes d'écran, une fois tous les panneaux dessinés.
-        self.effets.dessiner(ctx);
-
-        let en_lecture = self.platine_active().is_some_and(Telecommande::tourne);
-        let reduite = ctx.input(|i| i.viewport().minimized == Some(true));
-        let anime = en_lecture || !self.visualiseur.au_repos() || self.position_glissee.is_some();
-        if anime && !reduite {
-            ctx.request_repaint();
-        } else {
-            ctx.request_repaint_after(Duration::from_millis(200));
+        self.charger_pochette(ctx, en_cours.as_deref());
+        // Pendant l'ouverture, on montre déjà le nom du morceau.
+        let en_cours = en_cours.or_else(|| self.chargement.as_ref().map(|c| c.chemin.clone()));
+        let (titre, artiste) = match &en_cours {
+            Some(chemin) => self.tags.titre_et_artiste(chemin),
+            None => ("Aucun morceau".to_string(), None),
+        };
+        let nom = en_cours.as_deref().map(|chemin| self.tags.libelle(chemin));
+        self.zone.infobulle(nom.as_deref());
+        let duree = self.morceau.as_ref().map(|m| m.duree());
+        let duree_s = duree.unwrap_or_default().as_secs_f32();
+        let secondes = self.position().as_secs_f32().min(duree_s);
+        let total = duree.map_or_else(|| "--:--".to_string(), format_temps);
+        // On ne saute dans le morceau que s'il est en lecture ou en pause.
+        let telecommande = self.platine_active().filter(|t| !t.freine()).cloned();
+        let affichage = mini::Affichage {
+            pochette: match &self.pochette {
+                Some((_, Some(pochette))) => Some(pochette),
+                _ => None,
+            },
+            titre,
+            artiste,
+            fraction: if duree_s > 0.0 {
+                secondes / duree_s
+            } else {
+                0.0
+            },
+            temps: format!(
+                "{} / {total}",
+                format_temps(Duration::from_secs_f32(secondes))
+            ),
+            en_lecture: matches!(self.etat(), Etat::Lecture | Etat::Chargement),
+            boutons_actifs: !self.liste.est_vide(),
+            peut_sauter: telecommande.is_some(),
+        };
+        for action in mini::afficher(ctx, &affichage) {
+            match action {
+                mini::Action::Precedent => self.executer(Commande::Precedent),
+                mini::Action::LecturePause => self.executer(Commande::LecturePause),
+                mini::Action::Suivant => self.executer(Commande::Suivant),
+                mini::Action::Sauter(fraction) => {
+                    if let Some(t) = &telecommande {
+                        t.aller_a(fraction * duree_s);
+                    }
+                }
+                mini::Action::Agrandir => self.mini.sortir(ctx),
+            }
+        }
+        // La molette règle le volume, comme sur le lecteur en grand.
+        if ctx.input(|i| i.pointer.hover_pos()).is_some() {
+            let de = raccourcis::molette(ctx);
+            if de != 0.0 {
+                self.changer_volume(de);
+            }
         }
     }
 }
