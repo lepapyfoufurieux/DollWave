@@ -10,6 +10,7 @@ mod ecriture_tags;
 mod editeur_tags;
 mod effets;
 mod egalisation;
+mod fenetre;
 mod generer_paroles;
 mod hud;
 mod infos_fichier;
@@ -77,6 +78,8 @@ fn main() -> eframe::Result {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1320.0, 900.0])
             .with_min_inner_size([1040.0, 720.0])
+            // Pas de cadre du système : le bandeau néon sert de barre de titre.
+            .with_decorations(false)
             .with_icon(systeme::icone_fenetre()),
         ..Default::default()
     };
@@ -1998,7 +2001,12 @@ impl eframe::App for LecteurApp {
         let en_lecture = self.platine_active().is_some_and(Telecommande::tourne);
         self.effets.avancer(ctx.input(|i| i.stable_dt), en_lecture);
 
-        // En haut, le bandeau néon (logo et voyants), sur toute la largeur.
+        // Les bords de la fenêtre se tirent pour la redimensionner ; ils
+        // passent avant les panneaux.
+        fenetre::bords(ctx);
+
+        // En haut, le bandeau néon (logo, voyants et boutons de la fenêtre),
+        // sur toute la largeur.
         let voyants = bandeau::Voyants {
             sortie: self.sortie.is_some(),
             bibliotheque: self.bibliotheque.nombre_de_titres().is_some_and(|n| n > 0),
