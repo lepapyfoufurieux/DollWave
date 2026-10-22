@@ -495,14 +495,6 @@ impl ListeDeLecture {
                             }
                             None => {}
                         }
-                        // L'infobulle n'est préparée que si la souris est dessus.
-                        let ligne = if glisse.is_some() {
-                            ligne
-                        } else {
-                            ligne.on_hover_ui(|ui| {
-                                ui.label(tags.infobulle(fichier));
-                            })
-                        };
                         // Un clic suffit. Pour egui, un double-clic, c'est deux
                         // clics : le second tombe sur le morceau devenu le
                         // morceau en cours, ce qui ne le relance pas (voir main.rs).

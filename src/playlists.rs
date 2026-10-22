@@ -383,9 +383,6 @@ impl Playlists {
                                 .truncate()
                                 .selectable(false)
                                 .sense(egui::Sense::click()),
-                        )
-                        .on_hover_text(
-                            "Cliquer pour écouter cette playlist (remplace la liste de lecture)",
                         );
                     if clic_simple(ui, &etiquette) {
                         if let Some(fichiers) = self.lire_pour(&nom) {
@@ -442,17 +439,11 @@ impl Playlists {
                 for (i, morceau) in morceaux.iter().enumerate() {
                     let ligne = ui.horizontal(|ui| {
                         // Un clic lance ce titre ; le faire glisser le déplace.
-                        let aide = format!(
-                            "{}\n\nCliquer pour écouter la playlist à partir de ce titre ; glisser pour le déplacer",
-                            tags.infobulle(morceau)
+                        let titre = ui.add(
+                            egui::Label::new(tags.libelle(morceau))
+                                .selectable(false)
+                                .sense(egui::Sense::click_and_drag()),
                         );
-                        let titre = ui
-                            .add(
-                                egui::Label::new(tags.libelle(morceau))
-                                    .selectable(false)
-                                    .sense(egui::Sense::click_and_drag()),
-                            )
-                            .on_hover_text(aide);
                         if clic_simple(ui, &titre) {
                             a_lancer = Some(i);
                         }
@@ -558,8 +549,7 @@ impl Playlists {
                         )
                         .on_hover_text(
                             "Se remplit toute seule avec tes morceaux les plus écoutés \
-                             (les écoutes récentes comptent plus).\n\
-                             Cliquer pour l'écouter (remplace la liste de lecture)",
+                             (les écoutes récentes comptent plus).",
                         );
                     if clic_simple(ui, &etiquette) && !self.plus_ecoutes.is_empty() {
                         self.chargee = Some(PLUS_ECOUTES.to_string());
@@ -592,17 +582,11 @@ impl Playlists {
                     ui.weak("Vide pour l'instant : un morceau y entre quand tu en as écouté au moins la moitié.");
                 }
                 for (i, morceau) in self.plus_ecoutes.iter().enumerate() {
-                    let aide = format!(
-                        "{}\n\nCliquer pour écouter la playlist à partir de ce titre",
-                        tags.infobulle(morceau)
+                    let titre = ui.add(
+                        egui::Label::new(tags.libelle(morceau))
+                            .selectable(false)
+                            .sense(egui::Sense::click()),
                     );
-                    let titre = ui
-                        .add(
-                            egui::Label::new(tags.libelle(morceau))
-                                .selectable(false)
-                                .sense(egui::Sense::click()),
-                        )
-                        .on_hover_text(aide);
                     if clic_simple(ui, &titre) {
                         a_lancer = Some(i);
                     }

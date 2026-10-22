@@ -1156,17 +1156,6 @@ fn ligne_morceau(ui: &mut egui::Ui, chemin: &Path, lignes: &mut Lignes, dossier:
             ui.add(egui::Label::new(nom).truncate().selectable(false));
         });
     });
-
-    let aide = if deja {
-        "Déjà dans la liste de lecture (cliquer pour l'ajouter encore une fois ; glisser sur une playlist ou clic droit pour l'y ajouter)"
-    } else {
-        "Cliquer pour ajouter à la liste de lecture (glisser sur une playlist ou clic droit pour l'y ajouter)"
-    };
-    // L'infobulle n'est préparée que si la souris est dessus.
-    let tags = lignes.tags;
-    let ligne = ligne.on_hover_ui(|ui| {
-        ui.label(format!("{}\n\n{aide}", tags.infobulle(chemin)));
-    });
     if clic_simple(ui, &ligne) {
         lignes.a_ajouter.push(chemin.to_path_buf());
     }

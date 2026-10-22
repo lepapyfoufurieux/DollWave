@@ -57,12 +57,9 @@ pub struct Qualite {
 /// Ce qu'on sait d'un fichier.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Infos {
-    /// Le format, d'après l'extension : « MP3 », « FLAC », « WAV », « OGG ».
-    pub format: String,
     /// La taille, en octets.
     pub taille: u64,
-    /// Rien si le fichier n'a pas de trame MP3 reconnaissable (ou n'est pas
-    /// un MP3 : pour les autres formats, ces détails ne sont pas encore lus).
+    /// Rien si le fichier n'a pas de trame MP3 reconnaissable.
     pub qualite: Option<Qualite>,
 }
 
@@ -70,21 +67,8 @@ pub struct Infos {
 /// entier). Le fichier tient en mémoire le temps de l'analyse, comme le
 /// morceau en cours pour le scratch.
 pub fn lire(chemin: &Path) -> Result<Infos, String> {
-    let format = chemin
-        .extension()
-        .map_or(String::new(), |e| e.to_string_lossy().to_uppercase());
-    if format != "MP3" {
-        // On ne sait lire que les en-têtes MP3 : pour les autres, la taille.
-        let taille = std::fs::metadata(chemin).map_err(|e| e.to_string())?.len();
-        return Ok(Infos {
-            format,
-            taille,
-            qualite: None,
-        });
-    }
     let octets = std::fs::read(chemin).map_err(|e| e.to_string())?;
     Ok(Infos {
-        format,
         taille: octets.len() as u64,
         qualite: analyser(&octets),
     })
@@ -356,25 +340,6 @@ fn avec_espaces(nombre: u64) -> String {
     texte
 }
 
-/// Le résumé du fichier (infobulle du bloc « En lecture ») : « MP3 · 320 kbit/s · 44,1 kHz ·
-/// stéréo · 8,4 Mo ».
-pub fn resume(infos: &Infos) -> String {
-    let mut morceaux = vec![infos.format.clone()];
-    if let Some(q) = &infos.qualite {
-        morceaux.push(q.debit.texte());
-        morceaux.push(texte_frequence(q.frequence));
-        morceaux.push(
-            match q.canaux {
-                Canaux::Mono => "mono",
-                _ => "stéréo",
-            }
-            .to_string(),
-        );
-    }
-    morceaux.push(texte_taille(infos.taille));
-    morceaux.join(" · ")
-}
-
 // --- Les infos du morceau en cours, lues en arrière-plan ---
 
 /// Les infos déjà lues (ou en cours de lecture) de quelques fichiers.
@@ -529,10 +494,7 @@ impl FenetreInfos {
                         ligne(ui, "Durée", &crate::format_temps(q.duree));
                         ligne(ui, "Format", &format!("MP3 ({} Layer III)", q.version));
                     }
-                    None if infos.format == "MP3" => {
-                        ligne(ui, "Format", "Pas de son MP3 reconnu dans ce fichier")
-                    }
-                    None => ligne(ui, "Format", &infos.format),
+                    None => ligne(ui, "Format", "Pas de son MP3 reconnu dans ce fichier"),
                 }
                 let taille = format!(
                     "{} ({} octets)",
@@ -661,26 +623,5 @@ mod tests {
         assert_eq!(texte_taille(524_288), "512 Ko");
         assert_eq!(texte_taille(12), "12 octets");
         assert_eq!(avec_espaces(8_812_345), "8\u{202F}812\u{202F}345");
-        let infos = Infos {
-            format: "MP3".into(),
-            taille: 8_812_345,
-            qualite: Some(Qualite {
-                debit: Debit::Constant(320),
-                frequence: 44_100,
-                canaux: Canaux::StereoJointe,
-                version: "MPEG-1",
-                duree: Duration::from_secs(200),
-            }),
-        };
-        assert_eq!(
-            resume(&infos),
-            "MP3 · 320 kbit/s · 44,1 kHz · stéréo · 8,4 Mo"
-        );
-        let flac = Infos {
-            format: "FLAC".into(),
-            taille: 524_288,
-            qualite: None,
-        };
-        assert_eq!(resume(&flac), "FLAC · 512 Ko");
     }
 }

@@ -1731,11 +1731,7 @@ impl LecteurApp {
             album,
             techniques: hud::infos_techniques(infos.as_ref(), gain, sortie),
         };
-        let mut aide = "ℹ Infos du fichier (débit, taille, emplacement)".to_string();
-        if let Some(infos) = &infos {
-            aide = format!("{}\n{aide}", infos_fichier::resume(infos));
-        }
-        if hud::afficher(ui, &bloc).on_hover_text(aide).clicked() {
+        if hud::afficher(ui, &bloc).clicked() {
             if let Some(chemin) = en_cours {
                 self.fenetre_infos = Some(FenetreInfos::ouvrir(
                     ui.ctx(),
@@ -1758,27 +1754,27 @@ impl LecteurApp {
                 let bouton = Bouton::icone(Icone::Precedent)
                     .coins(Coins::haut_gauche(10.0))
                     .taille(carre);
-                if ui.add(bouton).on_hover_text("Morceau précédent").clicked() {
+                if ui.add(bouton).clicked() {
                     self.precedent();
                 }
                 let bouton = Bouton::icone(Icone::Lecture)
                     .allure(Allure::Hexagone)
                     .taille(egui::vec2(64.0, 64.0));
-                if ui.add(bouton).on_hover_text("Lecture").clicked() {
+                if ui.add(bouton).clicked() {
                     self.lecture();
                 }
                 let bouton = Bouton::icone(Icone::Pause).taille(carre);
-                if ui.add(bouton).on_hover_text("Pause").clicked() {
+                if ui.add(bouton).clicked() {
                     self.pause();
                 }
                 let bouton = Bouton::icone(Icone::Stop).taille(carre);
-                if ui.add(bouton).on_hover_text("Stop").clicked() {
+                if ui.add(bouton).clicked() {
                     self.arreter();
                 }
                 let bouton = Bouton::icone(Icone::Suivant)
                     .coins(Coins::bas_droit(10.0))
                     .taille(carre);
-                if ui.add(bouton).on_hover_text("Morceau suivant").clicked() {
+                if ui.add(bouton).clicked() {
                     self.suivant();
                 }
             });

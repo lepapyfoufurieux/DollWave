@@ -141,7 +141,6 @@ pub fn segments_du_volume(ui: &mut egui::Ui, volume: f32, muet: bool) -> Option<
     let (largeur, ecart, hauteur) = (6.0, 3.0, 26.0);
     let taille = egui::vec2(SEGMENTS as f32 * (largeur + ecart) - ecart, hauteur);
     let (zone, reponse) = ui.allocate_exact_size(taille, egui::Sense::click_and_drag());
-    let reponse = reponse.on_hover_text("Volume : cliquer ou glisser (ou molette)");
     let allumes = if muet { 0 } else { segments_allumes(volume) };
     let peintre = ui.painter();
     for n in 0..SEGMENTS {
