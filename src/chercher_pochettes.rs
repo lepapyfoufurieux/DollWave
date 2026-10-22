@@ -1173,7 +1173,7 @@ mod tests {
     #[test]
     fn un_album_introuvable_n_est_pas_recherche_la_fois_suivante() {
         let dossier = dossier_de_test("memoire");
-        let morceaux = [mp3(&dossier, "a.mp3", "Rien du tout", false)];
+        let morceaux = [mp3(&dossier, "memoire.mp3", "Rien du tout", false)];
         let mut memoire = Introuvables::en_memoire();
         let appels = std::cell::Cell::new(0);
         let mut resumes = Vec::new();
