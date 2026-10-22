@@ -377,13 +377,12 @@ impl Playlists {
                         theme::TEXTE
                     });
                     let nombre = self.toutes[n].morceaux.len();
-                    let etiquette = ui
-                        .add(
-                            egui::Label::new(texte)
-                                .truncate()
-                                .selectable(false)
-                                .sense(egui::Sense::click()),
-                        );
+                    let etiquette = ui.add(
+                        egui::Label::new(texte)
+                            .truncate()
+                            .selectable(false)
+                            .sense(egui::Sense::click()),
+                    );
                     if clic_simple(ui, &etiquette) {
                         if let Some(fichiers) = self.lire_pour(&nom) {
                             self.chargee = Some(nom.clone());
