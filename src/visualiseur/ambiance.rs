@@ -88,6 +88,10 @@ pub struct Ambiance {
     /// L'image actuelle et un brouillon de même taille, échangés à chaque image.
     image: Image,
     brouillon: Image,
+    /// Pour chaque pixel, le sinus et le cosinus de 6 × sa distance au
+    /// centre : ils ne changent pas d'une image à l'autre, on les calcule
+    /// une fois (quand la taille change) au lieu de 25 600 fois par image.
+    ondulations: Vec<[f32; 2]>,
     /// La même image, envoyée à la carte graphique pour être dessinée.
     texture: Option<egui::TextureHandle>,
 }
@@ -106,6 +110,7 @@ impl Ambiance {
             barres: Vec::new(),
             image: Image::noire(320, 80),
             brouillon: Image::noire(320, 80),
+            ondulations: ondulations(320, 80),
             texture: None,
         }
     }
@@ -144,6 +149,7 @@ impl Ambiance {
         }
         self.image = nouvelle;
         self.brouillon = Image::noire(largeur, hauteur);
+        self.ondulations = ondulations(largeur, hauteur);
     }
 
     /// Calcule l'image suivante. `barres` : la force de chaque bande de
@@ -244,7 +250,16 @@ impl Ambiance {
             self.image.hauteur as f32 / 2.0,
         );
         let echelle = self.image.hauteur as f32;
+        // Le tourbillon tord plus ou moins selon la distance au centre :
+        // sin(6 × distance − 1,7 × t), calculé à partir des sinus et cosinus
+        // gardés pour chaque pixel (sin(a − b) = sin a cos b − cos a sin b).
+        let (sin_t, cos_t) = (1.7 * t).sin_cos();
+        // Sans tourbillon, la rotation est la même partout.
+        let rotation_seule = rotation.sin_cos();
         for y in 0..self.image.hauteur {
+            // Les flammes ondulent ligne par ligne.
+            let v_ligne = (y as f32 + 0.5 - cy) / echelle;
+            let ondule_flammes = pas * 0.006 * (0.5 + m) * (9.0 * v_ligne + 4.0 * t).sin();
             for x in 0..self.image.largeur {
                 // Position par rapport au centre, en « hauteurs d'image ».
                 let mut u = (x as f32 + 0.5 - cx) / echelle;
@@ -257,12 +272,15 @@ impl Ambiance {
                 let (su, sv) = if scene == Scene::Flammes {
                     // On prend la lumière un peu plus bas (elle monte), avec
                     // une ondulation de côté.
-                    let ondule = pas * 0.006 * (0.5 + m) * (9.0 * v + 4.0 * t).sin();
-                    (u + ondule, v + pas * (1.5 + 1.5 * g) / echelle)
+                    (u + ondule_flammes, v + pas * (1.5 + 1.5 * g) / echelle)
                 } else {
-                    let rayon = (u * u + v * v).sqrt();
-                    let angle = rotation + tourbillon * (6.0 * rayon - 1.7 * t).sin();
-                    let (s, c) = angle.sin_cos();
+                    let (s, c) = if tourbillon == 0.0 {
+                        rotation_seule
+                    } else {
+                        let [sin_r, cos_r] = self.ondulations[y * self.image.largeur + x];
+                        let ondulation = sin_r * cos_t - cos_r * sin_t;
+                        (rotation + tourbillon * ondulation).sin_cos()
+                    };
                     ((u * c - v * s) * zoom, (u * s + v * c) * zoom)
                 };
                 let source = self
@@ -489,6 +507,25 @@ impl Image {
     fn lire(&self, x: f32, y: f32) -> Lumiere {
         let (x0, y0) = (x.floor(), y.floor());
         let (fx, fy) = (x - x0, y - y0);
+        // Le cas le plus courant : les quatre voisins sont dans l'image, on
+        // les lit directement, sans vérifier chacun.
+        if x0 >= 0.0
+            && y0 >= 0.0
+            && x0 + 1.0 < self.largeur as f32
+            && y0 + 1.0 < self.hauteur as f32
+        {
+            let i = y0 as usize * self.largeur + x0 as usize;
+            let (a, b) = (self.pixels[i], self.pixels[i + 1]);
+            let (c, d) = (
+                self.pixels[i + self.largeur],
+                self.pixels[i + self.largeur + 1],
+            );
+            return std::array::from_fn(|k| {
+                let haut = a[k] + (b[k] - a[k]) * fx;
+                let bas = c[k] + (d[k] - c[k]) * fx;
+                haut + (bas - haut) * fy
+            });
+        }
         let pixel = |px: f32, py: f32| -> Lumiere {
             if px < 0.0 || py < 0.0 || px >= self.largeur as f32 || py >= self.hauteur as f32 {
                 [0.0; 3]
@@ -521,6 +558,22 @@ impl Image {
             }
         }
     }
+}
+
+/// Pour chaque pixel d'une image de cette taille : le sinus et le cosinus de
+/// 6 × sa distance au centre (en « hauteurs d'image »).
+fn ondulations(largeur: usize, hauteur: usize) -> Vec<[f32; 2]> {
+    let (cx, cy) = (largeur as f32 / 2.0, hauteur as f32 / 2.0);
+    let echelle = hauteur as f32;
+    (0..hauteur)
+        .flat_map(|y| (0..largeur).map(move |x| (x, y)))
+        .map(|(x, y)| {
+            let u = (x as f32 + 0.5 - cx) / echelle;
+            let v = (y as f32 + 0.5 - cy) / echelle;
+            let (s, c) = (6.0 * (u * u + v * v).sqrt()).sin_cos();
+            [s, c]
+        })
+        .collect()
 }
 
 /// La taille (largeur, hauteur) de l'image calculée pour un cadre de
@@ -694,6 +747,49 @@ mod tests {
             ambiance.scene = scene;
             ambiance.avancer(&[0.8; 32], &onde(n), true, IMAGE);
         }
+    }
+
+    #[test]
+    fn les_ondulations_gardees_donnent_le_meme_tourbillon() {
+        // Le calcul d'avant, pixel par pixel, et celui d'aujourd'hui.
+        let (largeur, hauteur) = (346, 74);
+        let gardees = ondulations(largeur, hauteur);
+        let t = 12.3_f32;
+        let (sin_t, cos_t) = (1.7 * t).sin_cos();
+        let echelle = hauteur as f32;
+        for (x, y) in [(0, 0), (173, 37), (345, 73), (10, 60)] {
+            let u = (x as f32 + 0.5 - largeur as f32 / 2.0) / echelle;
+            let v = (y as f32 + 0.5 - hauteur as f32 / 2.0) / echelle;
+            let avant = (6.0 * (u * u + v * v).sqrt() - 1.7 * t).sin();
+            let [s, c] = gardees[y * largeur + x];
+            let maintenant = s * cos_t - c * sin_t;
+            assert!(
+                (avant - maintenant).abs() < 1e-4,
+                "({x}, {y}) : {avant} ≠ {maintenant}"
+            );
+        }
+    }
+
+    #[test]
+    fn lire_melange_les_voisins_dedans_comme_au_bord() {
+        let mut image = Image::noire(3, 2);
+        for (n, p) in image.pixels.iter_mut().enumerate() {
+            *p = [n as f32; 3];
+        }
+        // Dedans : entre les pixels 0, 1, 3 et 4.
+        assert_eq!(image.lire(0.5, 0.5)[0], 2.0);
+        assert_eq!(image.lire(1.0, 1.0)[0], 4.0);
+        // Au bord : les voisins hors de l'image comptent pour du noir.
+        assert_eq!(image.lire(2.0, 1.0)[0], 5.0);
+        assert_eq!(image.lire(2.5, 1.0)[0], 2.5);
+        assert_eq!(image.lire(-1.0, 0.0)[0], 0.0);
+    }
+
+    #[test]
+    fn changer_la_taille_refait_les_ondulations() {
+        let mut ambiance = Ambiance::new();
+        ambiance.adapter(egui::vec2(700.0, 150.0));
+        assert_eq!(ambiance.ondulations.len(), ambiance.image.pixels.len());
     }
 
     #[test]
