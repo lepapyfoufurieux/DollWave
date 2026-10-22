@@ -18,6 +18,10 @@ const HAUTEUR_MAX: f32 = 160.0;
 /// La hauteur d'une ligne de la liste.
 const HAUTEUR_LIGNE: f32 = 28.0;
 
+/// Pour l'aléatoire optimisé : donne l'artiste et l'album d'un morceau (en
+/// minuscules, rien s'ils ne sont pas connus).
+pub type Famille = Box<dyn Fn(&Path) -> (Option<String>, Option<String>)>;
+
 /// Ce que l'utilisateur a demandé en cliquant dans la liste.
 pub enum Action {
     /// Jouer le morceau numéro n (clic sur sa ligne).
@@ -56,6 +60,9 @@ pub struct ListeDeLecture {
     /// En lecture aléatoire : le morceau déjà tiré au sort pour passer
     /// ensuite (voir `a_suivre`), pour que le tirage ne change pas d'ici là.
     tirage: Option<usize>,
+    /// Aléatoire optimisé (⚙ Options) : de quoi connaître l'artiste et
+    /// l'album des morceaux, pour éviter d'enchaîner deux fois les mêmes.
+    optimise: Option<Famille>,
     /// La hauteur d'une ligne à l'écran, pour réserver la place de celles
     /// qu'on ne dessine pas (hors de l'écran).
     hauteur_ligne: Option<f32>,
@@ -147,6 +154,13 @@ impl ListeDeLecture {
 
     pub fn aleatoire(&self) -> bool {
         self.aleatoire
+    }
+
+    /// Active (avec de quoi connaître l'artiste et l'album des morceaux) ou
+    /// désactive l'aléatoire optimisé.
+    pub fn optimiser_aleatoire(&mut self, famille: Option<Famille>) {
+        self.optimise = famille;
+        self.tirage = None;
     }
 
     /// Active ou désactive la lecture aléatoire. En l'activant, on repart
@@ -272,6 +286,7 @@ impl ListeDeLecture {
         let restants: Vec<usize> = (0..self.morceaux.len())
             .filter(|&i| self.tirable(i, fini))
             .collect();
+        let restants = self.varier(restants);
         let t = restants[hasard(restants.len())];
         self.tirage = Some(t);
         Some(t)
@@ -294,6 +309,37 @@ impl ListeDeLecture {
         } else {
             !self.deja_joue[i]
         }
+    }
+
+    /// Aléatoire optimisé : parmi les morceaux qu'on peut tirer, garde de
+    /// préférence ceux d'un autre artiste et d'un autre album que le morceau
+    /// en cours ; s'il n'y en a pas, ceux d'un autre album ; sinon, tous.
+    /// Un artiste ou un album inconnu n'est jamais « le même ».
+    fn varier(&self, candidats: Vec<usize>) -> Vec<usize> {
+        let (Some(famille), Some(chemin)) =
+            (&self.optimise, self.courant.and_then(|c| self.fichier(c)))
+        else {
+            return candidats;
+        };
+        let (artiste, album) = famille(chemin);
+        let pareil = |a: &Option<String>, b: &Option<String>| a.is_some() && a == b;
+        let familles: Vec<_> = candidats
+            .iter()
+            .map(|&i| (i, famille(&self.morceaux[i])))
+            .collect();
+        for meme_artiste_permis in [false, true] {
+            let gardes: Vec<usize> = familles
+                .iter()
+                .filter(|(_, (ar, al))| {
+                    !pareil(al, &album) && (meme_artiste_permis || !pareil(ar, &artiste))
+                })
+                .map(|&(i, _)| i)
+                .collect();
+            if !gardes.is_empty() {
+                return gardes;
+            }
+        }
+        candidats
     }
 
     /// Le numéro du morceau précédent. Au début de la liste, on reste sur le
@@ -851,6 +897,109 @@ mod tests {
         l.choisir(0);
         assert_eq!(l.precedent(), Some(0));
         assert_eq!(liste(0).precedent(), None);
+    }
+
+    /// Une liste en aléatoire optimisé : le morceau i a l'artiste et
+    /// l'album `familles[i]` ("" = inconnu). On démarre sur le morceau 0.
+    fn liste_optimisee(familles: &[(&str, &str)]) -> ListeDeLecture {
+        let connus: Vec<(Option<String>, Option<String>)> = familles
+            .iter()
+            .map(|(ar, al)| {
+                let texte = |t: &str| (!t.is_empty()).then(|| t.to_string());
+                (texte(ar), texte(al))
+            })
+            .collect();
+        let mut l = liste(familles.len());
+        l.optimiser_aleatoire(Some(Box::new(move |chemin: &Path| {
+            let i: usize = chemin
+                .file_stem()
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .parse()
+                .unwrap();
+            connus[i].clone()
+        })));
+        l.choisir(0);
+        l.changer_aleatoire(true);
+        l
+    }
+
+    #[test]
+    fn aleatoire_optimise_evite_le_meme_artiste() {
+        for _ in 0..50 {
+            let mut l = liste_optimisee(&[("a", "x"), ("a", "y"), ("b", "z"), ("b", "w")]);
+            let n = l.suivant().unwrap();
+            assert!(n >= 2, "{n} est du même artiste que 0");
+        }
+    }
+
+    #[test]
+    fn aleatoire_optimise_tout_du_meme_artiste_change_d_album() {
+        for _ in 0..50 {
+            let mut l = liste_optimisee(&[("a", "x"), ("a", "x"), ("a", "y")]);
+            assert_eq!(l.suivant(), Some(2));
+        }
+    }
+
+    #[test]
+    fn aleatoire_optimise_evite_le_meme_album_meme_d_un_autre_artiste() {
+        // Une compilation : chaque morceau a son artiste, mais c'est le même album.
+        for _ in 0..50 {
+            let mut l = liste_optimisee(&[("a", "x"), ("b", "x"), ("c", "y")]);
+            assert_eq!(l.suivant(), Some(2));
+        }
+    }
+
+    #[test]
+    fn aleatoire_optimise_ne_bloque_jamais() {
+        // Tout pareil, ou tags inconnus : chaque morceau passe quand même une fois.
+        for familles in [
+            &[("a", "x"), ("a", "x"), ("a", "x")][..],
+            &[("", ""), ("", ""), ("a", "")][..],
+        ] {
+            let mut l = liste_optimisee(familles);
+            let mut joues = vec![0];
+            while let Some(n) = l.suivant() {
+                assert!(!joues.contains(&n), "{n} joué deux fois");
+                l.choisir(n);
+                joues.push(n);
+            }
+            joues.sort();
+            assert_eq!(joues, [0, 1, 2]);
+        }
+    }
+
+    #[test]
+    fn aleatoire_optimise_un_tag_inconnu_n_est_jamais_pareil() {
+        // 0 n'a pas d'artiste : 1, sans artiste non plus, peut passer.
+        let tirages: std::collections::HashSet<_> = (0..50)
+            .map(|_| {
+                liste_optimisee(&[("", "x"), ("", "y"), ("b", "z")])
+                    .suivant()
+                    .unwrap()
+            })
+            .collect();
+        assert!(tirages.contains(&1));
+    }
+
+    #[test]
+    fn aleatoire_optimise_lire_ensuite_reste_prioritaire() {
+        let mut l = liste_optimisee(&[("a", "x"), ("a", "x"), ("b", "y")]);
+        l.lire_ensuite(1);
+        assert_eq!(l.suivant(), Some(1));
+    }
+
+    #[test]
+    fn aleatoire_optimise_decoche_tire_comme_avant() {
+        let tirages: std::collections::HashSet<_> = (0..50)
+            .map(|_| {
+                let mut l = liste_optimisee(&[("a", "x"), ("a", "x"), ("b", "y")]);
+                l.optimiser_aleatoire(None);
+                l.suivant().unwrap()
+            })
+            .collect();
+        assert!(tirages.contains(&1));
     }
 
     #[test]

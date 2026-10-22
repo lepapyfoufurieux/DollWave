@@ -146,6 +146,8 @@ const AVANCE_OUVERTURE: Duration = Duration::from_secs(20);
 const REGLAGE_ENCHAINEMENT: &str = "fondu_enchaine.txt";
 /// Le petit fichier où l'on mémorise si les paroles (.lrc) sont affichées.
 const REGLAGE_PAROLES: &str = "paroles.txt";
+/// Le petit fichier où l'on mémorise si l'aléatoire optimisé est coché.
+const REGLAGE_ALEATOIRE_OPTIMISE: &str = "aleatoire_optimise.txt";
 
 /// L'état de l'application.
 struct LecteurApp {
@@ -166,6 +168,8 @@ struct LecteurApp {
     playlists: Playlists,
     // Les morceaux à jouer, et lequel est en cours.
     liste: ListeDeLecture,
+    // En aléatoire, éviter d'enchaîner deux morceaux du même artiste ou album ?
+    aleatoire_optimise: bool,
     // Le son du morceau en cours, décodé en mémoire.
     morceau: Option<Arc<Morceau>>,
     // Pendant qu'on fait glisser la barre de progression, la position de la
@@ -358,6 +362,10 @@ impl LecteurApp {
         // (Pendant les tests, jamais : ils jouent des fichiers du projet.)
         let ecrire_volume = !cfg!(test) && option_cochee(REGLAGE_ECRITURE_VOLUME);
         volumes.ecrire_dans_les_fichiers(ecrire_volume);
+        let tags = TagsConnus::new(ctx);
+        let aleatoire_optimise = option_cochee(REGLAGE_ALEATOIRE_OPTIMISE);
+        let mut liste = ListeDeLecture::default();
+        liste.optimiser_aleatoire(aleatoire_optimise.then(|| famille(&tags)));
         Self {
             sortie,
             veilleur: Veilleur::new(maintenant),
@@ -366,7 +374,8 @@ impl LecteurApp {
             telecommande: None,
             bibliotheque: Bibliotheque::new(ctx),
             playlists: Playlists::new(),
-            liste: ListeDeLecture::default(),
+            liste,
+            aleatoire_optimise,
             morceau: None,
             position_glissee: None,
             volume: 0.5,
@@ -382,7 +391,7 @@ impl LecteurApp {
             sortant: None,
             a_suivre: None,
             visualiseur: Visualiseur::new(),
-            tags: TagsConnus::new(ctx),
+            tags,
             zone: ZoneDeNotification::new(ctx),
             media: ControlesMedia::new(),
             boite: Boite::vide(),
@@ -939,6 +948,18 @@ impl LecteurApp {
             memoriser_option(REGLAGE_PAROLES, self.afficher_paroles);
         }
         self.options_paroles(ui);
+        if ui
+            .checkbox(&mut self.aleatoire_optimise, "Aléatoire optimisé")
+            .on_hover_text(
+                "En lecture aléatoire, évite d'enchaîner deux morceaux du même \
+                 artiste ou du même album, quand c'est possible",
+            )
+            .changed()
+        {
+            memoriser_option(REGLAGE_ALEATOIRE_OPTIMISE, self.aleatoire_optimise);
+            self.liste
+                .optimiser_aleatoire(self.aleatoire_optimise.then(|| famille(&self.tags)));
+        }
         ui.separator();
         self.effets.menu(ui);
     }
@@ -1851,6 +1872,13 @@ fn option_cochee_depuis(texte: Option<&str>) -> bool {
 /// fichier illisible).
 fn option_depuis(texte: Option<&str>) -> bool {
     texte.is_none_or(|t| t.trim() != "non")
+}
+
+/// Pour l'aléatoire optimisé : l'artiste et l'album des morceaux, lus dans
+/// leurs tags.
+fn famille(tags: &TagsConnus) -> liste::Famille {
+    let tags = tags.clone();
+    Box::new(move |chemin| tags.artiste_et_album(chemin))
 }
 
 /// Mémorise une option du menu Options.
