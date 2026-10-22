@@ -1206,6 +1206,7 @@ impl LecteurApp {
                 barres.as_deref(),
                 fraction,
                 telecommande.is_some(),
+                reponse.hover_pos().map(|p| p.x),
             );
 
             if let Some(telecommande) = &telecommande {
