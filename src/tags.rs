@@ -291,15 +291,6 @@ impl TagsConnus {
         })
     }
 
-    /// Le texte de l'infobulle : l'album (s'il est connu) et le nom du fichier.
-    pub fn infobulle(&self, chemin: &Path) -> String {
-        let album = self.avec(chemin, |tags| tags.and_then(|t| t.album.clone()));
-        match album {
-            Some(album) => format!("Album : {album}\n{}", nom_du_fichier(chemin)),
-            None => nom_du_fichier(chemin),
-        }
-    }
-
     /// Le titre (le nom du fichier sans « .mp3 » s'il n'en a pas) et l'artiste,
     /// séparés, pour le bloc « En lecture ».
     pub fn titre_et_artiste(&self, chemin: &Path) -> (String, Option<String>) {

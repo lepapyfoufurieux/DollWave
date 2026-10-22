@@ -495,14 +495,6 @@ impl ListeDeLecture {
                             }
                             None => {}
                         }
-                        // L'infobulle n'est préparée que si la souris est dessus.
-                        let ligne = if glisse.is_some() {
-                            ligne
-                        } else {
-                            ligne.on_hover_ui(|ui| {
-                                ui.label(tags.infobulle(fichier));
-                            })
-                        };
                         // Un clic suffit. Pour egui, un double-clic, c'est deux
                         // clics : le second tombe sur le morceau devenu le
                         // morceau en cours, ce qui ne le relance pas (voir main.rs).
@@ -584,7 +576,7 @@ fn dessiner_fond_de_ligne(ui: &egui::Ui, rect: egui::Rect, en_cours: bool, survo
         peintre.rect_filled(barre, 0.0, theme::MAGENTA);
     } else {
         if survol {
-            peintre.rect_filled(rect, 0.0, theme::attenue(theme::CYAN, 18));
+            peintre.rect_filled(rect, 0.0, theme::couleur_de_survol());
         }
         peintre.rect_filled(barre, 0.0, theme::attenue(theme::CYAN, 40));
     }

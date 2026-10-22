@@ -356,25 +356,6 @@ fn avec_espaces(nombre: u64) -> String {
     texte
 }
 
-/// Le résumé du fichier (infobulle du bloc « En lecture ») : « MP3 · 320 kbit/s · 44,1 kHz ·
-/// stéréo · 8,4 Mo ».
-pub fn resume(infos: &Infos) -> String {
-    let mut morceaux = vec![infos.format.clone()];
-    if let Some(q) = &infos.qualite {
-        morceaux.push(q.debit.texte());
-        morceaux.push(texte_frequence(q.frequence));
-        morceaux.push(
-            match q.canaux {
-                Canaux::Mono => "mono",
-                _ => "stéréo",
-            }
-            .to_string(),
-        );
-    }
-    morceaux.push(texte_taille(infos.taille));
-    morceaux.join(" · ")
-}
-
 // --- Les infos du morceau en cours, lues en arrière-plan ---
 
 /// Les infos déjà lues (ou en cours de lecture) de quelques fichiers.
@@ -661,26 +642,5 @@ mod tests {
         assert_eq!(texte_taille(524_288), "512 Ko");
         assert_eq!(texte_taille(12), "12 octets");
         assert_eq!(avec_espaces(8_812_345), "8\u{202F}812\u{202F}345");
-        let infos = Infos {
-            format: "MP3".into(),
-            taille: 8_812_345,
-            qualite: Some(Qualite {
-                debit: Debit::Constant(320),
-                frequence: 44_100,
-                canaux: Canaux::StereoJointe,
-                version: "MPEG-1",
-                duree: Duration::from_secs(200),
-            }),
-        };
-        assert_eq!(
-            resume(&infos),
-            "MP3 · 320 kbit/s · 44,1 kHz · stéréo · 8,4 Mo"
-        );
-        let flac = Infos {
-            format: "FLAC".into(),
-            taille: 524_288,
-            qualite: None,
-        };
-        assert_eq!(resume(&flac), "FLAC · 512 Ko");
     }
 }
