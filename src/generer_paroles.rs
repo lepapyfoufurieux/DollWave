@@ -34,7 +34,7 @@ const NOTE_SUFFISANTE: f64 = 0.93;
 const ECHECS_DE_SUITE_MAX: usize = 3;
 
 /// Mentions YouTube ou d'édition à retirer du titre.
-const MENTIONS: &str = r"(official|offical|audio|video|vid[eé]o|visuali[sz]er|lyrics?|lyric video|clip|music video|mv|hd|hq|4k|remaster(ed)?|explicit|topic|full album|live)";
+const MENTIONS: &str = r"(official|offical|audio|video|vid[eé]o|visuali[sz]er|lyrics?|lyric video|clip|music video|mv|hd|hq|4k|remaster(ed)?|explicit|topic|full album|live|bonus( track)?)";
 
 // ---------------------------------------------------------------- comparer
 
@@ -112,6 +112,7 @@ pub fn nettoyer(texte: &str) -> String {
             r"(?i)[\(\[\{{][^\)\]\}}]*{MENTIONS}[^\)\]\}}]*[\)\]\}}]"
         ))
     });
+    static BONUS: LazyLock<Regex> = LazyLock::new(|| regex(r"(?i)\s+bonus\s+track\s*$")); // « titre Bonus Track »
     static BARRE: LazyLock<Regex> = LazyLock::new(|| regex(r"\s[|｜]\s.*$")); // « titre | blabla »
     static TIRET: LazyLock<Regex> =
         LazyLock::new(|| regex(&format!(r"(?i)\s+-\s+{MENTIONS}\b.*$")));
@@ -122,6 +123,7 @@ pub fn nettoyer(texte: &str) -> String {
     let texte = ENTRE_PARENTHESES.replace_all(&texte, "");
     let texte = BARRE.replace(&texte, "");
     let texte = TIRET.replace(&texte, "");
+    let texte = BONUS.replace(&texte, "");
     let texte = texte.split_whitespace().collect::<Vec<_>>().join(" ");
     texte.trim_matches(|c| c == ' ' || c == '-').to_string()
 }
@@ -247,22 +249,28 @@ pub fn preparer(chemin: &Path, tags: &Tags) -> Recherche {
     let artiste_tag = TOPIC.replace(&artiste_tag, "");
     let artiste_tag = CHAINE.replace(&artiste_tag, "");
     ajouter(&mut artistes, artiste_tag.trim());
-    // Rangement « Artiste/Album/morceau.mp3 » : le dossier au-dessus de l'album.
-    let grand_parent = chemin
-        .parent()
-        .and_then(Path::parent)
-        .and_then(Path::file_name)
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    ajouter(&mut artistes, &grand_parent);
+    ajouter(
+        &mut artistes,
+        tags.artiste_album.as_deref().unwrap_or_default(),
+    );
 
-    let album = tags.album.clone().unwrap_or_else(|| {
-        chemin
-            .parent()
+    let nom_du_dossier = |dossier: Option<&Path>| {
+        dossier
             .and_then(Path::file_name)
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default()
-    });
+    };
+    let parent = nom_du_dossier(chemin.parent());
+    let album = tags.album.clone().unwrap_or_else(|| parent.clone());
+    // Rangement « Artiste/Album/morceau.mp3 » : le dossier au-dessus de l'album.
+    // Rangement « Artiste/morceau.mp3 » : le dossier du morceau, si ce n'est
+    // pas l'album. Jamais le dossier Musique lui-même.
+    let grand_parent = nom_du_dossier(chemin.parent().and_then(Path::parent));
+    for dossier in [&grand_parent, &parent] {
+        if !est_un_dossier_de_musique(dossier) && normaliser(dossier) != normaliser(&album) {
+            ajouter(&mut artistes, dossier);
+        }
+    }
     let duree = tags.duree.map_or(0.0, |d| d.as_secs_f64().round());
     Recherche {
         artistes,
@@ -270,6 +278,14 @@ pub fn preparer(chemin: &Path, tags: &Tags) -> Recherche {
         album,
         duree,
     }
+}
+
+/// « Music », « Musique »… : le dossier de toute la musique, pas un artiste.
+fn est_un_dossier_de_musique(nom: &str) -> bool {
+    matches!(
+        normaliser(nom).as_str(),
+        "music" | "musique" | "ma musique" | "my music" | "musics" | "musiques" | "mp3"
+    )
 }
 
 // ---------------------------------------------------------------- LRCLIB
@@ -803,6 +819,29 @@ mod tests {
         assert_eq!(r.titres, ["Tequila Coma"]);
         assert_eq!(r.album, "Clips");
         assert_eq!(r.duree, 201.0);
+    }
+
+    /// Bibliothèque de Luce : « Music/Arch Enemy/04. As The Pages Burn.mp3 »,
+    /// et des titres comme « Jack Attack (Bonus Track) ».
+    #[test]
+    fn le_dossier_de_l_artiste_compte_mais_pas_le_dossier_musique() {
+        let chemin = Path::new("C:/Users/l/Music/Arch Enemy/04. As The Pages Burn.mp3");
+        let r = preparer(chemin, &tags("", "", "War Eternal (CD1)", 0));
+        assert_eq!(r.artistes, ["Arch Enemy"]);
+        assert_eq!(r.titres, ["As The Pages Burn"]);
+
+        let chemin = Path::new("M/Airbourne/Black Dog Barking/11. Jack Attack Bonus Track.mp3");
+        let r = preparer(
+            chemin,
+            &tags(
+                "Jack Attack (Bonus Track)",
+                "Airbourne",
+                "Black Dog Barking",
+                0,
+            ),
+        );
+        assert_eq!(r.artistes, ["Airbourne"]);
+        assert_eq!(r.titres, ["Jack Attack"]);
     }
 
     #[test]
