@@ -240,16 +240,15 @@ fn dessiner_pochette(ui: &mut egui::Ui, pochette: Option<&egui::TextureHandle>) 
     let peintre = ui.painter_at(cadre);
     match pochette {
         Some(pochette) => {
-            // L'image remplit le carré, coupée plutôt que déformée.
-            let image = pochette.size_vec2();
-            let echelle = (cadre.width() / image.x).max(cadre.height() / image.y);
-            let visible = cadre.size() / (image * echelle);
-            let uv = Rect::from_center_size(Pos2::new(0.5, 0.5), visible);
-            peintre.image(pochette.id(), cadre, uv, egui::Color32::WHITE);
+            // En entier : une pochette pas carrée laisse une marge nuit.
+            peintre.rect_filled(cadre, 0.0, theme::NUIT_POCHETTE);
+            let place = theme::place_entiere(cadre, pochette.size_vec2());
+            let uv = Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1.0, 1.0));
+            peintre.image(pochette.id(), place, uv, egui::Color32::WHITE);
         }
         None => {
             // Pas de pochette : le fond nuit et ses deux taches de néon.
-            peintre.rect_filled(cadre, 0.0, egui::Color32::from_rgb(0x0B, 0x07, 0x18));
+            peintre.rect_filled(cadre, 0.0, theme::NUIT_POCHETTE);
             let points = theme::contour(cadre, Coins::AUCUN);
             let rien = egui::Color32::TRANSPARENT;
             let magenta = theme::attenue(theme::MAGENTA, 70);
