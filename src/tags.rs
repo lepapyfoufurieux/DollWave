@@ -155,6 +155,22 @@ pub fn lire_pochette(chemin: &Path) -> Option<egui::ColorImage> {
     ))
 }
 
+/// Une version très floue de la pochette, pour remplir les bords de sa case
+/// derrière la pochette entière. Elle est toute petite : agrandie à
+/// l'écran, elle reste douce.
+pub fn flouter_pochette(pochette: &egui::ColorImage) -> egui::ColorImage {
+    let [largeur, hauteur] = pochette.size;
+    let pixels: Vec<u8> = pochette.pixels.iter().flat_map(|c| c.to_array()).collect();
+    let floue = image::RgbaImage::from_raw(largeur as u32, hauteur as u32, pixels)
+        .map(|image| {
+            let petite = image::DynamicImage::ImageRgba8(image).thumbnail(48, 48);
+            image::imageops::blur(&petite.to_rgba8(), 3.0)
+        })
+        .unwrap_or_else(|| image::RgbaImage::new(1, 1));
+    let taille = [floue.width() as usize, floue.height() as usize];
+    egui::ColorImage::from_rgba_premultiplied(taille, floue.as_raw())
+}
+
 /// L'image de la pochette telle qu'elle est rangée dans le fichier (JPEG ou
 /// PNG, en général), sans la décoder.
 pub fn lire_pochette_brute(chemin: &Path) -> Option<Vec<u8>> {
@@ -417,6 +433,19 @@ fn lire_en_arriere_plan(partage: &(Mutex<Etat>, Condvar), ctx: &egui::Context) {
 #[cfg(test)]
 pub mod tests {
     use super::*;
+
+    #[test]
+    fn la_pochette_floue_est_petite_et_garde_ses_couleurs() {
+        let rouge = egui::ColorImage::new([400, 200], egui::Color32::from_rgb(200, 10, 10));
+        let floue = flouter_pochette(&rouge);
+        // Réduite (en gardant la forme), et toujours rouge au milieu.
+        assert_eq!(floue.size, [48, 24]);
+        let milieu = floue.pixels[12 * 48 + 24];
+        assert!(
+            milieu.r() > 150 && milieu.g() < 40 && milieu.b() < 40,
+            "{milieu:?}"
+        );
+    }
 
     /// Un nombre écrit sur 4 octets de 7 bits, comme dans les tags ID3v2.4.
     fn taille_id3(n: usize) -> [u8; 4] {

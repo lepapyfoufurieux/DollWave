@@ -240,7 +240,10 @@ struct LecteurApp {
     // Le morceau qu'on est en train d'ouvrir, en arrière-plan.
     chargement: Option<Chargement>,
     // La pochette du morceau qu'on est en train de lire, en arrière-plan.
-    pochette_en_cours: Option<(PathBuf, Receiver<Option<egui::ColorImage>>)>,
+    // (La pochette, puis sa version floue pour les bords de la case.)
+    pochette_en_cours: Option<(PathBuf, Receiver<Option<ImagesDePochette>>)>,
+    // La version floue de la pochette en cours (voir `afficher_pochette`).
+    pochette_floue: Option<egui::TextureHandle>,
     // La fenêtre « Modifier les tags », quand elle est ouverte.
     editeur: Option<EditeurTags>,
     // La fenêtre « Infos du fichier », quand elle est ouverte.
@@ -403,6 +406,7 @@ impl LecteurApp {
             boite: Boite::vide(),
             derniere_ouverture: None,
             pochette: None,
+            pochette_floue: None,
             mini: mini::MiniLecteur::charger(),
             afficher_paroles: option_memorisee(REGLAGE_PAROLES),
             message_paroles: None,
@@ -1432,6 +1436,9 @@ fn ouvrir_un_lisible<T>(
 
 /// Côté de la pochette affichée sous le visualiseur, en points : la plus
 /// grande possible dans la place qui reste, entre ces deux tailles.
+/// La pochette lue en arrière-plan, et sa version floue.
+type ImagesDePochette = (egui::ColorImage, egui::ColorImage);
+
 impl LecteurApp {
     /// Lit la pochette du morceau en cours quand il change (rien à faire
     /// sinon). Décoder l'image prend un moment : on le fait en arrière-plan.
@@ -1445,11 +1452,17 @@ impl LecteurApp {
         if let Some((demandee, reception)) = &self.pochette_en_cours {
             if demandee == chemin {
                 match reception.try_recv() {
-                    Ok(image) => {
-                        let texture = image.map(|image| {
-                            ctx.load_texture("pochette", image, egui::TextureOptions::LINEAR)
-                        });
+                    Ok(images) => {
+                        let options = egui::TextureOptions::LINEAR;
+                        let (texture, floue) = match images {
+                            Some((image, floue)) => (
+                                Some(ctx.load_texture("pochette", image, options)),
+                                Some(ctx.load_texture("pochette_floue", floue, options)),
+                            ),
+                            None => (None, None),
+                        };
                         self.pochette = Some((chemin.to_path_buf(), texture));
+                        self.pochette_floue = floue;
                         self.pochette_en_cours = None;
                     }
                     Err(TryRecvError::Empty) => {}
@@ -1471,7 +1484,11 @@ impl LecteurApp {
         let (envoi, reception) = mpsc::channel();
         let (fichier, ctx) = (chemin.to_path_buf(), ctx.clone());
         std::thread::spawn(move || {
-            let _ = envoi.send(tags::lire_pochette(&fichier));
+            let images = tags::lire_pochette(&fichier).map(|image| {
+                let floue = tags::flouter_pochette(&image);
+                (image, floue)
+            });
+            let _ = envoi.send(images);
             ctx.request_repaint();
         });
         self.pochette_en_cours = Some((chemin.to_path_buf(), reception));
@@ -1490,8 +1507,8 @@ impl LecteurApp {
         self.paroles = Some((chemin.to_path_buf(), paroles::charger(chemin)));
     }
 
-    /// La pochette du morceau en cours, sous le visualiseur, en entier dans
-    /// le plus grand carré qui tient dans la place qui reste, avec ses paroles
+    /// La pochette du morceau en cours, sous le visualiseur, en entier au
+    /// milieu de la place qui reste (sa version floue autour), avec ses paroles
     /// par-dessus s'il en a. Sans pochette : un fond néon.
     fn afficher_pochette(&self, ui: &mut egui::Ui, position: f32) {
         let pochette = match &self.pochette {
@@ -1502,18 +1519,25 @@ impl LecteurApp {
             Some((_, Some(paroles))) => Some(paroles),
             _ => None,
         };
-        let zone = ui.available_rect_before_wrap();
-        // La case est carrée, comme les pochettes.
-        let cadre = theme::case_carree(zone);
+        let cadre = ui.available_rect_before_wrap();
         if cadre.height() < 40.0 {
             return;
         }
-        ui.allocate_rect(zone, egui::Sense::hover());
+        ui.allocate_rect(cadre, egui::Sense::hover());
         let peintre = ui.painter_at(cadre);
         match pochette {
             Some(pochette) => {
-                // En entier : une pochette pas carrée laisse une marge nuit.
+                // Derrière : la même pochette, floue et assombrie, qui remplit
+                // toute la case (coupée plutôt que déformée).
                 peintre.rect_filled(cadre, 0.0, theme::NUIT_POCHETTE);
+                if let Some(floue) = &self.pochette_floue {
+                    let image = floue.size_vec2();
+                    let echelle = (cadre.width() / image.x).max(cadre.height() / image.y);
+                    let visible = cadre.size() / (image * echelle);
+                    let uv = egui::Rect::from_center_size(egui::pos2(0.5, 0.5), visible);
+                    peintre.image(floue.id(), cadre, uv, egui::Color32::from_gray(150));
+                }
+                // Devant : la pochette en entier, au centre.
                 let place = theme::place_entiere(cadre, pochette.size_vec2());
                 let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
                 peintre.image(pochette.id(), place, uv, egui::Color32::WHITE);
