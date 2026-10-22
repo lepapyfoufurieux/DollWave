@@ -17,6 +17,11 @@ use crate::theme;
 /// Les caractères que Windows refuse dans un nom de fichier.
 const INTERDITS: &[char] = &['\\', '/', ':', '*', '?', '"', '<', '>', '|'];
 
+/// Le nom de la playlist automatique « Les plus écoutés » quand elle est
+/// chargée (avec un caractère interdit, pour ne jamais être confondue avec
+/// une playlist enregistrée du même nom).
+const PLUS_ECOUTES: &str = "\\plus-ecoutes";
+
 /// Une playlist enregistrée : son nom et ses morceaux, dans l'ordre.
 pub struct Playlist {
     pub nom: String,
@@ -154,6 +159,8 @@ pub struct Playlists {
     donner_la_main: bool,
     /// Un message affiché sous les playlists (erreur ou confirmation).
     message: String,
+    /// La playlist automatique « Les plus écoutés » (voir ecoutes.rs).
+    plus_ecoutes: Vec<PathBuf>,
 }
 
 impl Playlists {
@@ -171,6 +178,7 @@ impl Playlists {
             suppression_confirmee: false,
             donner_la_main: false,
             message: String::new(),
+            plus_ecoutes: Vec::new(),
         };
         playlists.actualiser();
         playlists
@@ -184,6 +192,11 @@ impl Playlists {
     /// Les noms des playlists, dans l'ordre affiché.
     pub fn noms(&self) -> Vec<String> {
         self.toutes.iter().map(|p| p.nom.clone()).collect()
+    }
+
+    /// Remplit la playlist automatique « Les plus écoutés ».
+    pub fn changer_les_plus_ecoutes(&mut self, morceaux: Vec<PathBuf>) {
+        self.plus_ecoutes = morceaux;
     }
 
     /// La liste de lecture a été vidée : elle n'est plus liée à une playlist.
@@ -300,6 +313,11 @@ impl Playlists {
                     if let Some(d) = self.ligne(ui, n, tags) {
                         demande = Some(d);
                     }
+                }
+                // Tout en bas, la playlist qui se remplit seule.
+                ui.add_space(6.0);
+                if let Some(d) = self.ligne_plus_ecoutes(ui, tags) {
+                    demande = Some(d);
                 }
             });
 
@@ -511,6 +529,107 @@ impl Playlists {
                 }
                 egui::DragAndDrop::clear_payload(&ctx);
             }
+        }
+        demande
+    }
+
+    /// La ligne de « Les plus écoutés » : comme une playlist, mais en cyan,
+    /// sans renommer, supprimer ni déposer de morceaux (elle se remplit seule).
+    fn ligne_plus_ecoutes(&mut self, ui: &mut egui::Ui, tags: &TagsConnus) -> Option<Demande> {
+        let mut demande = None;
+        let mut a_lancer = None;
+        let id = ui.make_persistent_id("playlist automatique : plus écoutés");
+        let chargee = self.chargee.as_deref() == Some(PLUS_ECOUTES);
+        let fond = ui.painter().add(egui::Shape::Noop);
+        let entete =
+            egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, false)
+                .show_header(ui, |ui| {
+                    let texte = egui::RichText::new("Les plus écoutés").color(if chargee {
+                        egui::Color32::WHITE
+                    } else {
+                        theme::CYAN
+                    });
+                    let etiquette = ui
+                        .add(
+                            egui::Label::new(texte)
+                                .truncate()
+                                .selectable(false)
+                                .sense(egui::Sense::click()),
+                        )
+                        .on_hover_text(
+                            "Se remplit toute seule avec tes morceaux les plus écoutés \
+                             (les écoutes récentes comptent plus).\n\
+                             Cliquer pour l'écouter (remplace la liste de lecture)",
+                        );
+                    if clic_simple(ui, &etiquette) && !self.plus_ecoutes.is_empty() {
+                        self.chargee = Some(PLUS_ECOUTES.to_string());
+                        demande = Some(Demande::Charger {
+                            fichiers: self.plus_ecoutes.clone(),
+                            depart: None,
+                        });
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let ajouter = theme::Bouton::icone(theme::Icone::Plus)
+                            .allure(theme::Allure::Eteint)
+                            .couleur(theme::CYAN)
+                            .taille(egui::vec2(20.0, 20.0));
+                        let bouton = ui
+                            .add(ajouter)
+                            .on_hover_text("Ajouter à la suite de la liste de lecture");
+                        if clic_simple(ui, &bouton) && !self.plus_ecoutes.is_empty() {
+                            demande = Some(Demande::AjouterALaListe(self.plus_ecoutes.clone()));
+                        }
+                        ui.label(
+                            crate::police::chiffres(self.plus_ecoutes.len().to_string())
+                                .size(11.0)
+                                .color(theme::TEXTE_DISCRET),
+                        );
+                    });
+                });
+        let rangee = entete
+            .body(|ui| {
+                if self.plus_ecoutes.is_empty() {
+                    ui.weak("Vide pour l'instant : un morceau y entre quand tu en as écouté au moins la moitié.");
+                }
+                for (i, morceau) in self.plus_ecoutes.iter().enumerate() {
+                    let aide = format!(
+                        "{}\n\nCliquer pour écouter la playlist à partir de ce titre",
+                        tags.infobulle(morceau)
+                    );
+                    let titre = ui
+                        .add(
+                            egui::Label::new(tags.libelle(morceau))
+                                .selectable(false)
+                                .sense(egui::Sense::click()),
+                        )
+                        .on_hover_text(aide);
+                    if clic_simple(ui, &titre) {
+                        a_lancer = Some(i);
+                    }
+                }
+            })
+            .1;
+        let cadre = rangee.response.rect.expand2(egui::vec2(4.0, 3.0));
+        let remplissage = if chargee {
+            theme::attenue(theme::CYAN, 40)
+        } else {
+            theme::attenue(theme::PANNEAU, 200)
+        };
+        let forme = egui::Shape::convex_polygon(
+            theme::contour(cadre, theme::Coins::haut_droit(10.0)),
+            remplissage,
+            egui::Stroke::new(
+                1.0_f32,
+                theme::attenue(theme::CYAN, if chargee { 160 } else { 68 }),
+            ),
+        );
+        ui.painter().set(fond, forme);
+        if let Some(i) = a_lancer {
+            self.chargee = Some(PLUS_ECOUTES.to_string());
+            demande = Some(Demande::Charger {
+                fichiers: self.plus_ecoutes.clone(),
+                depart: Some(i),
+            });
         }
         demande
     }
