@@ -548,7 +548,7 @@ pub struct Progression {
     /// Les albums dont tous les morceaux avaient déjà une pochette.
     pub completes: usize,
     pub introuvables: Vec<String>,
-    /// Les albums déjà cherchés sans succès il y a moins de 30 jours :
+    /// Les albums déjà cherchés sans succès
     /// sautés.
     pub deja_cherches: usize,
     /// Le site n'a pas répondu, ou un MP3 n'a pas pu être écrit.
@@ -653,11 +653,10 @@ fn completer(
         });
     }
     let (albums, completes) = albums_a_completer(lus);
-    // Déjà cherchés sans succès il y a moins de 30 jours : sautés, sauf si
+    // Déjà cherchés sans succès sautés, sauf si
     // un morceau de l'album a maintenant une pochette à recopier.
-    let maintenant = introuvables::maintenant();
     let (albums, sautes): (Vec<_>, Vec<_>) = albums.into_iter().partition(|album| {
-        album.avec_pochette.is_some() || !memoire.deja_cherche(&album.libelle(), maintenant)
+        album.avec_pochette.is_some() || !memoire.deja_cherche(&album.libelle())
     });
     {
         let mut etat = etat();

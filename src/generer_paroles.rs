@@ -532,7 +532,7 @@ pub struct Progression {
     pub trouves: usize,
     /// Les morceaux qui avaient déjà un .lrc.
     pub deja_presents: usize,
-    /// Les morceaux déjà cherchés sans succès il y a moins de 30 jours :
+    /// Les morceaux déjà cherchés sans succès
     /// sautés.
     pub deja_cherches: usize,
     pub introuvables: Vec<PathBuf>,
@@ -630,7 +630,7 @@ fn generer(
             continue;
         }
         let cle = chemin.to_string_lossy();
-        if memoire.deja_cherche(&cle, introuvables::maintenant()) {
+        if memoire.deja_cherche(&cle) {
             let mut etat = etat();
             etat.deja_cherches += 1;
             etat.faits += 1;

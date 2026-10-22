@@ -991,9 +991,9 @@ impl LecteurApp {
             if ui
                 .small_button("🔁 Réessayer les introuvables")
                 .on_hover_text(
-                    "Les paroles et pochettes non trouvées ne sont pas recherchées à \
-                     nouveau pendant 30 jours. Ce bouton les oublie : la prochaine \
-                     recherche les retentera toutes.",
+                    "Les paroles et pochettes non trouvées ne sont plus recherchées. \
+                     Ce bouton les oublie : la prochaine recherche les retentera \
+                     toutes.",
                 )
                 .clicked()
             {

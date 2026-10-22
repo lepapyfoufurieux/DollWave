@@ -1,14 +1,16 @@
 //! Se souvenir de ce qu'on n'a pas trouvé en ligne (paroles d'un morceau,
-//! pochette d'un album), pour ne pas le rechercher à chaque fois. On les
-//! oublie au bout de 30 jours, car les sites s'enrichissent.
+//! pochette d'un album), pour ne pas le rechercher à chaque fois. C'est
+//! l'utilisateur qui décide quand retenter : bouton « Réessayer les
+//! introuvables » dans les options.
 //!
 //! Un petit fichier dans le dossier des réglages, une ligne par chose :
-//! « secondes depuis 1970 <tab> clé ». Seuls les vrais « introuvables » y
-//! sont notés, jamais une erreur réseau.
+//! « secondes depuis 1970 <tab> clé » (la date sert seulement à savoir
+//! quand on l'a cherché). Seuls les vrais « introuvables » y sont notés,
+//! jamais une erreur réseau.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::systeme;
 
@@ -16,8 +18,6 @@ use crate::systeme;
 pub const PAROLES: &str = "paroles_introuvables.txt";
 /// Les albums (ou morceaux sans album) dont on n'a pas trouvé la pochette.
 pub const POCHETTES: &str = "pochettes_introuvables.txt";
-/// Au-delà, on retente.
-const OUBLI: Duration = Duration::from_secs(30 * 24 * 3600);
 
 pub struct Introuvables {
     /// Rien dans les tests : la mémoire ne s'écrit pas.
@@ -42,7 +42,7 @@ impl Introuvables {
             .and_then(|f| std::fs::read_to_string(f).ok())
             .unwrap_or_default();
         Self {
-            notes: lire(&texte, maintenant()),
+            notes: lire(&texte),
             fichier,
         }
     }
@@ -56,11 +56,9 @@ impl Introuvables {
         }
     }
 
-    /// Déjà cherché sans succès il y a moins de 30 jours ?
-    pub fn deja_cherche(&self, cle: &str, maintenant: u64) -> bool {
-        self.notes
-            .get(&nettoyer_cle(cle))
-            .is_some_and(|&quand| maintenant.saturating_sub(quand) < OUBLI.as_secs())
+    /// Déjà cherché sans succès ?
+    pub fn deja_cherche(&self, cle: &str) -> bool {
+        self.notes.contains_key(&nettoyer_cle(cle))
     }
 
     /// Note qu'on ne l'a pas trouvé, et l'écrit tout de suite (si le
@@ -105,15 +103,14 @@ fn nettoyer_cle(cle: &str) -> String {
     cle.replace(['\t', '\n', '\r'], " ")
 }
 
-/// Lit le fichier, en laissant de côté ce qui a plus de 30 jours.
-fn lire(texte: &str, maintenant: u64) -> HashMap<String, u64> {
+/// Lit le fichier (les lignes abîmées sont ignorées).
+fn lire(texte: &str) -> HashMap<String, u64> {
     texte
         .lines()
         .filter_map(|ligne| {
             let (quand, cle) = ligne.split_once('\t')?;
             let quand: u64 = quand.parse().ok()?;
-            (maintenant.saturating_sub(quand) < OUBLI.as_secs() && !cle.is_empty())
-                .then(|| (cle.to_string(), quand))
+            (!cle.is_empty()).then(|| (cle.to_string(), quand))
         })
         .collect()
 }
@@ -131,36 +128,30 @@ fn ecrire(notes: &HashMap<String, u64>) -> String {
 mod tests {
     use super::*;
 
-    const JOUR: u64 = 24 * 3600;
-
     #[test]
-    fn on_saute_pendant_30_jours_puis_on_retente() {
+    fn on_saute_jusqu_a_ce_qu_on_demande_de_reessayer() {
         let mut memoire = Introuvables::en_memoire();
-        let debut = 1_000 * JOUR;
-        assert!(!memoire.deja_cherche("Music/A/1.mp3", debut));
-        memoire.noter("Music/A/1.mp3", debut);
-        assert!(memoire.deja_cherche("Music/A/1.mp3", debut + 29 * JOUR));
-        assert!(!memoire.deja_cherche("Music/A/1.mp3", debut + 30 * JOUR));
-        assert!(!memoire.deja_cherche("Music/A/2.mp3", debut));
+        assert!(!memoire.deja_cherche("Music/A/1.mp3"));
+        memoire.noter("Music/A/1.mp3", 1_000);
+        assert!(memoire.deja_cherche("Music/A/1.mp3"));
+        assert!(!memoire.deja_cherche("Music/A/2.mp3"));
     }
 
     #[test]
-    fn le_fichier_se_relit_sans_les_vieilles_lignes() {
+    fn le_fichier_se_relit() {
         let mut notes = HashMap::new();
-        notes.insert("War Eternal — Arch Enemy".to_string(), 100 * JOUR);
-        notes.insert("vieux".to_string(), 10 * JOUR);
-        let relu = lire(&ecrire(&notes), 101 * JOUR);
-        assert_eq!(relu.len(), 1);
-        assert_eq!(relu["War Eternal — Arch Enemy"], 100 * JOUR);
+        notes.insert("War Eternal — Arch Enemy".to_string(), 100);
+        notes.insert("Music/A/1.mp3".to_string(), 5);
+        assert_eq!(lire(&ecrire(&notes)), notes);
         // Lignes abîmées : ignorées.
-        assert!(lire("pas un nombre\tx\nsans tabulation\n5\t\n", 6).is_empty());
+        assert!(lire("pas un nombre\tx\nsans tabulation\n5\t\n").is_empty());
     }
 
     #[test]
     fn une_cle_reste_sur_une_ligne() {
         let mut memoire = Introuvables::en_memoire();
         memoire.noter("a\tb\nc", 0);
-        assert!(memoire.deja_cherche("a\tb\nc", 1));
+        assert!(memoire.deja_cherche("a\tb\nc"));
         assert_eq!(ecrire(&memoire.notes), "0\ta b c\n");
     }
 }

@@ -637,7 +637,7 @@ impl Bibliotheque {
             ));
             if p.deja_cherches > 0 {
                 ui.label(format!(
-                    "{} déjà cherchés sans succès ce mois-ci (sautés)",
+                    "{} déjà cherchés sans succès (sautés)",
                     p.deja_cherches
                 ));
             }
@@ -747,7 +747,7 @@ impl Bibliotheque {
             ));
             if p.deja_cherches > 0 {
                 ui.label(format!(
-                    "{} déjà cherchés sans succès ce mois-ci (sautés)",
+                    "{} déjà cherchés sans succès (sautés)",
                     p.deja_cherches
                 ));
             }
