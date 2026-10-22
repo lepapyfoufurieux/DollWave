@@ -1,6 +1,6 @@
 ﻿; Installateur Windows du lecteur, fabriqué par Inno Setup (gratuit).
 ; GitHub le compile après le .exe (voir .github/workflows/release.yml) :
-;   ISCC.exe /DVersion=0.2.0 installateur\dollwave.iss
+;   ISCC.exe /DVersion=1.0.0 installateur\dollwave.iss
 ; Il installe le lecteur pour l'utilisateur seul (pas besoin d'être
 ; administrateur), l'ajoute au menu Démarrer, propose un raccourci sur le
 ; bureau, l'inscrit parmi les lecteurs de .mp3, et se désinstalle depuis les

@@ -6,7 +6,7 @@
 # - À chaque pull request ou lancement manuel : le .exe et l'installateur
 #   sont disponibles dans l'onglet « Actions » (rubrique « Artifacts »)
 #   pour les tester.
-# - Quand on pousse une étiquette de version (ex. v0.1.0) : les deux sont
+# - Quand on pousse une étiquette de version (ex. v1.0.0) : les deux sont
 #   en plus publiés sur une page « Release » du dépôt.
 name: Compilation Windows
 

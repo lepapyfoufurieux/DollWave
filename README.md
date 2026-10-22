@@ -80,7 +80,7 @@ only comes with dark themes.
 ## Installation
 
 Download the latest version from the
-[Releases](https://github.com/lepapyfoufurieux/lecteur_mp3/releases) page.
+[Releases](https://github.com/lepapyfoufurieux/DollWave/releases) page.
 Two files are available:
 
 - `dollwave-installation.exe`: the installer. It installs the player for
