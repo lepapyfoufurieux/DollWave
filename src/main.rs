@@ -1991,6 +1991,11 @@ impl eframe::App for LecteurApp {
             Etat::Pause => EtatMedia::Pause,
             Etat::Chargement | Etat::Lecture => EtatMedia::Lecture,
         });
+        let en_cours = match (&self.morceau, self.liste.courant()) {
+            (Some(_), Some(n)) => self.liste.fichier(n),
+            _ => None,
+        };
+        self.media.morceau(en_cours);
 
         // Pendant la lecture (ou en pause, le temps que les barres retombent),
         // on redessine à chaque image de l'écran pour que le visualiseur soit fluide.
