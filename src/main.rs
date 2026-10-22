@@ -399,7 +399,7 @@ impl LecteurApp {
     /// dehors du dossier de musique.
     fn ajouter_fichiers(&mut self) {
         let Some(fichiers) = rfd::FileDialog::new()
-            .add_filter("Fichiers MP3", &["mp3"])
+            .add_filter("Fichiers audio", &bibliotheque::EXTENSIONS_AUDIO)
             .pick_files()
         else {
             return; // l'utilisateur a annulé

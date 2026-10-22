@@ -295,6 +295,7 @@ mod tests {
 
     fn infos(debit: Debit, frequence: u32) -> Infos {
         Infos {
+            format: "MP3".into(),
             taille: 1,
             qualite: Some(Qualite {
                 debit,
