@@ -14,6 +14,7 @@ mod fenetre;
 mod generer_paroles;
 mod hud;
 mod infos_fichier;
+mod introuvables;
 mod liste;
 mod mini;
 mod morceau;
@@ -25,6 +26,7 @@ mod police;
 mod raccourcis;
 mod regroupement;
 mod reprise;
+mod reseau;
 mod sortie;
 mod systeme;
 mod tags;
@@ -987,6 +989,22 @@ impl LecteurApp {
                 .clicked()
             {
                 self.message_paroles = systeme::ouvrir_le_dossier(&rangement.dossier).err();
+            }
+        });
+        ui.horizontal(|ui| {
+            if ui
+                .small_button("🔁 Réessayer les introuvables")
+                .on_hover_text(
+                    "Les paroles et pochettes non trouvées ne sont plus recherchées. \
+                     Ce bouton les oublie : la prochaine recherche les retentera \
+                     toutes.",
+                )
+                .clicked()
+            {
+                self.message_paroles = Some(match introuvables::tout_oublier() {
+                    Ok(()) => "C'est noté : la prochaine recherche retentera tout.".to_string(),
+                    Err(erreur) => erreur,
+                });
             }
         });
         if let Some(message) = &self.message_paroles {

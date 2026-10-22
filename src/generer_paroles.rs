@@ -20,26 +20,22 @@ use std::time::Duration;
 use eframe::egui;
 use regex::Regex;
 
+use crate::introuvables::{self, Introuvables};
 use crate::paroles::Rangement;
+use crate::reseau::{self, Echec};
 use crate::tags::{self, Tags};
 
 const API: &str = "https://lrclib.net/api";
-/// LRCLIB demande que chaque logiciel se présente.
-const AGENT: &str = concat!(
-    "lecteur_mp3/",
-    env!("CARGO_PKG_VERSION"),
-    " (https://github.com/lepapyfoufurieux/lecteur_mp3)"
-);
-/// Une petite pause entre deux recherches, pour ne pas bombarder LRCLIB.
-const PAUSE_ENTRE_RECHERCHES: Duration = Duration::from_millis(200);
+/// Une pause entre deux recherches, pour ne pas surcharger LRCLIB.
+const PAUSE_ENTRE_RECHERCHES: Duration = Duration::from_secs(1);
 /// Au-delà de cette note, la réponse est assez bonne : on arrête de chercher.
 const NOTE_SUFFISANTE: f64 = 0.93;
 /// Après autant de morceaux de suite sans réussir à joindre LRCLIB, on
-/// s'arrête : Internet est sans doute coupé.
+/// s'arrête : le site est indisponible, ou Internet est coupé.
 const ECHECS_DE_SUITE_MAX: usize = 3;
 
 /// Mentions YouTube ou d'édition à retirer du titre.
-const MENTIONS: &str = r"(official|offical|audio|video|vid[eé]o|visuali[sz]er|lyrics?|lyric video|clip|music video|mv|hd|hq|4k|remaster(ed)?|explicit|topic|full album|live)";
+const MENTIONS: &str = r"(official|offical|audio|video|vid[eé]o|visuali[sz]er|lyrics?|lyric video|clip|music video|mv|hd|hq|4k|remaster(ed)?|explicit|topic|full album|live|bonus( track)?)";
 
 // ---------------------------------------------------------------- comparer
 
@@ -117,6 +113,7 @@ pub fn nettoyer(texte: &str) -> String {
             r"(?i)[\(\[\{{][^\)\]\}}]*{MENTIONS}[^\)\]\}}]*[\)\]\}}]"
         ))
     });
+    static BONUS: LazyLock<Regex> = LazyLock::new(|| regex(r"(?i)\s+bonus\s+track\s*$")); // « titre Bonus Track »
     static BARRE: LazyLock<Regex> = LazyLock::new(|| regex(r"\s[|｜]\s.*$")); // « titre | blabla »
     static TIRET: LazyLock<Regex> =
         LazyLock::new(|| regex(&format!(r"(?i)\s+-\s+{MENTIONS}\b.*$")));
@@ -127,6 +124,7 @@ pub fn nettoyer(texte: &str) -> String {
     let texte = ENTRE_PARENTHESES.replace_all(&texte, "");
     let texte = BARRE.replace(&texte, "");
     let texte = TIRET.replace(&texte, "");
+    let texte = BONUS.replace(&texte, "");
     let texte = texte.split_whitespace().collect::<Vec<_>>().join(" ");
     texte.trim_matches(|c| c == ' ' || c == '-').to_string()
 }
@@ -252,22 +250,28 @@ pub fn preparer(chemin: &Path, tags: &Tags) -> Recherche {
     let artiste_tag = TOPIC.replace(&artiste_tag, "");
     let artiste_tag = CHAINE.replace(&artiste_tag, "");
     ajouter(&mut artistes, artiste_tag.trim());
-    // Rangement « Artiste/Album/morceau.mp3 » : le dossier au-dessus de l'album.
-    let grand_parent = chemin
-        .parent()
-        .and_then(Path::parent)
-        .and_then(Path::file_name)
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    ajouter(&mut artistes, &grand_parent);
+    ajouter(
+        &mut artistes,
+        tags.artiste_album.as_deref().unwrap_or_default(),
+    );
 
-    let album = tags.album.clone().unwrap_or_else(|| {
-        chemin
-            .parent()
+    let nom_du_dossier = |dossier: Option<&Path>| {
+        dossier
             .and_then(Path::file_name)
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default()
-    });
+    };
+    let parent = nom_du_dossier(chemin.parent());
+    let album = tags.album.clone().unwrap_or_else(|| parent.clone());
+    // Rangement « Artiste/Album/morceau.mp3 » : le dossier au-dessus de l'album.
+    // Rangement « Artiste/morceau.mp3 » : le dossier du morceau, si ce n'est
+    // pas l'album. Jamais le dossier Musique lui-même.
+    let grand_parent = nom_du_dossier(chemin.parent().and_then(Path::parent));
+    for dossier in [&grand_parent, &parent] {
+        if !est_un_dossier_de_musique(dossier) && normaliser(dossier) != normaliser(&album) {
+            ajouter(&mut artistes, dossier);
+        }
+    }
     let duree = tags.duree.map_or(0.0, |d| d.as_secs_f64().round());
     Recherche {
         artistes,
@@ -275,6 +279,14 @@ pub fn preparer(chemin: &Path, tags: &Tags) -> Recherche {
         album,
         duree,
     }
+}
+
+/// « Music », « Musique »… : le dossier de toute la musique, pas un artiste.
+fn est_un_dossier_de_musique(nom: &str) -> bool {
+    matches!(
+        normaliser(nom).as_str(),
+        "music" | "musique" | "ma musique" | "my music" | "musics" | "musiques" | "mp3"
+    )
 }
 
 // ---------------------------------------------------------------- LRCLIB
@@ -419,15 +431,15 @@ pub enum Resultat {
 pub enum Interruption {
     /// On a cliqué sur « Arrêter ».
     Arretee,
-    /// LRCLIB n'a pas répondu.
-    Reseau(String),
+    /// LRCLIB n'a pas répondu, ou a refusé.
+    Reseau(Echec),
 }
 
 /// Cherche les paroles d'un morceau. `demander` interroge LRCLIB (ou, dans
 /// les tests, fait semblant) ; `arreter` dit si on a cliqué sur « Arrêter ».
 pub fn chercher(
     recherche: &Recherche,
-    mut demander: impl FnMut(&[(&str, String)]) -> Result<Vec<Candidat>, String>,
+    mut demander: impl FnMut(&[(&str, String)]) -> Result<Vec<Candidat>, Echec>,
     arreter: impl Fn() -> bool,
     pause: Duration,
 ) -> Result<Resultat, Interruption> {
@@ -493,33 +505,17 @@ pub fn contenu_du_lrc(chemin: &Path, recherche: &Recherche, paroles: &str, sourc
     )
 }
 
-/// Interroge LRCLIB. Une page introuvable veut dire « aucune réponse ». En
-/// cas d'erreur, on réessaie deux fois, après 1 puis 2 secondes.
+/// Interroge LRCLIB. Une page introuvable veut dire « aucune réponse ».
+/// Les nouveaux essais sont faits par `reseau::telecharger`.
 fn demander_a_lrclib(
     agent: &ureq::Agent,
     parametres: &[(&str, String)],
-) -> Result<Vec<Candidat>, String> {
-    let mut essai = 0;
-    loop {
-        let mut requete = agent.get(format!("{API}/search"));
-        for (cle, valeur) in parametres {
-            requete = requete.query(*cle, valeur);
-        }
-        match requete.call() {
-            Ok(mut reponse) => {
-                let json = reponse
-                    .body_mut()
-                    .read_to_string()
-                    .map_err(|e| e.to_string())?;
-                return Ok(lire_reponse(&json));
-            }
-            Err(ureq::Error::StatusCode(404)) => return Ok(Vec::new()),
-            Err(erreur) if essai == 2 => return Err(erreur.to_string()),
-            Err(_) => {}
-        }
-        essai += 1;
-        std::thread::sleep(Duration::from_secs(essai));
-    }
+    arreter: &AtomicBool,
+) -> Result<Vec<Candidat>, Echec> {
+    let reponse = reseau::telecharger(agent, &format!("{API}/search"), parametres, arreter)?;
+    Ok(lire_reponse(&String::from_utf8_lossy(
+        &reponse.unwrap_or_default(),
+    )))
 }
 
 // ---------------------------------------------------------------- en arrière-plan
@@ -536,6 +532,9 @@ pub struct Progression {
     pub trouves: usize,
     /// Les morceaux qui avaient déjà un .lrc.
     pub deja_presents: usize,
+    /// Les morceaux déjà cherchés sans succès
+    /// sautés.
+    pub deja_cherches: usize,
     pub introuvables: Vec<PathBuf>,
     /// Trouvés, mais avec une durée assez différente (version clip ?).
     pub a_verifier: Vec<PathBuf>,
@@ -566,11 +565,7 @@ impl Generation {
         let (pour_le_travail, stop, ctx) =
             (Arc::clone(&progression), Arc::clone(&arreter), ctx.clone());
         std::thread::spawn(move || {
-            let agent: ureq::Agent = ureq::Agent::config_builder()
-                .user_agent(AGENT)
-                .timeout_global(Some(Duration::from_secs(20)))
-                .build()
-                .into();
+            let agent = reseau::agent(Duration::from_secs(20));
             let Some(rangement) = Rangement::du_lecteur() else {
                 let mut p = pour_le_travail.lock().unwrap_or_else(|e| e.into_inner());
                 p.interruption = Some("Dossier des paroles introuvable.".to_string());
@@ -582,7 +577,8 @@ impl Generation {
                 &rangement,
                 &pour_le_travail,
                 &stop,
-                |p| demander_a_lrclib(&agent, p),
+                &mut Introuvables::du_lecteur(introuvables::PAROLES),
+                |p| demander_a_lrclib(&agent, p, &stop),
                 PAUSE_ENTRE_RECHERCHES,
                 || ctx.request_repaint(),
             );
@@ -609,12 +605,14 @@ impl Generation {
 }
 
 /// Le travail lui-même : chaque morceau sans .lrc, l'un après l'autre.
+#[allow(clippy::too_many_arguments)]
 fn generer(
     morceaux: &[PathBuf],
     rangement: &Rangement,
     progression: &Mutex<Progression>,
     arreter: &AtomicBool,
-    mut demander: impl FnMut(&[(&str, String)]) -> Result<Vec<Candidat>, String>,
+    memoire: &mut Introuvables,
+    mut demander: impl FnMut(&[(&str, String)]) -> Result<Vec<Candidat>, Echec>,
     pause: Duration,
     redessiner: impl Fn(),
 ) {
@@ -628,6 +626,13 @@ fn generer(
         if rangement.trouver(chemin).is_some() {
             let mut etat = etat();
             etat.deja_presents += 1;
+            etat.faits += 1;
+            continue;
+        }
+        let cle = chemin.to_string_lossy();
+        if memoire.deja_cherche(&cle) {
+            let mut etat = etat();
+            etat.deja_cherches += 1;
             etat.faits += 1;
             continue;
         }
@@ -664,20 +669,18 @@ fn generer(
             Ok(Resultat::Rejete(_) | Resultat::Introuvable) => {
                 echecs_de_suite = 0;
                 etat.introuvables.push(chemin.clone());
+                memoire.noter(&cle, introuvables::maintenant());
             }
             Err(Interruption::Arretee) => {
                 etat.interruption = Some("Arrêté.".to_string());
                 break;
             }
-            Err(Interruption::Reseau(erreur)) => {
-                etat.erreurs.push((chemin.clone(), erreur));
+            Err(Interruption::Reseau(echec)) => {
+                etat.erreurs.push((chemin.clone(), echec.to_string()));
                 echecs_de_suite += 1;
                 if echecs_de_suite >= ECHECS_DE_SUITE_MAX {
                     etat.faits += 1;
-                    etat.interruption = Some(
-                        "LRCLIB ne répond pas : la connexion Internet est peut-être coupée."
-                            .to_string(),
-                    );
+                    etat.interruption = Some(pourquoi_on_s_arrete(&echec).to_string());
                     break;
                 }
             }
@@ -689,6 +692,20 @@ fn generer(
     etat.fini = true;
     drop(etat);
     redessiner();
+}
+
+/// Le message affiché quand on abandonne après plusieurs échecs de suite.
+fn pourquoi_on_s_arrete(echec: &Echec) -> &'static str {
+    match echec {
+        Echec::SiteIndisponible(_) => {
+            "LRCLIB est indisponible pour le moment (surchargé ou en maintenance) : \
+             réessaie plus tard."
+        }
+        Echec::SansReponse(_) => {
+            "LRCLIB ne répond pas : la connexion Internet est peut-être coupée."
+        }
+        Echec::NonSecurise(_) => "LRCLIB a répondu par une adresse non sécurisée (http).",
+    }
 }
 
 /// Écrit le .lrc, sauf s'il existe déjà (créé entre-temps par un autre
@@ -817,6 +834,29 @@ mod tests {
         assert_eq!(r.titres, ["Tequila Coma"]);
         assert_eq!(r.album, "Clips");
         assert_eq!(r.duree, 201.0);
+    }
+
+    /// Bibliothèque de Luce : « Music/Arch Enemy/04. As The Pages Burn.mp3 »,
+    /// et des titres comme « Jack Attack (Bonus Track) ».
+    #[test]
+    fn le_dossier_de_l_artiste_compte_mais_pas_le_dossier_musique() {
+        let chemin = Path::new("C:/Users/l/Music/Arch Enemy/04. As The Pages Burn.mp3");
+        let r = preparer(chemin, &tags("", "", "War Eternal (CD1)", 0));
+        assert_eq!(r.artistes, ["Arch Enemy"]);
+        assert_eq!(r.titres, ["As The Pages Burn"]);
+
+        let chemin = Path::new("M/Airbourne/Black Dog Barking/11. Jack Attack Bonus Track.mp3");
+        let r = preparer(
+            chemin,
+            &tags(
+                "Jack Attack (Bonus Track)",
+                "Airbourne",
+                "Black Dog Barking",
+                0,
+            ),
+        );
+        assert_eq!(r.artistes, ["Airbourne"]);
+        assert_eq!(r.titres, ["Jack Attack"]);
     }
 
     #[test]
@@ -1018,6 +1058,7 @@ mod tests {
             &rangement,
             &progression,
             &AtomicBool::new(false),
+            &mut Introuvables::en_memoire(),
             |p| {
                 let titre = &p[0].1;
                 Ok(if titre.contains("Digital Love") {
@@ -1055,6 +1096,53 @@ mod tests {
     }
 
     #[test]
+    fn un_morceau_introuvable_n_est_pas_recherche_la_fois_suivante() {
+        let dossier = dossier_de_test("memoire");
+        let morceaux = [dossier.join("A - Rien.mp3")];
+        let mut memoire = Introuvables::en_memoire();
+        let mut appels = 0;
+        for _ in 0..2 {
+            let progression = Mutex::new(Progression::default());
+            generer(
+                &morceaux,
+                &rangement_de_test(&dossier),
+                &progression,
+                &AtomicBool::new(false),
+                &mut memoire,
+                |_| {
+                    appels += 1;
+                    Ok(Vec::new())
+                },
+                Duration::ZERO,
+                || {},
+            );
+            let p = progression.into_inner().unwrap();
+            assert_eq!(p.faits, 1);
+            assert_eq!(p.introuvables.len() + p.deja_cherches, 1);
+        }
+        let apres_le_premier_passage =
+            recherches_a_faire(&preparer(&morceaux[0], &Tags::default())).len();
+        assert_eq!(appels, apres_le_premier_passage);
+    }
+
+    #[test]
+    fn une_erreur_reseau_n_est_pas_notee_comme_introuvable() {
+        let dossier = dossier_de_test("memoire-503");
+        let mut memoire = Introuvables::en_memoire();
+        generer(
+            &[dossier.join("A - T.mp3")],
+            &rangement_de_test(&dossier),
+            &Mutex::new(Progression::default()),
+            &AtomicBool::new(false),
+            &mut memoire,
+            |_| Err(Echec::SiteIndisponible("http status: 503".to_string())),
+            Duration::ZERO,
+            || {},
+        );
+        assert_eq!(memoire.len(), 0);
+    }
+
+    #[test]
     fn s_arrete_si_lrclib_ne_repond_pas() {
         let dossier = dossier_de_test("reseau");
         let morceaux: Vec<PathBuf> = (1..=5)
@@ -1067,9 +1155,10 @@ mod tests {
             &rangement_de_test(&dossier),
             &progression,
             &AtomicBool::new(false),
+            &mut Introuvables::en_memoire(),
             |_| {
                 appels += 1;
-                Err("pas de connexion".to_string())
+                Err(Echec::SansReponse("pas de connexion".to_string()))
             },
             Duration::ZERO,
             || {},
@@ -1077,6 +1166,32 @@ mod tests {
         let p = progression.into_inner().unwrap();
         assert_eq!(appels, ECHECS_DE_SUITE_MAX);
         assert_eq!(p.erreurs.len(), ECHECS_DE_SUITE_MAX);
-        assert!(p.interruption.is_some() && p.fini);
+        assert!(p.interruption.unwrap().contains("connexion Internet") && p.fini);
+    }
+
+    /// Le bug de la capture : LRCLIB répond « 503 » (surchargé), et on
+    /// affichait « la connexion Internet est peut-être coupée ».
+    #[test]
+    fn un_503_dit_que_lrclib_est_indisponible_pas_que_la_connexion_est_coupee() {
+        let dossier = dossier_de_test("503");
+        let morceaux: Vec<PathBuf> = (1..=5)
+            .map(|n| dossier.join(format!("A - T{n}.mp3")))
+            .collect();
+        let progression = Mutex::new(Progression::default());
+        generer(
+            &morceaux,
+            &rangement_de_test(&dossier),
+            &progression,
+            &AtomicBool::new(false),
+            &mut Introuvables::en_memoire(),
+            |_| Err(Echec::SiteIndisponible("http status: 503".to_string())),
+            Duration::ZERO,
+            || {},
+        );
+        let p = progression.into_inner().unwrap();
+        assert_eq!(p.erreurs[0].1, "http status: 503");
+        let message = p.interruption.unwrap();
+        assert!(message.contains("indisponible"), "{message}");
+        assert!(!message.contains("connexion"), "{message}");
     }
 }
