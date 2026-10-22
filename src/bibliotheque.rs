@@ -195,14 +195,6 @@ impl Vue {
         }
     }
 
-    fn aide(self) -> &'static str {
-        match self {
-            Vue::Dossiers => "Ranger la musique par dossier",
-            Vue::Artistes => "Ranger la musique par artiste, puis par album (d'après les tags)",
-            Vue::Albums => "Ranger la musique par album (d'après les tags)",
-        }
-    }
-
     /// Le mot écrit dans le fichier de réglage.
     fn code(self) -> &'static str {
         match self {
@@ -426,7 +418,7 @@ impl Bibliotheque {
                     .allume(self.vue == vue)
                     .coins(coins)
                     .taille(egui::vec2(largeur, 28.0));
-                if ui.add(onglet).on_hover_text(vue.aide()).clicked() && self.vue != vue {
+                if ui.add(onglet).clicked() && self.vue != vue {
                     self.vue = vue;
                     memoriser(REGLAGE_VUE, vue.code());
                 }
