@@ -20,6 +20,7 @@ mod playlists;
 mod police;
 mod raccourcis;
 mod regroupement;
+mod reprise;
 mod sortie;
 mod systeme;
 mod tags;
@@ -46,6 +47,7 @@ use paroles::Paroles;
 use platine::{Effet, Platine, Telecommande};
 use playlists::{Demande, Playlists};
 use raccourcis::Commande;
+use reprise::Reprise;
 use sortie::{Sortie, Veilleur};
 use systeme::{
     fichier_de_reglage, Boite, ControlesMedia, Demarrage, EtatMedia, ZoneDeNotification,
@@ -80,6 +82,11 @@ fn main() -> eframe::Result {
         options,
         Box::new(|cc| {
             let mut lecteur = LecteurApp::new(&cc.egui_ctx);
+            // On reprend l'écoute là où on l'avait laissée (en pause), sans
+            // les morceaux dont le fichier a disparu depuis.
+            if let Some(reprise) = Reprise::charger() {
+                lecteur.reprendre(reprise.sans_les_disparus(Path::exists));
+            }
             boite.brancher(&cc.egui_ctx);
             lecteur.boite = boite;
             Ok(Box::new(lecteur))
@@ -225,6 +232,10 @@ struct LecteurApp {
     fenetre_infos: Option<FenetreInfos>,
     // Débit, taille… du morceau en cours (la ligne sous la pochette).
     infos: InfosConnues,
+    // L'écoute telle qu'on l'a mémorisée pour le prochain lancement, et
+    // quand la mémoriser à nouveau (voir `memoriser_l_ecoute`).
+    ecoute_memorisee: Option<Reprise>,
+    prochaine_memorisation: Instant,
     // Pour redessiner la fenêtre quand un travail en arrière-plan est fini.
     ctx: egui::Context,
 }
@@ -245,6 +256,9 @@ struct Chargement {
     /// Le morceau a été lancé par le bouton Lecture : il démarrera en
     /// accélérant (si le freinage est activé).
     en_douceur: bool,
+    /// Où démarrer dans le morceau, en secondes (reprise au lancement) ;
+    /// rien pour partir du début.
+    depart: Option<f32>,
 }
 
 /// Le morceau suivant, ouvert en arrière-plan avant la fin du morceau en
@@ -373,6 +387,8 @@ impl LecteurApp {
             editeur: None,
             fenetre_infos: None,
             infos: InfosConnues::default(),
+            ecoute_memorisee: None,
+            prochaine_memorisation: maintenant + reprise::INTERVALLE,
             ctx: ctx.clone(),
         }
     }
@@ -487,6 +503,7 @@ impl LecteurApp {
             abandonne,
             en_pause,
             en_douceur,
+            depart: None,
         });
     }
 
@@ -507,15 +524,13 @@ impl LecteurApp {
         let chemin = chargement.chemin.clone();
         let en_pause = chargement.en_pause;
         let en_douceur = chargement.en_douceur;
+        let depart = chargement.depart;
         let mut essais = chargement.essais.clone();
         match resultat {
             Ok(morceau) => {
                 self.morceau = Some(morceau);
-                match self.demarrer(en_douceur) {
+                match self.demarrer_a(en_douceur, en_pause, depart) {
                     Ok(()) => {
-                        if let Some(t) = self.telecommande.as_ref().filter(|_| en_pause) {
-                            t.mettre_en_pause(true);
-                        }
                         self.message = essais.message_si_lu();
                     }
                     Err(e) => {
@@ -561,12 +576,30 @@ impl LecteurApp {
     /// partant en douceur depuis l'arrêt si `en_douceur` (effet platine ou
     /// fondu, voir `effet`).
     fn demarrer(&mut self, en_douceur: bool) -> Result<(), Box<dyn std::error::Error>> {
+        self.demarrer_a(en_douceur, false, None)
+    }
+
+    /// Comme `demarrer`, mais en pause si `en_pause`, et à `depart` secondes
+    /// du début si c'est donné. Réglé avant le premier son : rien ne
+    /// s'entend avant la pause, ni le début du morceau avant le saut.
+    fn demarrer_a(
+        &mut self,
+        en_douceur: bool,
+        en_pause: bool,
+        depart: Option<f32>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         // On arrête l'ancien morceau s'il y en avait un.
         self.stop();
 
         let morceau = self.morceau.clone().ok_or("aucun morceau chargé")?;
+        let fin = morceau.duree().as_secs_f32();
         let (telecommande, mut platine) = Telecommande::nouvelle(morceau);
-        if en_douceur {
+        if let Some(secondes) = depart {
+            telecommande.aller_a(secondes.clamp(0.0, fin));
+        }
+        if en_pause {
+            telecommande.mettre_en_pause(true);
+        } else if en_douceur {
             // Avant de lancer : sinon le début partirait d'un coup.
             let (effet, duree) = self.effet();
             telecommande.demarrer_en_douceur(effet, duree);
@@ -1768,7 +1801,77 @@ fn format_temps(d: Duration) -> String {
     format!("{}:{:02}", s / 60, s % 60)
 }
 
+impl LecteurApp {
+    /// Reprend l'écoute mémorisée : la liste, les modes aléatoire et
+    /// répétition, et le morceau en cours, ouvert en pause à la seconde où
+    /// on l'avait quitté (▶ pour repartir).
+    fn reprendre(&mut self, reprise: Reprise) {
+        self.liste.ajouter(reprise.morceaux.clone());
+        self.liste.changer_repetition(reprise.repetition);
+        self.liste.changer_aleatoire(reprise.aleatoire);
+        if let Some(n) = reprise.courant {
+            self.jouer(n);
+            if let Some(chargement) = &mut self.chargement {
+                chargement.en_pause = true;
+                chargement.depart = Some(reprise.position);
+            }
+        }
+        self.ecoute_memorisee = Some(reprise);
+    }
+
+    /// L'écoute en cours, telle qu'on la reprendra au prochain lancement.
+    fn ecoute(&self) -> Reprise {
+        // Le morceau en train de s'ouvrir à la reprise n'a pas encore de
+        // platine : on garde la seconde où il démarrera. Après un Stop
+        // (même pendant le freinage), on repartira du début.
+        let position = match &self.chargement {
+            Some(chargement) => chargement.depart.unwrap_or(0.0),
+            None => self
+                .platine_active()
+                .filter(|t| !t.freine())
+                .map_or(0.0, |t| t.position().as_secs_f32()),
+        };
+        Reprise {
+            morceaux: self.liste.morceaux().to_vec(),
+            courant: self.liste.courant(),
+            position,
+            aleatoire: self.liste.aleatoire(),
+            repetition: self.liste.repetition(),
+        }
+    }
+
+    /// Mémorise l'écoute si elle a changé depuis la dernière fois : toutes
+    /// les 10 secondes, ou tout de suite si `maintenant` est rien (à la
+    /// fermeture). Si elle a changé sans que la fenêtre se redessine (en
+    /// pause), on demande à être rappelé à l'heure.
+    fn memoriser_l_ecoute(&mut self, maintenant: Option<Instant>) {
+        if let Some(maintenant) = maintenant {
+            if maintenant < self.prochaine_memorisation {
+                if self.ecoute_memorisee.as_ref() != Some(&self.ecoute()) {
+                    self.ctx
+                        .request_repaint_after(self.prochaine_memorisation - maintenant);
+                }
+                return;
+            }
+            self.prochaine_memorisation = maintenant + reprise::INTERVALLE;
+        }
+        let ecoute = self.ecoute();
+        if self.ecoute_memorisee.as_ref() != Some(&ecoute) {
+            // (Pendant les tests, jamais : on garderait leur écoute.)
+            if !cfg!(test) {
+                ecoute.memoriser();
+            }
+            self.ecoute_memorisee = Some(ecoute);
+        }
+    }
+}
+
 impl eframe::App for LecteurApp {
+    /// À la fermeture, on mémorise où on en était.
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.memoriser_l_ecoute(None);
+    }
+
     // Appelée à chaque image : on (re)dessine toute l'interface.
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         // Les raccourcis clavier passent avant l'interface (voir raccourcis::lire),
@@ -1789,6 +1892,7 @@ impl eframe::App for LecteurApp {
         self.suivre_le_chargement();
         self.suivre_l_egalisation();
         self.preparer_l_enchainement();
+        self.memoriser_l_ecoute(Some(Instant::now()));
 
         // Le fond nuit quadrillé, sous tous les panneaux ; les lignes d'écran
         // par-dessus. Les lueurs respirent seulement pendant la lecture.
@@ -2181,6 +2285,98 @@ mod tests {
         std::thread::sleep(Duration::from_millis(100));
         app.suivre_le_chargement();
         assert!(app.etat() == Etat::Arrete);
+    }
+
+    /// Au lancement, l'écoute reprend : la liste, les modes, et le morceau
+    /// en cours ouvert en pause à la bonne seconde. Un fichier disparu est
+    /// retiré ; si c'était le morceau en cours, on prend le début du suivant.
+    #[test]
+    fn l_ecoute_reprend_en_pause_a_la_bonne_seconde() {
+        let ctx = egui::Context::default();
+        let _tour = mon_tour();
+        let present = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/glissando.mp3");
+        let reprise = Reprise {
+            morceaux: vec![
+                present.clone(),
+                PathBuf::from("disparu.mp3"),
+                present.clone(),
+            ],
+            courant: Some(2),
+            position: 0.5,
+            aleatoire: false,
+            repetition: true,
+        };
+        let mut app = LecteurApp::new(&ctx);
+        app.reprendre(reprise.clone().sans_les_disparus(Path::exists));
+        assert_eq!(app.liste.morceaux(), [present.clone(), present.clone()]);
+        assert_eq!(app.liste.courant(), Some(1));
+        assert!(app.liste.repetition() && !app.liste.aleatoire());
+        assert!(app.etat() == Etat::Chargement);
+        // Fermer pendant l'ouverture : on garde la seconde de reprise.
+        assert_eq!(app.ecoute().position, 0.5);
+        let debut = std::time::Instant::now();
+        while app.chargement.is_some() {
+            assert!(debut.elapsed() < Duration::from_secs(5), "jamais ouvert");
+            std::thread::sleep(Duration::from_millis(5));
+            app.suivre_le_chargement();
+        }
+        if app.sortie.is_some() {
+            // Un PC avec du son : en pause, à la seconde mémorisée, et rien
+            // n'avance tant qu'on n'appuie pas sur Lecture.
+            assert!(app.etat() == Etat::Pause);
+            std::thread::sleep(Duration::from_millis(200));
+            assert!((app.position().as_secs_f32() - 0.5).abs() < 0.01);
+            assert_eq!(app.ecoute().courant, Some(1));
+            assert!((app.ecoute().position - 0.5).abs() < 0.01);
+            // Après un Stop, on repartira du début.
+            app.stop();
+            assert_eq!(app.ecoute().position, 0.0);
+        }
+
+        // Le morceau en cours a disparu : le suivant, depuis le début.
+        let mut app = LecteurApp::new(&ctx);
+        app.reprendre(
+            Reprise {
+                courant: Some(1),
+                ..reprise.clone()
+            }
+            .sans_les_disparus(Path::exists),
+        );
+        assert_eq!(app.liste.courant(), Some(1));
+        assert_eq!(app.chargement.as_ref().unwrap().depart, Some(0.0));
+        assert!(app.chargement.as_ref().unwrap().en_pause);
+
+        // Aucun morceau en cours : la liste revient, rien ne s'ouvre.
+        let mut app = LecteurApp::new(&ctx);
+        app.reprendre(Reprise {
+            courant: None,
+            aleatoire: true,
+            ..reprise
+        });
+        assert_eq!(app.liste.morceaux().len(), 3);
+        assert!(app.liste.aleatoire());
+        assert!(app.etat() == Etat::Arrete);
+    }
+
+    /// L'écoute n'est mémorisée qu'au bout de 10 secondes, et seulement si
+    /// elle a changé ; à la fermeture, tout de suite.
+    #[test]
+    fn l_ecoute_est_memorisee_toutes_les_10_secondes_si_elle_change() {
+        let ctx = egui::Context::default();
+        let _tour = mon_tour();
+        let mut app = LecteurApp::new(&ctx);
+        let debut = Instant::now();
+        app.prochaine_memorisation = debut + reprise::INTERVALLE;
+        app.liste.ajouter(vec![PathBuf::from("a.mp3")]);
+        app.memoriser_l_ecoute(Some(debut));
+        assert_eq!(app.ecoute_memorisee, None);
+        app.memoriser_l_ecoute(Some(debut + reprise::INTERVALLE));
+        assert_eq!(app.ecoute_memorisee, Some(app.ecoute()));
+        assert_eq!(app.prochaine_memorisation, debut + 2 * reprise::INTERVALLE);
+        // À la fermeture, sans attendre.
+        app.liste.ajouter(vec![PathBuf::from("b.mp3")]);
+        app.memoriser_l_ecoute(None);
+        assert_eq!(app.ecoute_memorisee.unwrap().morceaux.len(), 2);
     }
 
     /// La sortie son meurt (mise en veille, casque débranché) : au bout d'une
