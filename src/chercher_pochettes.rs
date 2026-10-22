@@ -1097,7 +1097,7 @@ mod tests {
     }
 
     fn dossier_de_test(nom: &str) -> PathBuf {
-        let dossier = std::env::temp_dir().join(format!("lecteur_mp3_pochettes_{nom}"));
+        let dossier = std::env::temp_dir().join(format!("dollwave_pochettes_{nom}"));
         let _ = std::fs::remove_dir_all(&dossier);
         std::fs::create_dir_all(&dossier).unwrap();
         dossier

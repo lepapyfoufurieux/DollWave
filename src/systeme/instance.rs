@@ -74,7 +74,7 @@ fn nom_de_la_prise() -> String {
         .chars()
         .filter(|c| c.is_ascii_alphanumeric())
         .collect();
-    format!("lecteur_mp3-{utilisateur}.sock")
+    format!("dollwave-{utilisateur}.sock")
 }
 
 fn demarrer_sous(nom: &str, fichiers: Vec<PathBuf>) -> Demarrage {
@@ -189,7 +189,7 @@ mod tests {
 
     #[test]
     fn le_deuxieme_lancement_transmet_ses_fichiers_au_premier() {
-        let nom = format!("lecteur_mp3-test-{}.sock", std::process::id());
+        let nom = format!("dollwave-test-{}.sock", std::process::id());
         let Demarrage::Premier(boite) = demarrer_sous(&nom, vec![PathBuf::from("a.mp3")]) else {
             panic!("le premier lancement doit ouvrir le lecteur");
         };
@@ -218,7 +218,7 @@ mod tests {
 
     #[test]
     fn un_lancement_normal_ne_recoit_rien() {
-        let nom = format!("lecteur_mp3-test-vide-{}.sock", std::process::id());
+        let nom = format!("dollwave-test-vide-{}.sock", std::process::id());
         let Demarrage::Premier(boite) = demarrer_sous(&nom, Vec::new()) else {
             panic!("le premier lancement doit ouvrir le lecteur");
         };

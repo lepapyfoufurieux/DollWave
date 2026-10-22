@@ -44,7 +44,7 @@ const HAUTEUR: f32 = 150.0;
 /// La marge entre le cadre néon et ce qu'il contient.
 const MARGE: f32 = 12.0;
 /// Le petit fichier où l'on mémorise le style choisi
-/// (%APPDATA%\lecteur_mp3\visualiseur.txt).
+/// (%APPDATA%\dollwave\visualiseur.txt).
 const REGLAGE_STYLE: &str = "visualiseur.txt";
 
 /// Le résumé de la forme d'onde : le plus bas et le plus haut de chaque tranche.

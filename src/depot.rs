@@ -104,7 +104,7 @@ mod tests {
 
     #[test]
     fn depot_melange_fichiers_et_dossiers() {
-        let racine = std::env::temp_dir().join("lecteur_mp3_test_depot");
+        let racine = std::env::temp_dir().join("dollwave_test_depot");
         let _ = std::fs::remove_dir_all(&racine);
         std::fs::create_dir_all(racine.join("album/cd2")).unwrap();
         for f in ["seul.mp3", "image.jpg", "album/z.mp3", "album/cd2/a.mp3"] {
@@ -127,7 +127,7 @@ mod tests {
 
     #[test]
     fn les_depots_se_lisent_en_arriere_plan_dans_l_ordre() {
-        let racine = std::env::temp_dir().join("lecteur_mp3_test_depots");
+        let racine = std::env::temp_dir().join("dollwave_test_depots");
         let _ = std::fs::remove_dir_all(&racine);
         std::fs::create_dir_all(racine.join("gros")).unwrap();
         for i in 0..300 {

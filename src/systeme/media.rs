@@ -167,8 +167,8 @@ impl ControlesMedia {
             return;
         }
         let config = PlatformConfig {
-            display_name: "Lecteur MP3",
-            dbus_name: "lecteur_mp3",
+            display_name: "Doll//Wave",
+            dbus_name: "dollwave",
             hwnd: fenetre(frame),
         };
         // Windows exige la fenêtre : sans elle, souvlaki s'arrêterait net.
@@ -232,7 +232,7 @@ fn sans_extension(chemin: &Path) -> String {
 
 /// Le dossier temporaire où l'on range la pochette donnée au système.
 fn dossier_des_pochettes() -> PathBuf {
-    std::env::temp_dir().join("lecteur_mp3_pochettes")
+    std::env::temp_dir().join("dollwave_pochettes")
 }
 
 /// Écrit la pochette du morceau (ou, s'il n'en a pas, l'icône du
@@ -396,7 +396,7 @@ mod tests {
 
     /// Un dossier vide pour un test.
     fn dossier_de_test(nom: &str) -> PathBuf {
-        let dossier = std::env::temp_dir().join(format!("lecteur_mp3_test_media_{nom}"));
+        let dossier = std::env::temp_dir().join(format!("dollwave_test_media_{nom}"));
         let _ = fs::remove_dir_all(&dossier);
         fs::create_dir_all(&dossier).unwrap();
         dossier

@@ -529,7 +529,7 @@ pub mod tests {
             trame[..4].copy_from_slice(&[0xFF, 0xFB, 0x90, 0x00]);
             fichier.extend(trame);
         }
-        let dossier = std::env::temp_dir().join("lecteur_mp3_tests_tags");
+        let dossier = std::env::temp_dir().join("dollwave_tests_tags");
         std::fs::create_dir_all(&dossier).unwrap();
         let chemin = dossier.join(nom);
         std::fs::write(&chemin, fichier).unwrap();
@@ -668,7 +668,7 @@ pub mod tests {
 
     #[test]
     fn fichier_illisible() {
-        let dossier = std::env::temp_dir().join("lecteur_mp3_tests_tags");
+        let dossier = std::env::temp_dir().join("dollwave_tests_tags");
         std::fs::create_dir_all(&dossier).unwrap();
         let chemin = dossier.join("pas un mp3.mp3");
         std::fs::write(&chemin, b"bonjour").unwrap();
@@ -719,7 +719,7 @@ pub mod tests {
         // illisible, qui compte pour zéro sans bloquer le total.
         let a = ecrire_mp3("total a.mp3", None, None, None, false, 100);
         let b = ecrire_mp3("total b.mp3", None, None, None, false, 50);
-        let dossier = std::env::temp_dir().join("lecteur_mp3_tests_tags");
+        let dossier = std::env::temp_dir().join("dollwave_tests_tags");
         let illisible = dossier.join("total illisible.mp3");
         std::fs::write(&illisible, b"bonjour").unwrap();
         let chemins = vec![a, b, illisible];

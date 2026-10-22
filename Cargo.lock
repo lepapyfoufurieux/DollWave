@@ -1229,6 +1229,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "dollwave"
+version = "0.1.0"
+dependencies = [
+ "dirs 6.0.0",
+ "eframe",
+ "id3",
+ "image",
+ "interprocess",
+ "raw-window-handle",
+ "regex",
+ "rfd",
+ "rodio",
+ "rustfft",
+ "serde_json",
+ "souvlaki",
+ "symphonia",
+ "tray-icon",
+ "ureq",
+ "windows-sys 0.61.2",
+ "winresource",
+]
+
+[[package]]
 name = "downcast-rs"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2529,29 +2552,6 @@ name = "lazy_static"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "20870f649af7073d53e38067b2a84312175d56ea15217e1b15bc83506ec50afb"
-
-[[package]]
-name = "lecteur_mp3"
-version = "0.1.0"
-dependencies = [
- "dirs 6.0.0",
- "eframe",
- "id3",
- "image",
- "interprocess",
- "raw-window-handle",
- "regex",
- "rfd",
- "rodio",
- "rustfft",
- "serde_json",
- "souvlaki",
- "symphonia",
- "tray-icon",
- "ureq",
- "windows-sys 0.61.2",
- "winresource",
-]
 
 [[package]]
 name = "lewton"

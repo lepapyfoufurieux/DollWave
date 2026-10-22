@@ -589,7 +589,7 @@ mod tests {
     #[test]
     fn un_fichier_qui_echoue_n_arrete_pas_les_autres() {
         let bon = ecrire_mp3_avec("groupe bon.mp3", &[("TALB", "Vieux")], false, 20);
-        let absent = std::env::temp_dir().join("lecteur_mp3_tests_tags/groupe absent.mp3");
+        let absent = std::env::temp_dir().join("dollwave_tests_tags/groupe absent.mp3");
         let bon2 = ecrire_mp3_avec("groupe bon 2.mp3", &[("TALB", "Vieux")], false, 20);
         let ctx = egui::Context::default();
         let connus = TagsConnus::new(&ctx);

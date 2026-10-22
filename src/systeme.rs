@@ -17,7 +17,9 @@ pub use media::{ControlesMedia, EtatMedia};
 pub use windows::{autoriser_le_premier_plan, ZoneDeNotification};
 
 /// Le nom de notre dossier de réglages.
-const NOTRE_DOSSIER: &str = "lecteur_mp3";
+const NOTRE_DOSSIER: &str = "dollwave";
+/// Son nom avant que le lecteur s'appelle Doll//Wave.
+const ANCIEN_DOSSIER: &str = "lecteur_mp3";
 
 /// Le dossier Musique de l'utilisateur, celui que le système connaît :
 /// - Windows : C:\Users\<nom>\Music (ou là où il a été déplacé, OneDrive…)
@@ -32,10 +34,28 @@ pub fn dossier_musique() -> PathBuf {
 }
 
 /// Un petit fichier de réglage, par exemple :
-/// - Windows : %APPDATA%\lecteur_mp3\dossier_musique.txt
-/// - Linux : ~/.config/lecteur_mp3/dossier_musique.txt
+/// - Windows : %APPDATA%\dollwave\dossier_musique.txt
+/// - Linux : ~/.config/dollwave/dossier_musique.txt
 pub fn fichier_de_reglage(nom: &str) -> Option<PathBuf> {
     Some(dirs::config_dir()?.join(NOTRE_DOSSIER).join(nom))
+}
+
+/// Au premier lancement de Doll//Wave, l'ancien dossier de réglages
+/// (lecteur_mp3) est renommé : favoris, playlists, paroles… sont gardés.
+pub fn reprendre_les_anciens_reglages() {
+    if let Some(config) = dirs::config_dir() {
+        renommer_l_ancien_dossier(&config);
+    }
+}
+
+/// Renomme `config/lecteur_mp3` en `config/dollwave`, seulement si le
+/// nouveau dossier n'existe pas encore.
+fn renommer_l_ancien_dossier(config: &Path) {
+    let ancien = config.join(ANCIEN_DOSSIER);
+    let nouveau = config.join(NOTRE_DOSSIER);
+    if ancien.is_dir() && !nouveau.exists() {
+        let _ = std::fs::rename(ancien, nouveau);
+    }
 }
 
 /// Ouvre le dossier d'un fichier dans le gestionnaire de fichiers, avec ce
@@ -154,8 +174,8 @@ const INFOBULLE_MAX: usize = 120;
 #[cfg_attr(not(windows), allow(dead_code))]
 fn texte_d_infobulle(morceau: Option<&str>) -> String {
     let texte = match morceau {
-        Some(morceau) => format!("Lecteur MP3 · {morceau}"),
-        None => "Lecteur MP3".to_string(),
+        Some(morceau) => format!("Doll//Wave · {morceau}"),
+        None => "Doll//Wave".to_string(),
     };
     if texte.chars().count() <= INFOBULLE_MAX {
         return texte;
@@ -172,13 +192,35 @@ mod tests {
     #[test]
     fn les_reglages_vont_dans_notre_dossier() {
         let fichier = fichier_de_reglage("favoris.txt").expect("dossier de réglages");
-        assert!(fichier.ends_with("lecteur_mp3/favoris.txt"));
+        assert!(fichier.ends_with("dollwave/favoris.txt"));
         assert!(fichier.is_absolute());
         if cfg!(windows) {
-            // Même dossier qu'avant : les réglages déjà enregistrés sont gardés.
             let appdata = PathBuf::from(std::env::var_os("APPDATA").unwrap());
-            assert_eq!(fichier, appdata.join("lecteur_mp3").join("favoris.txt"));
+            assert_eq!(fichier, appdata.join("dollwave").join("favoris.txt"));
         }
+    }
+
+    #[test]
+    fn les_anciens_reglages_sont_repris() {
+        let config = std::env::temp_dir().join("dollwave_test_anciens_reglages");
+        let _ = std::fs::remove_dir_all(&config);
+        std::fs::create_dir_all(config.join("lecteur_mp3")).unwrap();
+        std::fs::write(config.join("lecteur_mp3/favoris.txt"), "Zebda").unwrap();
+
+        renommer_l_ancien_dossier(&config);
+        assert!(!config.join("lecteur_mp3").exists());
+        let favoris = std::fs::read_to_string(config.join("dollwave/favoris.txt")).unwrap();
+        assert_eq!(favoris, "Zebda");
+
+        // Le nouveau dossier existe déjà : on ne touche à rien.
+        std::fs::create_dir_all(config.join("lecteur_mp3")).unwrap();
+        renommer_l_ancien_dossier(&config);
+        assert!(config.join("lecteur_mp3").exists());
+        assert_eq!(
+            std::fs::read_to_string(config.join("dollwave/favoris.txt")).unwrap(),
+            "Zebda"
+        );
+        let _ = std::fs::remove_dir_all(&config);
     }
 
     #[test]
@@ -198,10 +240,10 @@ mod tests {
 
     #[test]
     fn infobulle_avec_ou_sans_morceau() {
-        assert_eq!(texte_d_infobulle(None), "Lecteur MP3");
+        assert_eq!(texte_d_infobulle(None), "Doll//Wave");
         assert_eq!(
             texte_d_infobulle(Some("Zebda – Tomber la chemise")),
-            "Lecteur MP3 · Zebda – Tomber la chemise"
+            "Doll//Wave · Zebda – Tomber la chemise"
         );
     }
 
