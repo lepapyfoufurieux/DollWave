@@ -264,6 +264,7 @@ impl Visualiseur {
                     ),
                     _ => ([0.0; NB_BARRES], Vec::new()),
                 };
+                self.ambiance.adapter(zone.size());
                 self.ambiance.avancer(&forces, &onde, en_lecture, dt);
                 self.ambiance.dessiner(ui.ctx(), &peintre, zone);
             }

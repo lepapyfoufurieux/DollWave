@@ -18,9 +18,13 @@ use eframe::egui;
 
 use crate::theme;
 
-/// Taille de l'image calculée, en pixels (elle est agrandie au dessin).
-const LARGEUR: usize = 320;
-const HAUTEUR: usize = 80;
+/// Nombre de pixels de l'image calculée (elle est agrandie au dessin).
+/// Sa forme suit celle du cadre ; ce nombre reste à peu près le même pour
+/// que le calcul garde la même durée, quelle que soit la taille du cadre.
+const PIXELS: f32 = 25_600.0;
+/// Hauteur la plus petite et la plus grande de l'image calculée, en pixels.
+const HAUTEUR_MIN: f32 = 40.0;
+const HAUTEUR_MAX: f32 = 320.0;
 /// Part de lumière gardée d'une image à l'autre (à 60 images par seconde) :
 /// plus c'est proche de 1, plus la fumée traîne.
 const MEMOIRE: f32 = 0.94;
@@ -82,8 +86,8 @@ pub struct Ambiance {
     /// La force de chaque barre de fréquences, pour les flammes.
     barres: Vec<f32>,
     /// L'image actuelle et un brouillon de même taille, échangés à chaque image.
-    image: Vec<Lumiere>,
-    brouillon: Vec<Lumiere>,
+    image: Image,
+    brouillon: Image,
     /// La même image, envoyée à la carte graphique pour être dessinée.
     texture: Option<egui::TextureHandle>,
 }
@@ -100,8 +104,8 @@ impl Ambiance {
             mediums: 0.0,
             aigus: 0.0,
             barres: Vec::new(),
-            image: vec![[0.0; 3]; LARGEUR * HAUTEUR],
-            brouillon: vec![[0.0; 3]; LARGEUR * HAUTEUR],
+            image: Image::noire(320, 80),
+            brouillon: Image::noire(320, 80),
             texture: None,
         }
     }
@@ -110,7 +114,36 @@ impl Ambiance {
     /// s'est éteinte.
     pub fn au_repos(&self) -> bool {
         let silence = self.graves <= 0.0 && self.mediums <= 0.0 && self.aigus <= 0.0;
-        silence && self.image.iter().all(|p| p.iter().all(|&c| c < NOIR))
+        silence
+            && self
+                .image
+                .pixels
+                .iter()
+                .all(|p| p.iter().all(|&c| c < NOIR))
+    }
+
+    /// Donne à l'image calculée la forme du cadre (`taille`, en points).
+    /// Si la forme change, l'image actuelle est étirée à la nouvelle taille,
+    /// pour que la fumée continue sans à-coup.
+    pub fn adapter(&mut self, taille: egui::Vec2) {
+        let (largeur, hauteur) = taille_de_l_image(taille);
+        if (largeur, hauteur) == (self.image.largeur, self.image.hauteur) {
+            return;
+        }
+        let mut nouvelle = Image::noire(largeur, hauteur);
+        let (fx, fy) = (
+            self.image.largeur as f32 / largeur as f32,
+            self.image.hauteur as f32 / hauteur as f32,
+        );
+        for y in 0..hauteur {
+            for x in 0..largeur {
+                nouvelle.pixels[y * largeur + x] = self
+                    .image
+                    .lire((x as f32 + 0.5) * fx - 0.5, (y as f32 + 0.5) * fy - 0.5);
+            }
+        }
+        self.image = nouvelle;
+        self.brouillon = Image::noire(largeur, hauteur);
     }
 
     /// Calcule l'image suivante. `barres` : la force de chaque bande de
@@ -206,10 +239,13 @@ impl Ambiance {
             _ => MEMOIRE,
         }
         .powf(pas);
-        let (cx, cy) = (LARGEUR as f32 / 2.0, HAUTEUR as f32 / 2.0);
-        let echelle = HAUTEUR as f32;
-        for y in 0..HAUTEUR {
-            for x in 0..LARGEUR {
+        let (cx, cy) = (
+            self.image.largeur as f32 / 2.0,
+            self.image.hauteur as f32 / 2.0,
+        );
+        let echelle = self.image.hauteur as f32;
+        for y in 0..self.image.hauteur {
+            for x in 0..self.image.largeur {
                 // Position par rapport au centre, en « hauteurs d'image ».
                 let mut u = (x as f32 + 0.5 - cx) / echelle;
                 let mut v = (y as f32 + 0.5 - cy) / echelle;
@@ -229,12 +265,11 @@ impl Ambiance {
                     let (s, c) = angle.sin_cos();
                     ((u * c - v * s) * zoom, (u * s + v * c) * zoom)
                 };
-                let source = lire(
-                    &self.image,
-                    su * echelle + cx - 0.5,
-                    sv * echelle + cy - 0.5,
-                );
-                self.brouillon[y * LARGEUR + x] = source.map(|canal| canal * estompe);
+                let source = self
+                    .image
+                    .lire(su * echelle + cx - 0.5, sv * echelle + cy - 0.5);
+                self.brouillon.pixels[y * self.image.largeur + x] =
+                    source.map(|canal| canal * estompe);
             }
         }
         std::mem::swap(&mut self.image, &mut self.brouillon);
@@ -243,13 +278,15 @@ impl Ambiance {
     /// Un anneau de lumière autour du centre, qui s'étale avec la fumée.
     fn onde_de_choc(&mut self) {
         let couleur = teinte(self.decalage + 0.5).map(|c| c * 0.35);
-        let (cx, cy) = (LARGEUR as f32 / 2.0, HAUTEUR as f32 / 2.0);
-        let rayon = HAUTEUR as f32 * 0.22;
+        let (cx, cy) = (
+            self.image.largeur as f32 / 2.0,
+            self.image.hauteur as f32 / 2.0,
+        );
+        let rayon = self.image.hauteur as f32 * 0.22;
         for k in 0..48 {
             let a = TAU * k as f32 / 48.0;
-            tache(
-                &mut self.image,
-                cx + 1.6 * rayon * a.cos(),
+            self.image.tache(
+                cx + self.image.etire(0.4) * rayon * a.cos(),
                 cy + rayon * a.sin(),
                 2.0,
                 couleur,
@@ -284,12 +321,12 @@ impl Ambiance {
         if onde.is_empty() {
             return;
         }
-        let cy = HAUTEUR as f32 / 2.0;
+        let cy = self.image.hauteur as f32 / 2.0;
         let couleur = teinte(phase).map(|c| c * (0.2 + 0.35 * self.mediums));
-        let ampleur = HAUTEUR as f32 * (0.25 + 0.2 * self.mediums);
+        let ampleur = self.image.hauteur as f32 * (0.25 + 0.2 * self.mediums);
         let mut avant: Option<f32> = None;
-        for x in 0..LARGEUR {
-            let e = onde[x * onde.len() / LARGEUR].clamp(-1.0, 1.0);
+        for x in 0..self.image.largeur {
+            let e = onde[x * onde.len() / self.image.largeur].clamp(-1.0, 1.0);
             let y = cy - e * ampleur;
             // On relie au point précédent pour que la ligne n'ait pas de trou.
             let (haut, bas) = match avant {
@@ -298,7 +335,7 @@ impl Ambiance {
             };
             let mut yy = haut;
             while yy <= bas {
-                tache(&mut self.image, x as f32, yy, 1.2, couleur);
+                self.image.tache(x as f32, yy, 1.2, couleur);
                 yy += 1.0;
             }
             avant = Some(y);
@@ -310,17 +347,19 @@ impl Ambiance {
         if onde.is_empty() {
             return;
         }
-        let (cx, cy) = (LARGEUR as f32 / 2.0, HAUTEUR as f32 / 2.0);
+        let (cx, cy) = (
+            self.image.largeur as f32 / 2.0,
+            self.image.hauteur as f32 / 2.0,
+        );
         let couleur = teinte(phase).map(|c| c * (0.25 + 0.35 * self.mediums));
-        let rayon = HAUTEUR as f32 * (0.34 + 0.12 * self.graves);
+        let rayon = self.image.hauteur as f32 * (0.34 + 0.12 * self.graves);
         let points = 360;
         for k in 0..points {
             let a = TAU * k as f32 / points as f32 + 0.3 * self.temps;
             let e = onde[k * onde.len() / points].clamp(-1.0, 1.0);
             let r = rayon * (1.0 + 0.35 * e);
-            tache(
-                &mut self.image,
-                cx + 3.0 * r * a.cos(),
+            self.image.tache(
+                cx + self.image.etire(0.75) * r * a.cos(),
                 cy + r * a.sin(),
                 1.1,
                 couleur,
@@ -333,14 +372,17 @@ impl Ambiance {
         if self.graves <= 0.05 {
             return;
         }
-        let (cx, cy) = (LARGEUR as f32 / 2.0, HAUTEUR as f32 / 2.0);
+        let (cx, cy) = (
+            self.image.largeur as f32 / 2.0,
+            self.image.hauteur as f32 / 2.0,
+        );
         let couleur = teinte(phase).map(|c| c * 0.6 * self.graves);
         let rayon = 3.0 + 7.0 * self.graves;
         for k in 0..3 {
             let a = 0.9 * self.temps + TAU * k as f32 / 3.0;
-            let x = cx + 1.6 * HAUTEUR as f32 * 0.3 * a.cos();
-            let y = cy + HAUTEUR as f32 * 0.3 * a.sin();
-            tache(&mut self.image, x, y, rayon, couleur);
+            let x = cx + self.image.etire(0.4) * self.image.hauteur as f32 * 0.3 * a.cos();
+            let y = cy + self.image.hauteur as f32 * 0.3 * a.sin();
+            self.image.tache(x, y, rayon, couleur);
         }
     }
 
@@ -351,8 +393,8 @@ impl Ambiance {
         if nombre == 0 {
             return;
         }
-        let largeur = LARGEUR as f32 / nombre as f32;
-        let bas = HAUTEUR as f32 - 2.0;
+        let largeur = self.image.largeur as f32 / nombre as f32;
+        let bas = self.image.hauteur as f32 - 2.0;
         for (b, &force) in self.barres.clone().iter().enumerate() {
             let force = ((force - SEUIL) / (1.0 - SEUIL)).clamp(0.0, 1.0);
             if force <= 0.0 {
@@ -360,23 +402,25 @@ impl Ambiance {
             }
             let couleur = teinte(phase + 0.4 * b as f32 / nombre as f32).map(|c| c * 0.9 * force);
             let x = (b as f32 + 0.5) * largeur;
-            tache(&mut self.image, x, bas, largeur * 0.45, couleur);
+            self.image.tache(x, bas, largeur * 0.45, couleur);
         }
     }
 
     /// Deux comètes qui tournent autour du centre, plus ou moins loin selon
     /// les médiums, plus grosses sur les graves.
     fn cometes(&mut self, phase: f32) {
-        let (cx, cy) = (LARGEUR as f32 / 2.0, HAUTEUR as f32 / 2.0);
+        let (cx, cy) = (
+            self.image.largeur as f32 / 2.0,
+            self.image.hauteur as f32 / 2.0,
+        );
         let t = self.temps;
-        let rayon = HAUTEUR as f32 * (0.2 + 0.2 * self.mediums + 0.06 * (1.3 * t).sin());
+        let rayon = self.image.hauteur as f32 * (0.2 + 0.2 * self.mediums + 0.06 * (1.3 * t).sin());
         let taille = 1.5 + 3.5 * self.graves;
         for k in 0..2 {
             let a = 2.2 * t + TAU * k as f32 / 2.0;
             let couleur = teinte(phase + 0.5 * k as f32).map(|c| c * (0.5 + 0.6 * self.graves));
-            tache(
-                &mut self.image,
-                cx + 3.0 * rayon * a.cos(),
+            self.image.tache(
+                cx + self.image.etire(0.75) * rayon * a.cos(),
                 cy + rayon * a.sin(),
                 taille,
                 couleur,
@@ -392,17 +436,18 @@ impl Ambiance {
         let couleur = teinte(phase).map(|c| c * 0.9 * self.aigus);
         let graine = (self.temps * 40.0) as u32;
         for k in 0..(2 + (6.0 * self.aigus) as u32) {
-            let x = hasard(graine.wrapping_mul(31).wrapping_add(k * 2)) * LARGEUR as f32;
-            let y = hasard(graine.wrapping_mul(31).wrapping_add(k * 2 + 1)) * HAUTEUR as f32;
-            tache(&mut self.image, x, y, 1.0, couleur);
+            let x = hasard(graine.wrapping_mul(31).wrapping_add(k * 2)) * self.image.largeur as f32;
+            let y =
+                hasard(graine.wrapping_mul(31).wrapping_add(k * 2 + 1)) * self.image.hauteur as f32;
+            self.image.tache(x, y, 1.0, couleur);
         }
     }
 
     /// Dessine l'image dans `zone`, agrandie et adoucie.
     pub fn dessiner(&mut self, ctx: &egui::Context, peintre: &egui::Painter, zone: egui::Rect) {
         let image = egui::ColorImage {
-            size: [LARGEUR, HAUTEUR],
-            pixels: self.image.iter().map(|&p| en_couleur(p)).collect(),
+            size: [self.image.largeur, self.image.hauteur],
+            pixels: self.image.pixels.iter().map(|&p| en_couleur(p)).collect(),
         };
         let options = egui::TextureOptions::LINEAR;
         match &mut self.texture {
@@ -416,42 +461,75 @@ impl Ambiance {
     }
 }
 
-/// La lumière de l'image au point (x, y), en mélangeant les quatre pixels
-/// voisins. Hors de l'image : du noir.
-fn lire(image: &[Lumiere], x: f32, y: f32) -> Lumiere {
-    let (x0, y0) = (x.floor(), y.floor());
-    let (fx, fy) = (x - x0, y - y0);
-    let pixel = |px: f32, py: f32| -> Lumiere {
-        if px < 0.0 || py < 0.0 || px >= LARGEUR as f32 || py >= HAUTEUR as f32 {
-            [0.0; 3]
-        } else {
-            image[py as usize * LARGEUR + px as usize]
-        }
-    };
-    let (a, b) = (pixel(x0, y0), pixel(x0 + 1.0, y0));
-    let (c, d) = (pixel(x0, y0 + 1.0), pixel(x0 + 1.0, y0 + 1.0));
-    std::array::from_fn(|i| {
-        let haut = a[i] + (b[i] - a[i]) * fx;
-        let bas = c[i] + (d[i] - c[i]) * fx;
-        haut + (bas - haut) * fy
-    })
+/// Une image en lumière, rangée ligne par ligne.
+struct Image {
+    largeur: usize,
+    hauteur: usize,
+    pixels: Vec<Lumiere>,
 }
 
-/// Ajoute une tache de lumière ronde et floue autour de (x, y).
-fn tache(image: &mut [Lumiere], x: f32, y: f32, rayon: f32, couleur: Lumiere) {
-    let portee = (rayon * 2.0).ceil() as isize;
-    let (px, py) = (x.round() as isize, y.round() as isize);
-    for yy in (py - portee).max(0)..(py + portee + 1).min(HAUTEUR as isize) {
-        for xx in (px - portee).max(0)..(px + portee + 1).min(LARGEUR as isize) {
-            let dx = xx as f32 + 0.5 - x;
-            let dy = yy as f32 + 0.5 - y;
-            let poids = (-(dx * dx + dy * dy) / (rayon * rayon)).exp();
-            let pixel = &mut image[yy as usize * LARGEUR + xx as usize];
-            for (canal, ajout) in pixel.iter_mut().zip(couleur) {
-                *canal += ajout * poids;
+impl Image {
+    fn noire(largeur: usize, hauteur: usize) -> Self {
+        Self {
+            largeur,
+            hauteur,
+            pixels: vec![[0.0; 3]; largeur * hauteur],
+        }
+    }
+
+    /// Combien il faut étirer en largeur une forme ronde pour qu'elle occupe
+    /// la même part du cadre que sur un cadre quatre fois plus large que haut
+    /// (`k` : l'étirement voulu par unité de largeur). Jamais moins que rond.
+    fn etire(&self, k: f32) -> f32 {
+        (k * self.largeur as f32 / self.hauteur as f32).max(1.0)
+    }
+
+    /// La lumière de l'image au point (x, y), en mélangeant les quatre pixels
+    /// voisins. Hors de l'image : du noir.
+    fn lire(&self, x: f32, y: f32) -> Lumiere {
+        let (x0, y0) = (x.floor(), y.floor());
+        let (fx, fy) = (x - x0, y - y0);
+        let pixel = |px: f32, py: f32| -> Lumiere {
+            if px < 0.0 || py < 0.0 || px >= self.largeur as f32 || py >= self.hauteur as f32 {
+                [0.0; 3]
+            } else {
+                self.pixels[py as usize * self.largeur + px as usize]
+            }
+        };
+        let (a, b) = (pixel(x0, y0), pixel(x0 + 1.0, y0));
+        let (c, d) = (pixel(x0, y0 + 1.0), pixel(x0 + 1.0, y0 + 1.0));
+        std::array::from_fn(|i| {
+            let haut = a[i] + (b[i] - a[i]) * fx;
+            let bas = c[i] + (d[i] - c[i]) * fx;
+            haut + (bas - haut) * fy
+        })
+    }
+
+    /// Ajoute une tache de lumière ronde et floue autour de (x, y).
+    fn tache(&mut self, x: f32, y: f32, rayon: f32, couleur: Lumiere) {
+        let portee = (rayon * 2.0).ceil() as isize;
+        let (px, py) = (x.round() as isize, y.round() as isize);
+        for yy in (py - portee).max(0)..(py + portee + 1).min(self.hauteur as isize) {
+            for xx in (px - portee).max(0)..(px + portee + 1).min(self.largeur as isize) {
+                let dx = xx as f32 + 0.5 - x;
+                let dy = yy as f32 + 0.5 - y;
+                let poids = (-(dx * dx + dy * dy) / (rayon * rayon)).exp();
+                let pixel = &mut self.pixels[yy as usize * self.largeur + xx as usize];
+                for (canal, ajout) in pixel.iter_mut().zip(couleur) {
+                    *canal += ajout * poids;
+                }
             }
         }
     }
+}
+
+/// La taille (largeur, hauteur) de l'image calculée pour un cadre de
+/// `taille` points : la même forme, avec environ `PIXELS` pixels.
+fn taille_de_l_image(taille: egui::Vec2) -> (usize, usize) {
+    let forme = (taille.x / taille.y.max(1.0)).clamp(0.25, 16.0);
+    let hauteur = (PIXELS / forme).sqrt().clamp(HAUTEUR_MIN, HAUTEUR_MAX);
+    let largeur = (hauteur * forme).max(1.0);
+    (largeur.round() as usize, hauteur.round() as usize)
 }
 
 /// Une couleur de la palette néon qui tourne : cyan → magenta → jaune → cyan,
@@ -500,7 +578,7 @@ mod tests {
     }
 
     fn lumiere_totale(ambiance: &Ambiance) -> f32 {
-        ambiance.image.iter().flatten().sum()
+        ambiance.image.pixels.iter().flatten().sum()
     }
 
     #[test]
@@ -578,6 +656,43 @@ mod tests {
             // En pause, la scène ne bouge plus et ne change pas.
             assert_eq!(ambiance.temps, temps);
             assert_eq!(ambiance.scene, scene);
+        }
+    }
+
+    #[test]
+    fn l_image_prend_la_forme_du_cadre() {
+        for (cadre, forme) in [
+            ((700.0, 150.0), 4.67),
+            ((1920.0, 1080.0), 1.78),
+            ((300.0, 300.0), 1.0),
+        ] {
+            let (l, h) = taille_de_l_image(egui::vec2(cadre.0, cadre.1));
+            assert!(
+                ((l as f32 / h as f32) - forme).abs() < 0.05,
+                "{cadre:?} → {l}×{h}"
+            );
+            assert!((l * h) as f32 > 0.9 * PIXELS && ((l * h) as f32) < 1.1 * PIXELS);
+        }
+    }
+
+    #[test]
+    fn changer_la_taille_du_cadre_garde_la_fumee() {
+        let mut ambiance = Ambiance::new();
+        for i in 0..30 {
+            ambiance.avancer(&[0.8; 32], &onde(i), true, IMAGE);
+        }
+        let avant = lumiere_totale(&ambiance) / ambiance.image.pixels.len() as f32;
+        ambiance.adapter(egui::vec2(1920.0, 1080.0));
+        assert_eq!(
+            ambiance.image.pixels.len(),
+            ambiance.image.largeur * ambiance.image.hauteur
+        );
+        let apres = lumiere_totale(&ambiance) / ambiance.image.pixels.len() as f32;
+        assert!((apres - avant).abs() < 0.2 * avant, "{avant} → {apres}");
+        // Et ça continue de tourner dans la nouvelle taille.
+        for (n, scene) in Scene::TOUTES.into_iter().enumerate() {
+            ambiance.scene = scene;
+            ambiance.avancer(&[0.8; 32], &onde(n), true, IMAGE);
         }
     }
 
