@@ -1,5 +1,5 @@
 //! Le bandeau néon en haut de la fenêtre (étape 9), qui sert aussi de barre
-//! de titre : l'icône du lecteur, « LECTEUR//MP3 », la version, les voyants
+//! de titre : l'icône du lecteur, « DOLL//WAVE », la version, les voyants
 //! « SYS.OK ▮▮▮▮▯ » qui disent ce qui marche, puis les boutons Réduire,
 //! Agrandir et ✕. On le glisse pour déplacer la fenêtre ; un double-clic
 //! l'agrandit.
@@ -156,10 +156,10 @@ pub fn afficher(ui: &mut egui::Ui, voyants: &Voyants) {
         );
     }
 
-    // « LECTEUR//MP3 » : cyan, les deux barres en magenta.
+    // « DOLL//WAVE » : cyan, les deux barres en magenta.
     let titre = crate::police::titres(ui.ctx(), 14.0);
     let mut x = logo.right() + 14.0;
-    for (morceau, couleur) in [("LECTEUR", CYAN), ("//", MAGENTA), ("MP3", CYAN)] {
+    for (morceau, couleur) in [("DOLL", CYAN), ("//", MAGENTA), ("WAVE", CYAN)] {
         let place = theme::texte_lumineux(
             peintre,
             egui::pos2(x, milieu),
