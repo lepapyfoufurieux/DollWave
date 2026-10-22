@@ -57,9 +57,12 @@ pub struct Qualite {
 /// Ce qu'on sait d'un fichier.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Infos {
+    /// Le format, d'après l'extension : « MP3 », « FLAC », « WAV », « OGG ».
+    pub format: String,
     /// La taille, en octets.
     pub taille: u64,
-    /// Rien si le fichier n'a pas de trame MP3 reconnaissable.
+    /// Rien si le fichier n'a pas de trame MP3 reconnaissable (ou n'est pas
+    /// un MP3 : pour les autres formats, ces détails ne sont pas encore lus).
     pub qualite: Option<Qualite>,
 }
 
@@ -67,8 +70,21 @@ pub struct Infos {
 /// entier). Le fichier tient en mémoire le temps de l'analyse, comme le
 /// morceau en cours pour le scratch.
 pub fn lire(chemin: &Path) -> Result<Infos, String> {
+    let format = chemin
+        .extension()
+        .map_or(String::new(), |e| e.to_string_lossy().to_uppercase());
+    if format != "MP3" {
+        // On ne sait lire que les en-têtes MP3 : pour les autres, la taille.
+        let taille = std::fs::metadata(chemin).map_err(|e| e.to_string())?.len();
+        return Ok(Infos {
+            format,
+            taille,
+            qualite: None,
+        });
+    }
     let octets = std::fs::read(chemin).map_err(|e| e.to_string())?;
     Ok(Infos {
+        format,
         taille: octets.len() as u64,
         qualite: analyser(&octets),
     })
@@ -494,7 +510,10 @@ impl FenetreInfos {
                         ligne(ui, "Durée", &crate::format_temps(q.duree));
                         ligne(ui, "Format", &format!("MP3 ({} Layer III)", q.version));
                     }
-                    None => ligne(ui, "Format", "Pas de son MP3 reconnu dans ce fichier"),
+                    None if infos.format == "MP3" => {
+                        ligne(ui, "Format", "Pas de son MP3 reconnu dans ce fichier")
+                    }
+                    None => ligne(ui, "Format", &infos.format),
                 }
                 let taille = format!(
                     "{} ({} octets)",
