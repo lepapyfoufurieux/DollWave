@@ -187,13 +187,13 @@ struct LecteurApp {
     // Le son est-il coupé (bouton muet) ? On garde le volume choisi à côté
     // pour le retrouver tel quel quand on remet le son.
     muet: bool,
-    // Au Stop et à la Pause, le son ralentit-il comme un vinyle qu'on arrête
-    // à la main (et accélère-t-il à la Lecture) ?
     // Les effets néon : lignes d'écran, lueurs qui respirent.
     effets: effets::Effets,
     /// La mesure du processeur (⚙ Options) et le début de l'image en cours.
     mesure: cadence::Mesure,
     debut_image: Instant,
+    // Au Stop et à la Pause, le son ralentit-il comme un vinyle qu'on arrête
+    // à la main (et accélère-t-il à la Lecture) ?
     freinage: bool,
     // Quand on fait glisser la barre de progression, la musique suit-elle
     // la souris (bruit de scratch) ? Sinon, elle continue et saute au lâcher.
@@ -2120,12 +2120,17 @@ impl eframe::App for LecteurApp {
             // assez souvent comme ça.
             ctx.request_repaint_after(Duration::from_millis(if en_lecture { 100 } else { 200 }));
         } else if anime && !reduite {
-            // 30 images par seconde suffisent pour un visualiseur fluide.
+            // 30 images par seconde suffisent pour un visualiseur fluide ;
+            // 15 quand la fenêtre n'est pas active (on fait autre chose).
+            // (Windows ne dit pas si elle est cachée derrière une autre.)
+            let active = ctx.input(|i| i.viewport().focused != Some(false));
             // egui avance de lui-même le rendez-vous de la durée prévue d'une
             // image (pour ne pas le rater) : on la rajoute, sinon on
             // retomberait à la cadence de l'écran.
             let image = Duration::from_secs_f32(ctx.input(|i| i.predicted_dt));
-            ctx.request_repaint_after(cadence::attente(self.debut_image, Instant::now()) + image);
+            ctx.request_repaint_after(
+                cadence::attente(self.debut_image, Instant::now(), active) + image,
+            );
         } else {
             ctx.request_repaint_after(Duration::from_millis(200));
         }

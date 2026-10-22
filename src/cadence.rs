@@ -1,6 +1,7 @@
 //! La cadence de l'affichage : pendant la lecture, on redessine la fenêtre
 //! 30 fois par seconde (au lieu d'une fois par rafraîchissement de l'écran,
-//! 60 ou 144 fois), pour ménager le processeur.
+//! 60 ou 144 fois), pour ménager le processeur. Et 15 fois par seconde
+//! quand la fenêtre n'est pas active.
 //!
 //! Et une mesure, à cocher dans ⚙ Options (pas mémorisée) : le nombre
 //! d'images par seconde et le temps de processeur que prend chaque image.
@@ -11,15 +12,22 @@ use eframe::egui;
 
 use crate::theme;
 
-/// Le nombre d'images dessinées par seconde pendant la lecture.
+/// Le nombre d'images dessinées par seconde pendant la lecture, quand la
+/// fenêtre est active, puis quand on travaille dans une autre fenêtre.
 pub const IMAGES_PAR_SECONDE: f32 = 30.0;
+pub const IMAGES_PAR_SECONDE_INACTIVE: f32 = 15.0;
 
 /// Combien attendre, à partir de `maintenant`, avant de dessiner l'image
 /// suivante, pour que les images commencées à `debut` se suivent à la cadence
-/// voulue (zéro si l'on est déjà en retard).
-pub fn attente(debut: Instant, maintenant: Instant) -> Duration {
-    (debut + Duration::from_secs_f32(1.0 / IMAGES_PAR_SECONDE))
-        .saturating_duration_since(maintenant)
+/// voulue (zéro si l'on est déjà en retard). `active` : la fenêtre est-elle
+/// celle où l'on travaille ?
+pub fn attente(debut: Instant, maintenant: Instant, active: bool) -> Duration {
+    let cadence = if active {
+        IMAGES_PAR_SECONDE
+    } else {
+        IMAGES_PAR_SECONDE_INACTIVE
+    };
+    (debut + Duration::from_secs_f32(1.0 / cadence)).saturating_duration_since(maintenant)
 }
 
 /// La mesure affichée en bas à droite de la fenêtre, refaite chaque seconde.
@@ -117,16 +125,25 @@ mod tests {
     fn on_attend_ce_qui_reste_d_un_trentieme_de_seconde() {
         let debut = Instant::now();
         let trentieme = Duration::from_secs_f32(1.0 / 30.0);
-        assert_eq!(attente(debut, debut), trentieme);
+        assert_eq!(attente(debut, debut, true), trentieme);
         let apres_10_ms = debut + Duration::from_millis(10);
         assert_eq!(
-            attente(debut, apres_10_ms),
+            attente(debut, apres_10_ms, true),
             trentieme - Duration::from_millis(10)
         );
         // Une image trop longue : on enchaîne tout de suite.
         assert_eq!(
-            attente(debut, debut + Duration::from_millis(50)),
+            attente(debut, debut + Duration::from_millis(50), true),
             Duration::ZERO
+        );
+    }
+
+    #[test]
+    fn fenetre_inactive_on_attend_un_quinzieme_de_seconde() {
+        let debut = Instant::now();
+        assert_eq!(
+            attente(debut, debut, false),
+            Duration::from_secs_f32(1.0 / 15.0)
         );
     }
 
