@@ -10,7 +10,7 @@
 //!
 //! Le système affiche aussi le titre, l'artiste, l'album et la pochette du
 //! morceau en cours. Windows veut la pochette dans un fichier : on l'écrit
-//! dans le dossier temporaire (le disque vinyle du lecteur si le morceau
+//! dans le dossier temporaire (l'icône du lecteur si le morceau
 //! n'en a pas, sinon Windows garderait celle du morceau d'avant).
 //!
 //! Les touches arrivent sur un autre fil que celui de la fenêtre : on se
@@ -18,7 +18,6 @@
 //! à la prochaine image (comme le menu de l'icône près de l'horloge).
 
 use std::fs;
-use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc::{self, Receiver};
@@ -33,9 +32,6 @@ use crate::tags;
 /// De combien les touches « avance / retour rapide » se déplacent dans le
 /// morceau (comme Q et D).
 const SAUT: f32 = 5.0;
-
-/// Côté du disque vinyle donné comme pochette aux morceaux qui n'en ont pas.
-const TAILLE_VINYLE: u32 = 256;
 
 /// Ce que le panneau média affiche d'un morceau.
 #[derive(Debug)]
@@ -239,7 +235,7 @@ fn dossier_des_pochettes() -> PathBuf {
     std::env::temp_dir().join("lecteur_mp3_pochettes")
 }
 
-/// Écrit la pochette du morceau (ou, s'il n'en a pas, le disque vinyle du
+/// Écrit la pochette du morceau (ou, s'il n'en a pas, l'icône du
 /// lecteur) dans `dossier`, après avoir effacé les précédentes. Chaque
 /// pochette a un nouveau nom : on n'écrit jamais dans un fichier que le
 /// système est peut-être en train de lire.
@@ -247,7 +243,7 @@ fn ecrire_pochette(chemin: &Path, dossier: &Path) -> Option<PathBuf> {
     static NUMERO: AtomicU32 = AtomicU32::new(0);
     let (donnees, extension) = match tags::lire_pochette_brute(chemin).and_then(avec_extension) {
         Some(pochette) => pochette,
-        None => (vinyle_png()?, "png"),
+        None => (icone_png()?, "png"),
     };
     if let Ok(anciennes) = fs::read_dir(dossier) {
         for ancienne in anciennes.flatten() {
@@ -272,13 +268,9 @@ fn avec_extension(donnees: Vec<u8>) -> Option<(Vec<u8>, &'static str)> {
     Some((donnees, extension))
 }
 
-/// Le disque vinyle de l'icône du lecteur, en PNG.
-fn vinyle_png() -> Option<Vec<u8>> {
-    let pixels = super::icone_vinyle(TAILLE_VINYLE);
-    let image = image::RgbaImage::from_raw(TAILLE_VINYLE, TAILLE_VINYLE, pixels)?;
-    let mut png = Cursor::new(Vec::new());
-    image.write_to(&mut png, image::ImageFormat::Png).ok()?;
-    Some(png.into_inner())
+/// L'icône du lecteur, en PNG.
+fn icone_png() -> Option<Vec<u8>> {
+    Some(super::ICONE_GRANDE.to_vec())
 }
 
 /// Le chemin d'un fichier écrit comme une adresse « file:// », la forme
@@ -318,6 +310,7 @@ fn fenetre(_frame: &eframe::Frame) -> Option<*mut std::ffi::c_void> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Cursor;
 
     #[test]
     fn la_touche_lecture_pause_bascule() {
@@ -410,7 +403,7 @@ mod tests {
     }
 
     #[test]
-    fn sans_tags_le_titre_est_le_nom_du_fichier_et_la_pochette_le_vinyle() {
+    fn sans_tags_le_titre_est_le_nom_du_fichier_et_la_pochette_l_icone() {
         let dossier = dossier_de_test("sans_tags");
         let mp3 = dossier.join("Mon morceau.mp3");
         fs::copy("tests/glissando.mp3", &mp3).unwrap();
@@ -422,7 +415,8 @@ mod tests {
         let pochette = infos.pochette.unwrap();
         assert_eq!(pochette.extension().unwrap(), "png");
         let image = image::open(&pochette).unwrap();
-        assert_eq!(image.width(), TAILLE_VINYLE);
+        // L'icône du lecteur, en 256 pixels.
+        assert_eq!(image.width(), 256);
     }
 
     #[test]

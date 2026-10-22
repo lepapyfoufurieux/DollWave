@@ -46,3 +46,8 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_Wind
 # Notre propre code reste en mode développement normal.
 [profile.dev.package."*"]
 opt-level = 3
+
+# Outils utilisés seulement pendant la compilation (voir build.rs).
+[build-dependencies]
+# Range l'icône dans le .exe sous Windows.
+winresource = "0.1"
