@@ -14,6 +14,7 @@ use std::fmt;
 use std::fs::{self, File};
 use std::io::{self, BufReader, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use id3::{Tag, TagLike, Version};
 
@@ -187,6 +188,11 @@ pub fn modifier(chemin: &Path, changer: impl FnOnce(&mut Tag)) -> Result<(), Err
     {
         return Err(Erreur::PasUnMp3);
     }
+    // Pochettes, éditeur et ReplayGain écrivent depuis des fils différents :
+    // un seul à la fois, sinon l'un remplacerait le fichier avec des tags
+    // relus avant l'écriture de l'autre (et ils partageraient la même copie).
+    static VERROU: Mutex<()> = Mutex::new(());
+    let _verrou = VERROU.lock().unwrap_or_else(|e| e.into_inner());
     let infos = match fs::metadata(chemin) {
         Ok(infos) => infos,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Err(Erreur::Introuvable),
@@ -555,6 +561,40 @@ mod tests {
         assert!(meme_musique(&a, &b).unwrap());
         let c = ecrire_mp3("verif c.mp3", Some("A"), None, None, false, 21);
         assert!(!meme_musique(&a, &c).unwrap());
+    }
+
+    /// Pochettes, éditeur et ReplayGain écrivent depuis des fils différents :
+    /// aucun ne doit effacer ce que l'autre vient d'écrire.
+    #[test]
+    fn deux_ecritures_en_meme_temps_gardent_les_deux() {
+        use crate::egalisation::{ecrire_replaygain, Mesure};
+        use std::sync::Barrier;
+        let chemin = ecrire_mp3("ecrire en meme temps.mp3", Some("0"), None, None, false, 20);
+        for tour in 1..=10 {
+            let depart = Barrier::new(2);
+            let titre = tour.to_string();
+            std::thread::scope(|fils| {
+                fils.spawn(|| {
+                    depart.wait();
+                    enregistrer(&chemin, &textes(&[(Champ::Titre, &titre)])).unwrap();
+                });
+                fils.spawn(|| {
+                    depart.wait();
+                    let mesure = Mesure {
+                        gain_db: tour as f32,
+                        crete: 0.5,
+                    };
+                    ecrire_replaygain(&chemin, mesure).unwrap();
+                });
+            });
+            let tag = Tag::read_from_path(&chemin).unwrap();
+            assert_eq!(tag.title(), Some(titre.as_str()), "tour {tour}");
+            let gain = tag
+                .extended_texts()
+                .find(|t| t.description == "REPLAYGAIN_TRACK_GAIN")
+                .map(|t| t.value.clone());
+            assert_eq!(gain, Some(format!("{:+.2} dB", tour as f32)), "tour {tour}");
+        }
     }
 
     #[test]

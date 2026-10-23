@@ -689,21 +689,32 @@ fn completer(
             }
         };
 
+        // On écrit avant de prendre le verrou : la fenêtre le prend à chaque
+        // image, et recopier puis vérifier tout un album prend des secondes.
+        let ecritures: Vec<_> = match &trouvee {
+            Ok(Some((image, _))) => {
+                let modifications = Modifications {
+                    textes: Vec::new(),
+                    pochette: Pochette::Remplacer(image.clone()),
+                };
+                album
+                    .sans_pochette
+                    .iter()
+                    // Une pochette ajoutée entre-temps n'est pas remplacée.
+                    .filter(|chemin| tags::lire_pochette_brute(chemin).is_none())
+                    .map(|chemin| (chemin, ecriture_tags::enregistrer(chemin, &modifications)))
+                    .collect()
+            }
+            _ => Vec::new(),
+        };
+
         let mut etat = etat();
         match trouvee {
-            Ok(Some((image, recopiee))) => {
+            Ok(Some((_, recopiee))) => {
                 echecs_de_suite = 0;
                 let mut ecrits = 0;
-                for chemin in &album.sans_pochette {
-                    let modifications = Modifications {
-                        textes: Vec::new(),
-                        pochette: Pochette::Remplacer(image.clone()),
-                    };
-                    // Une pochette ajoutée entre-temps n'est pas remplacée.
-                    if tags::lire_pochette_brute(chemin).is_some() {
-                        continue;
-                    }
-                    match ecriture_tags::enregistrer(chemin, &modifications) {
+                for (chemin, resultat) in ecritures {
+                    match resultat {
                         Ok(()) => {
                             ecrits += 1;
                             etat.nouveaux.push(chemin.clone());
