@@ -1,10 +1,15 @@
 //! L'écriture des tags ID3 dans les fichiers MP3 (titre, artiste, album,
 //! pochette…), avec la crate `id3` : symphonia sait seulement les lire.
 //!
-//! On ne touche jamais directement au fichier : on écrit dans une copie,
-//! on vérifie que la musique y est restée identique octet pour octet, et
-//! seulement alors la copie remplace l'original. Si quoi que ce soit
-//! échoue, l'original reste tel qu'il était.
+//! Si le nouveau tag rentre dans la place de l'ancien (marge comprise), on
+//! réécrit seulement ces quelques Ko au début du fichier : la musique n'est
+//! pas touchée. On relit le tag, et s'il n'est pas celui voulu, l'ancien
+//! est remis.
+//!
+//! Sinon, on écrit dans une copie (en laissant une marge de 4 Ko, pour que
+//! les fois suivantes s'écrivent sur place), on vérifie que la musique y est
+//! restée identique octet pour octet, et seulement alors la copie remplace
+//! l'original. Si quoi que ce soit échoue, l'original reste tel qu'il était.
 //!
 //! `modifier` sert à n'importe quel changement de tags (par exemple, plus
 //! tard, le volume égalisé « ReplayGain ») ; `enregistrer` est ce que fait
@@ -12,10 +17,14 @@
 
 use std::fmt;
 use std::fs::{self, File};
-use std::io::{self, BufReader, Read, Seek, SeekFrom};
+use std::io::{self, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use id3::{Tag, TagLike, Version};
+
+/// La place libre laissée à la fin du tag quand on réécrit tout le fichier,
+/// pour que les modifications suivantes s'écrivent sur place.
+const MARGE: u64 = 4096;
 
 /// Un champ de texte qu'on peut modifier.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -206,6 +215,9 @@ pub fn modifier(chemin: &Path, changer: impl FnOnce(&mut Tag)) -> Result<(), Err
     };
     changer(&mut tag);
 
+    if ecrire_sur_place(chemin, &tag, version)? {
+        return Ok(());
+    }
     let copie = copie_de(chemin);
     let resultat = ecrire_dans_la_copie(chemin, &copie, &tag, version).and_then(|()| {
         // `rename` remplace l'original d'un coup, sous Windows comme sous Linux.
@@ -215,6 +227,57 @@ pub fn modifier(chemin: &Path, changer: impl FnOnce(&mut Tag)) -> Result<(), Err
         let _ = fs::remove_file(&copie);
     }
     resultat
+}
+
+/// Le tag encodé, suivi de `marge` octets à zéro.
+fn encoder(tag: &Tag, version: Version, marge: usize) -> Result<Vec<u8>, Erreur> {
+    let mut octets = Vec::new();
+    id3::Encoder::new()
+        .version(version)
+        .padding(marge)
+        .encode(tag, &mut octets)
+        .map_err(|e| Erreur::Disque(io::Error::other(e.to_string())))?;
+    Ok(octets)
+}
+
+/// Écrit le tag à la place de l'ancien, sans toucher à la musique, s'il y
+/// rentre. Renvoie `false` (sans rien écrire) s'il est trop grand.
+fn ecrire_sur_place(chemin: &Path, tag: &Tag, version: Version) -> Result<bool, Erreur> {
+    let mut fichier = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(chemin)
+        .map_err(Erreur::Remplacement)?;
+    let mut entete = [0u8; 10];
+    if fichier.read_exact(&mut entete).is_err() || &entete[..3] != b"ID3" {
+        return Ok(false);
+    }
+    // Un tag suivi d'un « pied de page » (très rare) : on passe par la copie.
+    if entete[5] & 0x10 != 0 {
+        return Ok(false);
+    }
+    let place = taille_du_tag(&mut entete.as_slice())? as usize;
+    let sans_marge = encoder(tag, version, 0)?.len();
+    if sans_marge > place {
+        return Ok(false);
+    }
+    let nouveau = encoder(tag, version, place - sans_marge)?;
+
+    let mut ancien = vec![0u8; place];
+    fichier.seek(SeekFrom::Start(0))?;
+    fichier.read_exact(&mut ancien)?;
+    let ecrire = |fichier: &mut File, octets: &[u8]| -> io::Result<()> {
+        fichier.seek(SeekFrom::Start(0))?;
+        fichier.write_all(octets)?;
+        fichier.sync_all()
+    };
+    ecrire(&mut fichier, &nouveau)?;
+    let bon = Tag::read_from_path(chemin).is_ok_and(|relu| memes_tags(&relu, tag));
+    if !bon {
+        ecrire(&mut fichier, &ancien)?;
+        return Err(Erreur::VerificationRatee);
+    }
+    Ok(true)
 }
 
 /// La copie de travail, à côté de l'original (sur le même disque, pour
@@ -232,7 +295,10 @@ fn ecrire_dans_la_copie(
     version: Version,
 ) -> Result<(), Erreur> {
     fs::copy(original, copie)?;
-    tag.write_to_path(copie, version)
+    id3::Encoder::new()
+        .version(version)
+        .padding(MARGE as usize)
+        .write_to_path(tag, copie)
         .map_err(|e| Erreur::Disque(io::Error::other(e.to_string())))?;
     // On relit la copie : les tags doivent être ceux voulus…
     let relu = Tag::read_from_path(copie).map_err(|_| Erreur::VerificationRatee)?;
@@ -539,6 +605,78 @@ mod tests {
         let chemin = std::env::temp_dir().join("dollwave_tests_tags/n existe pas.mp3");
         let erreur = enregistrer(&chemin, &textes(&[(Champ::Titre, "Autre")]));
         assert!(matches!(erreur, Err(Erreur::Introuvable)));
+    }
+
+    /// La place libre (en octets) laissée à la fin du tag.
+    fn marge(chemin: &Path) -> u64 {
+        let tag = Tag::read_from_path(chemin).unwrap();
+        let mut sans_marge = Vec::new();
+        id3::Encoder::new()
+            .version(tag.version())
+            .encode(&tag, &mut sans_marge)
+            .unwrap();
+        let place = taille_du_tag(&mut File::open(chemin).unwrap()).unwrap();
+        place - sans_marge.len() as u64
+    }
+
+    /// Le numéro du fichier sur le disque : il change si le fichier est
+    /// remplacé par une copie, pas s'il est modifié sur place.
+    #[cfg(unix)]
+    fn numero_disque(chemin: &Path) -> u64 {
+        use std::os::unix::fs::MetadataExt;
+        fs::metadata(chemin).unwrap().ino()
+    }
+
+    #[test]
+    fn quand_le_tag_doit_grandir_on_laisse_une_marge() {
+        let chemin = ecrire_mp3("ecrire marge.mp3", Some("A"), None, None, false, 20);
+        let avant = musique(&chemin);
+        assert_eq!(marge(&chemin), 0);
+        enregistrer(
+            &chemin,
+            &textes(&[(Champ::Titre, "Un titre bien plus long")]),
+        )
+        .unwrap();
+        assert_eq!(marge(&chemin), MARGE);
+        assert_eq!(musique(&chemin), avant);
+    }
+
+    #[test]
+    fn un_tag_qui_rentre_dans_sa_place_est_ecrit_sur_place() {
+        let chemin = ecrire_mp3("ecrire sur place.mp3", Some("A"), None, None, false, 20);
+        // La première fois, le fichier est recopié et reçoit sa marge.
+        enregistrer(&chemin, &textes(&[(Champ::Titre, "Titre")])).unwrap();
+        let taille = fs::metadata(&chemin).unwrap().len();
+        let avant = musique(&chemin);
+        #[cfg(unix)]
+        let numero = numero_disque(&chemin);
+
+        // Ensuite : plus long, plus court, une pochette… tout rentre dans la marge.
+        enregistrer(
+            &chemin,
+            &textes(&[
+                (Champ::Titre, "Un titre bien plus long"),
+                (Champ::Album, "Album"),
+            ]),
+        )
+        .unwrap();
+        enregistrer(&chemin, &textes(&[(Champ::Titre, "B")])).unwrap();
+        let modifs = Modifications {
+            pochette: Pochette::Remplacer(jpeg_bleu()),
+            ..Default::default()
+        };
+        enregistrer(&chemin, &modifs).unwrap();
+
+        let tags = lire(&chemin);
+        assert_eq!(tags.titre.as_deref(), Some("B"));
+        assert_eq!(tags.album.as_deref(), Some("Album"));
+        assert!(lire_pochette(&chemin).is_some());
+        assert_eq!(musique(&chemin), avant);
+        // Même taille, même fichier : seul le tag a été réécrit.
+        assert_eq!(fs::metadata(&chemin).unwrap().len(), taille);
+        #[cfg(unix)]
+        assert_eq!(numero_disque(&chemin), numero);
+        assert!(!copie_de(&chemin).exists());
     }
 
     #[test]
