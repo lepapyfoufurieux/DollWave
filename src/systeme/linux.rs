@@ -113,7 +113,9 @@ impl ksni::Tray for Icone {
             entree("Afficher le lecteur", || Clic::Afficher),
             ksni::MenuItem::Separator,
             entree("Lecture / pause", || Clic::Commande(Commande::LecturePause)),
-            entree("Morceau précédent", || Clic::Commande(Commande::Precedent)),
+            entree("Morceau précédent", || {
+                Clic::Commande(Commande::Precedent)
+            }),
             entree("Morceau suivant", || Clic::Commande(Commande::Suivant)),
             ksni::MenuItem::Separator,
             entree("Quitter", || Clic::Quitter),
@@ -342,7 +344,9 @@ mod tests {
         let images = images_de_l_icone();
         let tailles: Vec<_> = images.iter().map(|i| (i.width, i.height)).collect();
         assert_eq!(tailles, vec![(32, 32), (256, 256)]);
-        assert!(images.iter().all(|i| i.data.len() == (i.width * i.height * 4) as usize));
+        assert!(images
+            .iter()
+            .all(|i| i.data.len() == (i.width * i.height * 4) as usize));
     }
 
     #[test]

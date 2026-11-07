@@ -3,6 +3,8 @@ name = "dollwave"
 version = "1.0.0"
 edition = "2021"
 license = "MIT"
+description = "Lecteur MP3 néon synthwave"
+repository = "https://github.com/lepapyfoufurieux/DollWave"
 
 [dependencies]
 # Interface graphique (fenêtre, boutons)
@@ -68,3 +70,22 @@ opt-level = 3
 [build-dependencies]
 # Range l'icône dans le .exe sous Windows.
 winresource = "0.1"
+
+# Le paquet .deb de Linux (Ubuntu, Debian, Mint…), fabriqué par cargo-deb
+# (voir installateur/linux/fabriquer.sh).
+[package.metadata.deb]
+name = "dollwave"
+maintainer = "Luce <lepapyfoufurieux@users.noreply.github.com>"
+copyright = "Luce"
+section = "sound"
+extended-description = "Doll//Wave, un lecteur de musique (MP3, FLAC, OGG, WAV) au style néon cyberpunk."
+# Les bibliothèques dont le lecteur a besoin sont trouvées toutes seules.
+depends = "$auto"
+assets = [
+    ["target/release/dollwave", "usr/bin/", "755"],
+    ["installateur/linux/dollwave.desktop", "usr/share/applications/", "644"],
+    ["assets/icone/icone-256.png", "usr/share/icons/hicolor/256x256/apps/dollwave.png", "644"],
+    ["assets/icone/icone-32.png", "usr/share/icons/hicolor/32x32/apps/dollwave.png", "644"],
+    ["assets/icone/icone.svg", "usr/share/icons/hicolor/scalable/apps/dollwave.svg", "644"],
+    ["LICENSE", "usr/share/doc/dollwave/", "644"],
+]

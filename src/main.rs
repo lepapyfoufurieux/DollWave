@@ -85,7 +85,11 @@ fn main() -> eframe::Result {
             .with_min_inner_size(mini::TAILLE_MIN_GRANDE)
             // Pas de cadre du système : le bandeau néon sert de barre de titre.
             .with_decorations(false)
-            .with_icon(systeme::icone_fenetre()),
+            .with_icon(systeme::icone_fenetre())
+            // Sous Linux, relie la fenêtre à son lanceur (StartupWMClass
+            // dans installateur/linux/dollwave.desktop) : la barre des
+            // tâches montre alors la bonne icône.
+            .with_app_id("dollwave"),
         ..Default::default()
     };
     systeme::choisir_l_affichage(&mut options);
