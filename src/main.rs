@@ -77,7 +77,7 @@ fn main() -> eframe::Result {
         Demarrage::Premier(boite) => boite,
         Demarrage::DejaOuvert => return Ok(()),
     };
-    let options = eframe::NativeOptions {
+    let mut options = eframe::NativeOptions {
         // La taille de la maquette néon ; en dessous du minimum, les deux
         // colonnes du bas seraient trop serrées.
         viewport: egui::ViewportBuilder::default()
@@ -88,6 +88,7 @@ fn main() -> eframe::Result {
             .with_icon(systeme::icone_fenetre()),
         ..Default::default()
     };
+    systeme::choisir_l_affichage(&mut options);
     eframe::run_native(
         "Doll//Wave",
         options,

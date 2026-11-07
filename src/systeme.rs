@@ -2,17 +2,21 @@
 //! regroupé ici, pour que le reste du lecteur n'ait pas à s'en soucier.
 //! Les dossiers sont trouvés par la bibliothèque `dirs`, qui connaît les
 //! usages de chaque système. Le code propre à un seul système est dans un
-//! sous-module (systeme/windows.rs).
+//! sous-module (systeme/windows.rs, systeme/linux.rs).
 
 use std::path::{Path, PathBuf};
 
 mod instance;
 mod media;
+#[cfg(target_os = "linux")]
+mod linux;
 #[cfg(windows)]
 mod windows;
 
 pub use instance::{demarrer, Boite, Demarrage};
 pub use media::{ControlesMedia, EtatMedia};
+#[cfg(target_os = "linux")]
+pub use linux::{choisir_l_affichage, ZoneDeNotification};
 #[cfg(windows)]
 pub use windows::{autoriser_le_premier_plan, ZoneDeNotification};
 
@@ -103,13 +107,12 @@ pub fn ouvrir_le_dossier(dossier: &Path) -> Result<(), String> {
         .map_err(|e| format!("Impossible d'ouvrir le dossier : {e}"))
 }
 
-/// Ailleurs que sous Windows, pas encore d'icône près de l'horloge : la
-/// croix ferme le lecteur, comme d'habitude. (Sous Linux, il faudra une autre
-/// bibliothèque que sous Windows, voir la to do.)
-#[cfg(not(windows))]
+/// Ailleurs que sous Windows et Linux, pas d'icône près de l'horloge : la
+/// croix ferme le lecteur, comme d'habitude.
+#[cfg(not(any(windows, target_os = "linux")))]
 pub struct ZoneDeNotification;
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "linux")))]
 impl ZoneDeNotification {
     pub fn new(_ctx: &eframe::egui::Context) -> Self {
         Self
@@ -144,6 +147,10 @@ impl ZoneDeNotification {
 #[cfg(not(windows))]
 pub fn autoriser_le_premier_plan() {}
 
+/// Rien à choisir hors de Linux (voir la version Linux).
+#[cfg(not(target_os = "linux"))]
+pub fn choisir_l_affichage(_options: &mut eframe::NativeOptions) {}
+
 /// L'icône du lecteur (plot néon sur un sol quadrillé synthwave), en grand pour
 /// la fenêtre et la barre des tâches. Le dessin d'origine est
 /// assets/icone/icone.svg ; le .exe reçoit assets/icone/icone.ico (voir
@@ -171,7 +178,7 @@ pub fn icone_petite() -> Option<(Vec<u8>, u32, u32)> {
 const INFOBULLE_MAX: usize = 120;
 
 /// Le texte affiché quand la souris passe sur l'icône près de l'horloge.
-#[cfg_attr(not(windows), allow(dead_code))]
+#[cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
 fn texte_d_infobulle(morceau: Option<&str>) -> String {
     let texte = match morceau {
         Some(morceau) => format!("Doll//Wave · {morceau}"),

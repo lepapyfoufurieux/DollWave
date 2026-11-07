@@ -49,6 +49,15 @@ tray-icon = "0.26"
 raw-window-handle = "0.6"
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
 
+# Seulement sous Linux (voir src/systeme/linux.rs).
+[target.'cfg(target_os = "linux")'.dependencies]
+# L'icône du lecteur près de l'horloge (KDE, GNOME avec l'extension
+# AppIndicator, XFCE…), avec son menu. 100 % Rust, sans GTK.
+ksni = { version = "0.3.7", default-features = false, features = ["async-io", "blocking"] }
+# La bibliothèque de fenêtres d'eframe, pour lui demander X11 (voir
+# choisir_l_affichage dans src/systeme/linux.rs).
+winit = { version = "0.30", default-features = false, features = ["x11"] }
+
 # Les bibliothèques (décodage MP3 notamment) sont optimisées même en mode
 # développement : sinon le décodage serait très lent avec `cargo run`.
 # Notre propre code reste en mode développement normal.
