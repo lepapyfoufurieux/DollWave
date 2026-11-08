@@ -2093,11 +2093,12 @@ impl eframe::App for LecteurApp {
         self.surveiller_sortie(Instant::now());
 
         self.suivre_la_fin();
-        self.media.etat(match self.etat() {
+        let etat_media = match self.etat() {
             Etat::Arrete => EtatMedia::Arrete,
             Etat::Pause => EtatMedia::Pause,
             Etat::Chargement | Etat::Lecture => EtatMedia::Lecture,
-        });
+        };
+        self.media.etat(etat_media, self.position());
         let en_cours = match (&self.morceau, self.liste.courant()) {
             (Some(_), Some(n)) => self.liste.fichier(n),
             _ => None,

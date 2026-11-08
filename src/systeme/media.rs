@@ -22,9 +22,12 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
+use std::time::{Duration, Instant};
 
 use eframe::egui;
-use souvlaki::{MediaControlEvent, MediaControls, MediaMetadata, MediaPlayback, PlatformConfig};
+use souvlaki::{
+    MediaControlEvent, MediaControls, MediaMetadata, MediaPlayback, MediaPosition, PlatformConfig,
+};
 
 use crate::raccourcis::Commande;
 use crate::tags;
@@ -33,6 +36,16 @@ use crate::tags;
 /// morceau (comme Q et D).
 const SAUT: f32 = 5.0;
 
+/// L'écart entre la position réelle et celle que Windows calcule tout seul
+/// au-delà duquel on lui redonne la position (un saut dans le morceau, un
+/// nouveau morceau…).
+const ECART_TOLERE: Duration = Duration::from_secs(1);
+
+/// Pendant la lecture, on redonne quand même la position aussi souvent :
+/// Windows ne la fait pas avancer lui-même, chaque lecteur (Rainmeter, le
+/// panneau média…) la calcule de son côté, et certains ne le font pas.
+const RAFRAICHISSEMENT: Duration = Duration::from_secs(1);
+
 /// Ce que le panneau média affiche d'un morceau.
 #[derive(Debug)]
 struct Infos {
@@ -40,6 +53,7 @@ struct Infos {
     titre: String,
     artiste: String,
     album: String,
+    duree: Option<Duration>,
     /// Le fichier image de la pochette, dans le dossier temporaire.
     pochette: Option<PathBuf>,
 }
@@ -62,6 +76,8 @@ pub struct ControlesMedia {
     touches: Option<Receiver<MediaControlEvent>>,
     /// Le dernier état donné au système.
     etat: EtatMedia,
+    /// La dernière position donnée au système, et quand. Rien : à redonner.
+    position: Option<(Duration, Instant)>,
     /// Le morceau dont le système affiche (ou va afficher) les informations.
     morceau: Option<PathBuf>,
     /// Ses informations, préparées en arrière-plan (lire les tags et écrire
@@ -76,6 +92,7 @@ impl ControlesMedia {
             essaye: false,
             touches: None,
             etat: EtatMedia::Arrete,
+            position: None,
             morceau: None,
             infos: None,
         }
@@ -98,19 +115,24 @@ impl ControlesMedia {
         commandes
     }
 
-    /// Dit au système si on joue, si on est en pause ou arrêté. Windows
-    /// s'en sert pour choisir entre « lecture » et « pause » quand on appuie
-    /// sur la touche ⏯.
-    pub fn etat(&mut self, etat: EtatMedia) {
-        if etat == self.etat {
+    /// À appeler à chaque image : dit au système si on joue, si on est en
+    /// pause ou arrêté, et où on en est dans le morceau. Windows s'en sert
+    /// pour choisir entre « lecture » et « pause » quand on appuie sur la
+    /// touche ⏯, et pour sa barre de progression. Pendant la lecture, il fait
+    /// avancer la position tout seul : on ne la redonne qu'en cas d'écart.
+    pub fn etat(&mut self, etat: EtatMedia, position: Duration) {
+        let maintenant = Instant::now();
+        if etat == self.etat && !a_saute(self.position, etat, position, maintenant) {
             return;
         }
         self.etat = etat;
+        self.position = Some((position, maintenant));
         if let Some(controles) = &mut self.controles {
+            let progress = Some(MediaPosition(position));
             let lecture = match etat {
                 EtatMedia::Arrete => MediaPlayback::Stopped,
-                EtatMedia::Pause => MediaPlayback::Paused { progress: None },
-                EtatMedia::Lecture => MediaPlayback::Playing { progress: None },
+                EtatMedia::Pause => MediaPlayback::Paused { progress },
+                EtatMedia::Lecture => MediaPlayback::Playing { progress },
             };
             let _ = controles.set_playback(lecture);
         }
@@ -156,8 +178,11 @@ impl ControlesMedia {
             artist: Some(&infos.artiste),
             album: Some(&infos.album),
             cover_url: pochette.as_deref(),
-            duration: None,
+            duration: infos.duree,
         });
+        // Sous Windows, la position est redonnée avec la durée : elle repart
+        // de cet instant, on la redonne à jour à la prochaine image.
+        self.position = None;
     }
 
     fn creer(&mut self, ctx: &egui::Context, frame: &eframe::Frame) {
@@ -210,6 +235,29 @@ fn commande(touche: &MediaControlEvent, etat: EtatMedia) -> Option<Commande> {
     }
 }
 
+/// Faut-il redonner la position au système ? Oui si elle a sauté par rapport
+/// à celle qu'il calcule depuis la dernière qu'on lui a donnée (`envoi`), ou
+/// si celle-ci date pendant la lecture. Arrêté, il n'y en a pas.
+fn a_saute(
+    envoi: Option<(Duration, Instant)>,
+    etat: EtatMedia,
+    position: Duration,
+    maintenant: Instant,
+) -> bool {
+    let Some((donnee, quand)) = envoi else {
+        return etat != EtatMedia::Arrete;
+    };
+    let attendue = match etat {
+        EtatMedia::Arrete => return false,
+        EtatMedia::Pause => donnee,
+        EtatMedia::Lecture if maintenant.saturating_duration_since(quand) >= RAFRAICHISSEMENT => {
+            return true
+        }
+        EtatMedia::Lecture => donnee + maintenant.saturating_duration_since(quand),
+    };
+    position.abs_diff(attendue) > ECART_TOLERE
+}
+
 /// Lit les tags du morceau et écrit sa pochette dans `dossier`.
 fn preparer(chemin: &Path, dossier: &Path) -> Infos {
     let tags = tags::lire(chemin);
@@ -218,6 +266,7 @@ fn preparer(chemin: &Path, dossier: &Path) -> Infos {
         titre: tags.titre.unwrap_or_else(|| sans_extension(chemin)),
         artiste: tags.artiste.unwrap_or_default(),
         album: tags.album.unwrap_or_default(),
+        duree: tags.duree,
         pochette: ecrire_pochette(chemin, dossier),
     }
 }
@@ -370,6 +419,32 @@ mod tests {
         assert_eq!(commande(&MediaControlEvent::Raise, etat), None);
     }
 
+    #[test]
+    fn la_position_est_redonnee_apres_un_saut_et_regulierement() {
+        let t0 = Instant::now();
+        let s = Duration::from_secs;
+        let envoi = Some((s(10), t0));
+        // En lecture, 500 ms plus tard, on attend 10,5 s.
+        let ms = Duration::from_millis;
+        assert!(!a_saute(
+            envoi,
+            EtatMedia::Lecture,
+            ms(10_500),
+            t0 + ms(500)
+        ));
+        assert!(a_saute(envoi, EtatMedia::Lecture, s(10), t0 + ms(1600)));
+        assert!(a_saute(envoi, EtatMedia::Lecture, s(30), t0 + ms(500)));
+        // Et on la redonne régulièrement, même sans saut.
+        assert!(a_saute(envoi, EtatMedia::Lecture, s(13), t0 + s(3)));
+        // En pause, la position ne bouge plus.
+        assert!(!a_saute(envoi, EtatMedia::Pause, s(10), t0 + s(3)));
+        assert!(a_saute(envoi, EtatMedia::Pause, s(15), t0 + s(3)));
+        // Arrêté, rien à redonner ; sinon, rien de donné : à donner.
+        assert!(!a_saute(envoi, EtatMedia::Arrete, s(0), t0 + s(3)));
+        assert!(a_saute(None, EtatMedia::Pause, s(0), t0));
+        assert!(!a_saute(None, EtatMedia::Arrete, s(0), t0));
+    }
+
     #[cfg(windows)]
     #[test]
     fn adresse_de_pochette() {
@@ -412,6 +487,8 @@ mod tests {
         assert_eq!(infos.titre, "Mon morceau");
         assert_eq!(infos.artiste, "");
         assert_eq!(infos.album, "");
+        let duree = infos.duree.unwrap().as_secs_f32();
+        assert!((duree - 4.05).abs() < 0.1, "durée lue : {duree}");
         let pochette = infos.pochette.unwrap();
         assert_eq!(pochette.extension().unwrap(), "png");
         let image = image::open(&pochette).unwrap();
