@@ -1,6 +1,6 @@
 # Doll//Wave
 
-A music player for Windows with a neon cyberpunk look, written in Rust.
+A music player for Windows and Linux with a neon cyberpunk look, written in Rust.
 
 The name mixes *doll* and *synthwave*, a nod to transfem culture. The
 interface is styled like a dark HUD dashboard in cyan and magenta, and it
@@ -64,6 +64,14 @@ only comes with dark themes.
 - Double-clicking an audio file opens it in the running player.
 - Optional CRT scanlines and glowing neon effects.
 
+**Linux integration**
+
+- Media keys and the desktop media panel (MPRIS: GNOME, KDE…).
+- Tray icon with the same menu as on Windows (KDE, XFCE, Cinnamon, and
+  GNOME with the AppIndicator extension, preinstalled on Ubuntu). Closing
+  the window minimizes it; without a tray, closing quits as usual.
+- App launcher and "Open with" for MP3, FLAC, OGG and WAV (.deb package).
+
 **Keyboard shortcuts**
 
 | Key | Action |
@@ -93,6 +101,16 @@ Two files are available:
 
 Settings are stored in `%APPDATA%\dollwave`.
 
+On Linux, two more files are available:
+
+- `dollwave_<version>_amd64.deb`: for Ubuntu, Debian, Mint… Install it
+  with `sudo apt install ./dollwave_<version>_amd64.deb`. Doll//Wave then
+  shows up in the applications menu and in "Open with".
+- `Doll-Wave-<version>-x86_64.AppImage`: a single file for almost any
+  distribution. Make it executable (`chmod +x`) and run it.
+
+Settings are stored in `~/.config/dollwave`.
+
 ## Building from source
 
 Install Rust (https://rustup.rs), then in this folder:
@@ -119,15 +137,16 @@ cargo test
 The installer is built with [Inno Setup](https://jrsoftware.org/isinfo.php)
 (version 6.6 or later) from `installateur\dollwave.iss`.
 
-The player also builds on Linux (`libasound2-dev` is required). All the
-system-specific code lives in `src/systeme.rs`, to make a full Linux port
-easier later.
+On Linux, `libasound2-dev` is required to build. The `.deb` and the
+AppImage are made by `installateur/linux/fabriquer.sh` (after
+`cargo build --release`, with `cargo install cargo-deb`). All the
+system-specific code lives in `src/systeme.rs` and `src/systeme/`.
 
 ## Releases
 
-GitHub Actions builds the `.exe` and the installer for every pull request.
-Pushing a `v*` tag (for example `v0.2.0`) publishes a release with both
-files attached.
+GitHub Actions builds the `.exe`, the installer, the `.deb` and the
+AppImage for every pull request. Pushing a `v*` tag (for example `v1.1.0`)
+publishes a release with all four files attached.
 
 ## Built with
 
@@ -138,6 +157,7 @@ files attached.
 - [souvlaki](https://github.com/Sinono3/souvlaki) for media keys and the
   media panel
 - [id3](https://github.com/polyfloyd/rust-id3) for tags
+- [ksni](https://github.com/iovxw/ksni) for the Linux tray icon
 
 ## License
 

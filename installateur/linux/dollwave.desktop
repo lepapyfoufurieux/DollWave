@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Doll//Wave
+GenericName=Lecteur de musique
+Comment=Lecteur MP3 néon synthwave
+Exec=dollwave %F
+Icon=dollwave
+Terminal=false
+Categories=AudioVideo;Audio;Player;
+Keywords=musique;mp3;lecteur;audio;music;player;
+MimeType=audio/mpeg;audio/mp3;audio/x-mp3;audio/flac;audio/x-flac;audio/ogg;audio/x-vorbis+ogg;audio/vorbis;audio/wav;audio/x-wav;audio/vnd.wave;
+StartupWMClass=dollwave
